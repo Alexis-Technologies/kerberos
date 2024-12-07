@@ -1,7 +1,7 @@
-import { describe, it } from 'node:test';
-import { strict as assert } from 'node:assert';
+const { describe, it } = require('node:test');
+const { strict: assert } = require('node:assert');
 
-import { Variables } from '../src/Variables/index.js';
+const { Variables } = require('../src/Variables/index.js');
 
 const principalMock = {
   id: 'user-123',

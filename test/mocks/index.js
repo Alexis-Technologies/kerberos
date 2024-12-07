@@ -1,5 +1,7 @@
-export * from './derrived_roles/common_roles.js';
-export * from './testdata/principals.js';
-export * from './testdata/resources.js';
-export * from './expense_policy.js';
-export * from './expense_test.js';
+module.exports = {
+  ...require('./derrived_roles/common_roles.js'),
+  ...require('./testdata/principals.js'),
+  ...require('./testdata/resources.js'),
+  ...require('./expense_policy.js'),
+  ...require('./expense_test.js'),
+};

@@ -1,9 +1,9 @@
-import { describe, it } from 'node:test';
-import { strict as assert } from 'node:assert';
+const { describe, it } = require('node:test');
+const { strict: assert } = require('node:assert');
 
-import { commonRolesPolicy, principalsPolicy, resourcesPolicy } from './mocks/index.js';
+const { commonRolesPolicy, principalsPolicy, resourcesPolicy } = require('./mocks/index.js');
 
-import { DerivedRoles } from '../src/index.js';
+const { DerivedRoles } = require('../src/index.js');
 
 describe('DerivedRoles', () => {
   it('should parse schema', () => {

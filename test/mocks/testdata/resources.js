@@ -1,4 +1,4 @@
-export const resourcesPolicy = {
+const resourcesPolicy = {
   expense1: {
     id: 'expense1',
     kind: 'expense',
@@ -62,3 +62,5 @@ export const resourcesPolicy = {
     },
   },
 };
+
+module.exports = { resourcesPolicy };

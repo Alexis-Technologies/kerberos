@@ -1,8 +1,8 @@
-import { z } from 'zod';
+const { z } = require('zod');
 
-import { Kerberos } from '../Kerberos.js';
-import { KerberosTest, KerberosTestSchema } from './KerberosTest.js';
-import { ResourcesMock, ResourceMockSchema, PrincipalsMock, PrincipalMockSchema } from './Mocks/index.js';
+const { Kerberos } = require('../Kerberos.js');
+const { KerberosTest, KerberosTestSchema } = require('./KerberosTest.js');
+const { ResourcesMock, ResourceMockSchema, PrincipalsMock, PrincipalMockSchema } = require('./Mocks');
 
 const TestsPolicySchema = z
   .object({
@@ -14,7 +14,7 @@ const TestsPolicySchema = z
   .strict();
 const TestsPoliciesSchema = z.array(TestsPolicySchema).nonempty();
 
-export class KerberosTests {
+class KerberosTests {
   static parseTests(tests) {
     return tests.map((test) => (test instanceof KerberosTest ? test : new KerberosTest(test)));
   }
@@ -48,10 +48,12 @@ export class KerberosTests {
               resources: [this.resources],
               effectAsBoolean,
             },
-            { describe, it, assert }
+            { describe, it, assert },
           );
         }
       });
     }
   }
 }
+
+module.exports = { KerberosTests };

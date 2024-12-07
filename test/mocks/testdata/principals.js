@@ -1,4 +1,4 @@
-export const principalsPolicy = {
+const principalsPolicy = {
   sally: {
     id: 'sally',
     roles: ['USER'],
@@ -55,3 +55,5 @@ export const principalsPolicy = {
     },
   },
 };
+
+module.exports = { principalsPolicy };

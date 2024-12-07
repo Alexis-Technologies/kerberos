@@ -1,10 +1,10 @@
-import { z } from 'zod';
+const { z } = require('zod');
 
-import { ConditionSchemaSchema, ConditionsInstanceSchema } from '../Conditions/index.js';
-import { VariablesSchemaSchema, VariablesInstanceSchema } from '../Variables/index.js';
-import { ConstantsInstanceSchema, ConstantsSchemaSchema } from '../Constants/index.js';
+const { ConditionSchemaSchema, ConditionsInstanceSchema } = require('../Conditions');
+const { VariablesSchemaSchema, VariablesInstanceSchema } = require('../Variables');
+const { ConstantsInstanceSchema, ConstantsSchemaSchema } = require('../Constants');
 
-export const DerivedRolesDefinitionSchemaSchema = z
+const DerivedRolesDefinitionSchemaSchema = z
   .object({
     name: z.string(),
     parentRoles: z.array(z.string()).nonempty(),
@@ -12,7 +12,7 @@ export const DerivedRolesDefinitionSchemaSchema = z
   })
   .strict();
 
-export const DerivedRolesSchemaSchema = z
+const DerivedRolesSchemaSchema = z
   .object({
     name: z.string(),
     description: z.string().optional(),
@@ -21,3 +21,8 @@ export const DerivedRolesSchemaSchema = z
     definitions: z.array(DerivedRolesDefinitionSchemaSchema).nonempty(),
   })
   .strict();
+
+module.exports = {
+  DerivedRolesDefinitionSchemaSchema,
+  DerivedRolesSchemaSchema,
+};

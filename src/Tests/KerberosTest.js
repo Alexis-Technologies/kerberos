@@ -1,8 +1,8 @@
-import { z } from 'zod';
+const { z } = require('zod');
 
-import { ResourceMock, ResourcesMock, PrincipalMock, PrincipalsMock } from './Mocks/index.js';
-import { Effect } from '../schemas.js';
-import { Kerberos } from '../Kerberos.js';
+const { ResourceMock, ResourcesMock, PrincipalMock, PrincipalsMock } = require('./Mocks/index.js');
+const { Effect } = require('../schemas.js');
+const { Kerberos } = require('../Kerberos.js');
 
 const KerberosTestInputSchema = z
   .object({
@@ -23,7 +23,7 @@ const KerberosTestExpectedItemSchema = z
   })
   .strict();
 
-export const KerberosTestSchema = z
+const KerberosTestSchema = z
   .object({
     name: z.string(),
     input: KerberosTestInputSchema,
@@ -46,7 +46,7 @@ export const KerberosTestSchema = z
     }
   });
 
-export class KerberosTest {
+class KerberosTest {
   constructor(schema, kerberos) {
     this.schema = KerberosTestSchema.parse(schema);
     if (kerberos && !(kerberos instanceof Kerberos)) throw new Error('Invalid Kerberos instance!');
@@ -171,3 +171,8 @@ export class KerberosTest {
     });
   }
 }
+
+module.exports = {
+  KerberosTest,
+  KerberosTestSchema,
+};

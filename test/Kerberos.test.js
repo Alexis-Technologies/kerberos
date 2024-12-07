@@ -1,9 +1,9 @@
-import { describe, it } from 'node:test';
-import { strict as assert } from 'node:assert';
+const { describe, it } = require('node:test');
+const { strict: assert } = require('node:assert');
 
-import { commonRolesPolicy, principalsPolicy, resourcesPolicy, expensePolicy } from './mocks/index.js';
+const { commonRolesPolicy, principalsPolicy, resourcesPolicy, expensePolicy } = require('./mocks/index.js');
 
-import { Effect, Kerberos } from '../src/index.js';
+const { Effect, Kerberos } = require('../src/index.js');
 
 describe('Kerberos', () => {
   const kerberos = new Kerberos([expensePolicy], [commonRolesPolicy], { logger: true });

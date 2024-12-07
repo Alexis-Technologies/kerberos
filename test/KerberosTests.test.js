@@ -1,10 +1,10 @@
-import { describe, it } from 'node:test';
-import { strict as assert } from 'node:assert';
+const { describe, it } = require('node:test');
+const { strict: assert } = require('node:assert');
 
-import { expenseTestPolicy, expensePolicy, commonRolesPolicy } from './mocks/index.js';
+const { expenseTestPolicy, expensePolicy, commonRolesPolicy } = require('./mocks/index.js');
 
-import { KerberosTests } from '../src/Tests/index.js';
-import { Kerberos } from '../src/index.js';
+const { KerberosTests } = require('../src/Tests/index.js');
+const { Kerberos } = require('../src/index.js');
 
 describe('KerberosTests', () => {
   describe('Expense Policy (raw mode)', () => {

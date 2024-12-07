@@ -1,2 +1,4 @@
-export * from './ResourcePolicy.js';
-export * from './schemas.js';
+module.exports = {
+  ...require('./ResourcePolicy.js'),
+  ...require('./schemas.js'),
+};

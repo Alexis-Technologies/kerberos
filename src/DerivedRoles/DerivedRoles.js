@@ -1,10 +1,10 @@
-import { DerivedRolesSchemaSchema } from './schemas.js';
+const { DerivedRolesSchemaSchema } = require('./schemas.js');
 
-import { Variables } from '../Variables/index.js';
-import { Conditions } from '../Conditions/index.js';
-import { Constants } from '../Constants/index.js';
+const { Variables } = require('../Variables');
+const { Conditions } = require('../Conditions');
+const { Constants } = require('../Constants');
 
-export class DerivedRoles {
+class DerivedRoles {
   static parseConstants(constants) {
     return constants instanceof Constants ? constants : new Constants(constants);
   }
@@ -60,3 +60,5 @@ export class DerivedRoles {
     return def.condition.isFulfilled(req);
   }
 }
+
+module.exports = { DerivedRoles };

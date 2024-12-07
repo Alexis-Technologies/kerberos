@@ -1,9 +1,9 @@
-import { describe, it } from 'node:test';
-import { strict as assert } from 'node:assert';
+const { describe, it } = require('node:test');
+const { strict: assert } = require('node:assert');
 
-import { commonRolesPolicy, principalsPolicy, resourcesPolicy, expensePolicy } from './mocks/index.js';
+const { commonRolesPolicy, principalsPolicy, resourcesPolicy, expensePolicy } = require('./mocks/index.js');
 
-import { DerivedRoles, Effect, ResourcePolicy } from '../src/index.js';
+const { DerivedRoles, Effect, ResourcePolicy } = require('../src/index.js');
 
 describe('ResourcePolicy', () => {
   const resourcePolicy = new ResourcePolicy(expensePolicy);

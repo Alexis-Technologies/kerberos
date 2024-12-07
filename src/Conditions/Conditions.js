@@ -1,8 +1,8 @@
-import { z } from 'zod';
+const { z } = require('zod');
 
-import { ConditionSchemaSchema } from './schemas.js';
+const { ConditionSchemaSchema } = require('./schemas');
 
-export class Conditions {
+class Conditions {
   strategies = {
     any: (conds, req) => conds.some((cond) => this.evaluateCondition(cond, req)),
     all: (conds, req) => conds.every((cond) => this.evaluateCondition(cond, req)),
@@ -35,4 +35,6 @@ export class Conditions {
   }
 }
 
-export const ConditionsInstanceSchema = z.instanceof(Conditions);
+const ConditionsInstanceSchema = z.instanceof(Conditions);
+
+module.exports = { Conditions, ConditionsInstanceSchema };

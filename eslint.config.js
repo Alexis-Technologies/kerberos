@@ -1,4 +1,5 @@
-import neostandard, { resolveIgnoresFromGitignore } from 'neostandard';
+const neostandard = require('neostandard');
+const { resolveIgnoresFromGitignore } = require('neostandard');
 
 const config = neostandard({
   env: ['builtin', 'nodeBuiltin', 'node'],
@@ -14,4 +15,4 @@ config[config.length - 1].rules = {
   '@stylistic/quotes': ['error', 'single', { allowTemplateLiterals: true }],
 };
 
-export default config;
+module.exports = config;

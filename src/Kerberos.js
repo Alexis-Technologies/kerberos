@@ -1,8 +1,8 @@
-import { z } from 'zod';
+const { z } = require('zod');
 
-import { ResourcePolicy } from './ResourcePolicy/index.js';
-import { DerivedRoles } from './DerivedRoles/index.js';
-import { RequestSchema, RequestPrincipalSchema, RequestResourceSchema, Effect } from './schemas.js';
+const { ResourcePolicy } = require('./ResourcePolicy/index.js');
+const { DerivedRoles } = require('./DerivedRoles/index.js');
+const { RequestSchema, RequestPrincipalSchema, RequestResourceSchema, Effect } = require('./schemas.js');
 
 const ResourcePolicyInstanceSchema = z.instanceof(ResourcePolicy);
 const DerivedRolesInstanceSchema = z.instanceof(DerivedRoles);
@@ -34,7 +34,7 @@ const CheckResourcesResponseSchema = z.object({
 });
 
 // TODO: 1) outputs, 2) scopes, 3) metadata
-export class Kerberos {
+class Kerberos {
   static parsePolicy(policy) {
     return policy instanceof ResourcePolicy ? ResourcePolicyInstanceSchema.parse(policy) : new ResourcePolicy(policy);
   }
@@ -169,3 +169,5 @@ export class Kerberos {
     }).parse({ results });
   }
 }
+
+module.exports = { Kerberos };

@@ -1,9 +1,14 @@
-import { z } from 'zod';
-import { RequestSchema } from '../schemas.js';
+const { z } = require('zod');
+const { RequestSchema } = require('../schemas.js');
 
-export const ConstantsSchemaSchema = z.record(z.string(), z.unknown());
+const ConstantsSchemaSchema = z.record(z.string(), z.unknown());
 
-export const RequestWithConstantsSchema = RequestSchema.extend({
+const RequestWithConstantsSchema = RequestSchema.extend({
   constants: ConstantsSchemaSchema.optional(),
   C: ConstantsSchemaSchema.optional(),
 });
+
+module.exports = {
+  ConstantsSchemaSchema,
+  RequestWithConstantsSchema,
+};

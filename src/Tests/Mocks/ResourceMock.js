@@ -1,10 +1,10 @@
-import { z } from 'zod';
+const { z } = require('zod');
 
-import { RequestResourceSchema } from '../../schemas.js';
+const { RequestResourceSchema } = require('../../schemas.js');
 
-export const ResourceMockSchema = RequestResourceSchema.extend({ name: z.string() });
+const ResourceMockSchema = RequestResourceSchema.extend({ name: z.string() });
 
-export class ResourceMock {
+class ResourceMock {
   constructor(schema) {
     this.schema = ResourceMockSchema.parse(schema);
   }
@@ -25,3 +25,5 @@ export class ResourceMock {
     return this.schema.attr;
   }
 }
+
+module.exports = { ResourceMock, ResourceMockSchema };

@@ -1,8 +1,8 @@
-import { z } from 'zod';
+const { z } = require('zod');
 
-import { VariablesSchemaSchema } from './schemas.js';
+const { VariablesSchemaSchema } = require('./schemas.js');
 
-export class Variables {
+class Variables {
   constructor(schema) {
     this.schema = VariablesSchemaSchema.parse(schema);
   }
@@ -12,4 +12,6 @@ export class Variables {
   }
 }
 
-export const VariablesInstanceSchema = z.instanceof(Variables);
+const VariablesInstanceSchema = z.instanceof(Variables);
+
+module.exports = { Variables, VariablesInstanceSchema };

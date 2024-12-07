@@ -1,7 +1,7 @@
-import { describe, it } from 'node:test';
-import { strict as assert } from 'node:assert';
+const { describe, it } = require('node:test');
+const assert = require('node:assert').strict;
 
-import { Constants } from '../src/Constants/index.js';
+const { Constants } = require('../src/Constants');
 
 const principalMock = {
   id: 'user-123',

@@ -1,11 +1,11 @@
-import { z } from 'zod';
+const { z } = require('zod');
 
-import { VariablesSchemaSchema, VariablesInstanceSchema } from '../Variables/index.js';
-import { ConditionSchemaSchema, ConditionsInstanceSchema } from '../Conditions/index.js';
-import { ConstantsSchemaSchema, ConstantsInstanceSchema } from '../Constants/index.js';
-import { ALL_ACTIONS, Effect } from '../schemas.js';
+const { VariablesSchemaSchema, VariablesInstanceSchema } = require('../Variables');
+const { ConditionSchemaSchema, ConditionsInstanceSchema } = require('../Conditions');
+const { ConstantsSchemaSchema, ConstantsInstanceSchema } = require('../Constants');
+const { ALL_ACTIONS, Effect } = require('../schemas.js');
 
-export const RuleSchema = z
+const RuleSchema = z
   .object({
     actions: z.array(z.string()).nonempty(),
     effect: z.nativeEnum(Effect),
@@ -27,7 +27,7 @@ export const RuleSchema = z
     return true;
   });
 
-export const ResourcePolicySchemaSchema = z
+const ResourcePolicySchemaSchema = z
   .object({
     version: z.string(),
     resource: z.string(),
@@ -38,8 +38,14 @@ export const ResourcePolicySchemaSchema = z
   })
   .strict();
 
-export const ResourcePolicyRootSchemaSchema = z
+const ResourcePolicyRootSchemaSchema = z
   .object({
     resourcePolicy: ResourcePolicySchemaSchema,
   })
   .strict();
+
+module.exports = {
+  RuleSchema,
+  ResourcePolicySchemaSchema,
+  ResourcePolicyRootSchemaSchema,
+};

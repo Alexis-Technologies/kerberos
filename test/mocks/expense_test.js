@@ -1,8 +1,8 @@
-import { PrincipalsMock, ResourcesMock } from '../../src/Tests/index.js';
-import { principalsPolicy } from './testdata/principals.js';
-import { resourcesPolicy } from './testdata/resources.js';
+const { PrincipalsMock, ResourcesMock } = require('../../src/Tests');
+const { principalsPolicy } = require('./testdata/principals.js');
+const { resourcesPolicy } = require('./testdata/resources.js');
 
-export const expenseTestPolicy = {
+const expenseTestPolicy = {
   name: 'Expenses test suite',
   principals: new PrincipalsMock(principalsPolicy),
   resources: new ResourcesMock(resourcesPolicy),
@@ -345,3 +345,5 @@ export const expenseTestPolicy = {
     },
   ]
 };
+
+module.exports = { expenseTestPolicy };

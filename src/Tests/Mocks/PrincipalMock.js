@@ -1,10 +1,10 @@
-import { z } from 'zod';
+const { z } = require('zod');
 
-import { RequestPrincipalSchema } from '../../schemas.js';
+const RequestPrincipalSchema = require('../../schemas.js').RequestPrincipalSchema;
 
-export const PrincipalMockSchema = RequestPrincipalSchema.extend({ name: z.string() });
+const PrincipalMockSchema = RequestPrincipalSchema.extend({ name: z.string() });
 
-export class PrincipalMock {
+class PrincipalMock {
   constructor(schema) {
     this.schema = PrincipalMockSchema.parse(schema);
   }
@@ -25,3 +25,8 @@ export class PrincipalMock {
     return this.schema.attr;
   }
 }
+
+module.exports = {
+  PrincipalMock,
+  PrincipalMockSchema,
+};

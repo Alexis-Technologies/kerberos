@@ -1,10 +1,10 @@
-import { z } from 'zod';
+const { z } = require('zod');
 
-import { PrincipalMock, PrincipalMockSchema } from './PrincipalMock.js';
+const { PrincipalMock, PrincipalMockSchema } = require('./PrincipalMock.js');
 
-export const PrincipalsMockSchema = z.union([z.array(z.instanceof(PrincipalMock)).nonempty(), z.record(PrincipalMockSchema.shape.name, PrincipalMockSchema.omit({ name: true }))]);
+const PrincipalsMockSchema = z.union([z.array(z.instanceof(PrincipalMock)).nonempty(), z.record(PrincipalMockSchema.shape.name, PrincipalMockSchema.omit({ name: true }))]);
 
-export class PrincipalsMock {
+class PrincipalsMock {
   constructor(principals) {
     const parsedPrincipals = PrincipalsMockSchema.parse(principals);
     this.principals = new Map();
@@ -26,3 +26,5 @@ export class PrincipalsMock {
     return this.principals.get(name);
   }
 }
+
+module.exports = { PrincipalsMockSchema, PrincipalsMock };

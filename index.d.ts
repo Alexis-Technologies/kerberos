@@ -199,6 +199,6 @@ export namespace Tests {
   export class KerberosTests {
     constructor(kerberos: Kerberos, policies: [TestsPolicySchema, ...TestsPolicySchema[]]);
 
-    run({ describe, it, assert }: { describe: Describe; it: It; assert: Assert }): void;
+    run({ effectAsBoolean }: { effectAsBoolean?: boolean }, { describe, it, assert }: { describe: Describe; it: It; assert: Assert }): void;
   }
 }

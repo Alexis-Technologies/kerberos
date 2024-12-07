@@ -1,2 +1,4 @@
-export * from './schemas.js';
-export * from './Constants.js';
+module.exports = {
+  ...require('./schemas.js'),
+  ...require('./Constants.js'),
+};

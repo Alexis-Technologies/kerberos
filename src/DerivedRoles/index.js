@@ -1,2 +1,4 @@
-export * from './DerivedRoles.js';
-export * from './schemas.js';
+module.exports = {
+  ...require('./DerivedRoles.js'),
+  ...require('./schemas.js'),
+};

@@ -1,8 +1,8 @@
-import { z } from 'zod';
+const { z } = require('zod');
 
-import { ConstantsSchemaSchema } from './schemas.js';
+const { ConstantsSchemaSchema } = require('./schemas.js');
 
-export class Constants {
+class Constants {
   constructor(schema) {
     this.schema = ConstantsSchemaSchema.parse(schema);
   }
@@ -12,4 +12,9 @@ export class Constants {
   }
 }
 
-export const ConstantsInstanceSchema = z.instanceof(Constants);
+const ConstantsInstanceSchema = z.instanceof(Constants);
+
+module.exports = {
+  Constants,
+  ConstantsInstanceSchema,
+};

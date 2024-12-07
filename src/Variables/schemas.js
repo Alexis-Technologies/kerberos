@@ -1,13 +1,19 @@
-import { z } from 'zod';
+const { z } = require('zod');
 
-import { RequestSchema } from '../schemas.js';
-import { RequestWithConstantsSchema } from '../Constants/index.js';
+const { RequestSchema } = require('../schemas.js');
+const { RequestWithConstantsSchema } = require('../Constants');
 
-export const VariablesReturnTypeSchema = z.unknown();
+const VariablesReturnTypeSchema = z.unknown();
 
-export const VariablesSchemaSchema = z.record(z.string(), z.function().args(RequestWithConstantsSchema).returns(VariablesReturnTypeSchema));
+const VariablesSchemaSchema = z.record(z.string(), z.function().args(RequestWithConstantsSchema).returns(VariablesReturnTypeSchema));
 
-export const RequestWithVariablesSchema = RequestSchema.extend({
+const RequestWithVariablesSchema = RequestSchema.extend({
   variables: z.record(z.string(), VariablesReturnTypeSchema).optional(),
   V: z.record(z.string(), VariablesReturnTypeSchema).optional(),
 });
+
+module.exports = {
+  VariablesSchemaSchema,
+  RequestWithVariablesSchema,
+  VariablesReturnTypeSchema,
+};

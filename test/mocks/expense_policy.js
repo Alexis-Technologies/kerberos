@@ -1,6 +1,6 @@
-import { Effect } from '../../src/index.js';
+const { Effect } = require('../../src');
 
-export const expensePolicy = {
+const expensePolicy = {
   resourcePolicy: {
     version: 'default',
     // Importing `common_roles` so they can be used in the resource policy.
@@ -114,3 +114,5 @@ export const expensePolicy = {
     ],
   },
 };
+
+module.exports = { expensePolicy };

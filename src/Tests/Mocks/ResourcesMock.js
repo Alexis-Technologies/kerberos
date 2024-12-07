@@ -1,10 +1,10 @@
-import { z } from 'zod';
+const { z } = require('zod');
 
-import { ResourceMock, ResourceMockSchema } from './ResourceMock.js';
+const { ResourceMock, ResourceMockSchema } = require('./ResourceMock.js');
 
-export const ResourcesMockSchema = z.union([z.array(z.instanceof(ResourceMock)).nonempty(), z.record(ResourceMockSchema.shape.name, ResourceMockSchema.omit({ name: true }))]);
+const ResourcesMockSchema = z.union([z.array(z.instanceof(ResourceMock)).nonempty(), z.record(ResourceMockSchema.shape.name, ResourceMockSchema.omit({ name: true }))]);
 
-export class ResourcesMock {
+class ResourcesMock {
   constructor(resources) {
     const parsedResources = ResourcesMockSchema.parse(resources);
     this.resources = new Map();
@@ -30,3 +30,5 @@ export class ResourcesMock {
     return [...this.resources.values()].find((r) => r.id === id);
   }
 }
+
+module.exports = { ResourcesMock, ResourcesMockSchema };

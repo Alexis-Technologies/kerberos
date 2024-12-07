@@ -1,2 +1,4 @@
-export * from './Conditions.js';
-export * from './schemas.js';
+module.exports = {
+  ...require('./Conditions.js'),
+  ...require('./schemas.js'),
+};

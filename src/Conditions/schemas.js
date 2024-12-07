@@ -1,13 +1,13 @@
-import { z } from 'zod';
+const { z } = require('zod');
 
-import { RequestWithVariablesSchema } from '../Variables/index.js';
-import { RequestWithConstantsSchema } from '../Constants/index.js';
+const { RequestWithVariablesSchema } = require('../Variables');
+const { RequestWithConstantsSchema } = require('../Constants');
 
 const RequestSchema = RequestWithConstantsSchema.merge(RequestWithVariablesSchema);
 
-export const ConditionSingleMatchExprSchema = z.function().args(RequestSchema).returns(z.boolean());
+const ConditionSingleMatchExprSchema = z.function().args(RequestSchema).returns(z.boolean());
 
-export const ConditionMatchSchema = z.lazy(() =>
+const ConditionMatchSchema = z.lazy(() =>
   z.union([
     ConditionSingleMatchExprSchema,
     z.object({
@@ -22,4 +22,10 @@ export const ConditionMatchSchema = z.lazy(() =>
   ])
 );
 
-export const ConditionSchemaSchema = z.object({ match: ConditionMatchSchema }).strict();
+const ConditionSchemaSchema = z.object({ match: ConditionMatchSchema }).strict();
+
+module.exports = {
+  ConditionSingleMatchExprSchema,
+  ConditionMatchSchema,
+  ConditionSchemaSchema,
+};

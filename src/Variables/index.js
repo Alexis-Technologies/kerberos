@@ -1,2 +1,4 @@
-export * from './schemas.js';
-export * from './Variables.js';
+module.exports = {
+  ...require('./schemas.js'),
+  ...require('./Variables.js'),
+};

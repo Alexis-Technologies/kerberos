@@ -3,7 +3,6 @@
   "version": "0.0.1",
   "description": "Fast and low overhead authorization framework for JavaScript runtime",
   "main": "index.js",
-  "type": "module",
   "types": "index.d.ts",
   "directories": {
     "test": "test"

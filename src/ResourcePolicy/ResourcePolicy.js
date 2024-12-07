@@ -1,11 +1,11 @@
-import { ResourcePolicyRootSchemaSchema } from './schemas.js';
+const { ResourcePolicyRootSchemaSchema } = require('./schemas.js');
 
-import { ALL_ACTIONS, Effect } from '../schemas.js';
-import { Variables } from '../Variables/index.js';
-import { Conditions } from '../Conditions/index.js';
-import { Constants } from '../Constants/index.js';
+const { ALL_ACTIONS, Effect } = require('../schemas.js');
+const { Variables } = require('../Variables');
+const { Conditions } = require('../Conditions');
+const { Constants } = require('../Constants');
 
-export class ResourcePolicy {
+class ResourcePolicy {
   static parseConstants(constants) {
     return constants instanceof Constants ? constants : new Constants(constants);
   }
@@ -104,3 +104,5 @@ export class ResourcePolicy {
     return this.buildEffects(this.populateVariables(this.populateConstants(req)), derivedRoles);
   }
 }
+
+module.exports = { ResourcePolicy };

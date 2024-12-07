@@ -1,4 +1,6 @@
-export * from './PrincipalMock.js';
-export * from './PrincipalsMock.js';
-export * from './ResourceMock.js';
-export * from './ResourcesMock.js';
+module.exports = {
+  ...require('./PrincipalMock.js'),
+  ...require('./PrincipalsMock.js'),
+  ...require('./ResourceMock.js'),
+  ...require('./ResourcesMock.js'),
+};
