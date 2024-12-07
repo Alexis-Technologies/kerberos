@@ -1,4 +1,5 @@
-import { describe } from 'node:test';
+import { describe, it } from 'node:test';
+import { strict as assert } from 'node:assert';
 
 import { expenseTestPolicy, expensePolicy, commonRolesPolicy } from './mocks/index.js';
 
@@ -10,6 +11,6 @@ describe('KerberosTests', () => {
     const kerberos = new Kerberos([expensePolicy], [commonRolesPolicy], { logger: true });
     const tests = new KerberosTests(kerberos, [expenseTestPolicy]);
 
-    tests.run();
+    tests.run({}, { describe, it, assert });
   });
 });

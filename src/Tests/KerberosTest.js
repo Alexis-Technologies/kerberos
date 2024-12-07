@@ -1,8 +1,5 @@
 import { z } from 'zod';
 
-import { describe, it } from 'node:test';
-import { strict as assert } from 'node:assert';
-
 import { ResourceMock, ResourcesMock, PrincipalMock, PrincipalsMock } from './Mocks/index.js';
 import { Effect } from '../schemas.js';
 import { Kerberos } from '../Kerberos.js';
@@ -58,7 +55,7 @@ export class KerberosTest {
     this.resources = this.schema.input.resources instanceof ResourcesMock ? [this.schema.input.resources] : [];
   }
 
-  run({ kerberos, principals, resources, effectAsBoolean = false }) {
+  run({ kerberos, principals, resources, effectAsBoolean = false }, { describe, it, assert }) {
     describe(this.schema.name, () => {
       if (kerberos && !(kerberos instanceof Kerberos)) throw new Error('Invalid Kerberos instance!');
       if (principals && principals?.some((p) => !(p instanceof PrincipalsMock))) {

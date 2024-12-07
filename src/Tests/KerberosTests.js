@@ -1,7 +1,5 @@
 import { z } from 'zod';
 
-import { describe } from 'node:test';
-
 import { Kerberos } from '../Kerberos.js';
 import { KerberosTest, KerberosTestSchema } from './KerberosTest.js';
 import { ResourcesMock, ResourceMockSchema, PrincipalsMock, PrincipalMockSchema } from './Mocks/index.js';
@@ -39,15 +37,19 @@ export class KerberosTests {
     this.resources = new ResourcesMock(policies.flatMap((policy) => KerberosTests.parseResources(policy.resources)));
   }
 
-  run() {
+  run({ effectAsBoolean = false }, { describe, it, assert }) {
     for (const policy of this.policies) {
       describe(policy.name, () => {
         for (const test of this.tests) {
-          test.run({
-            kerberos: this.kerberos,
-            principals: [this.principals],
-            resources: [this.resources],
-          });
+          test.run(
+            {
+              kerberos: this.kerberos,
+              principals: [this.principals],
+              resources: [this.resources],
+              effectAsBoolean,
+            },
+            { describe, it, assert }
+          );
         }
       });
     }

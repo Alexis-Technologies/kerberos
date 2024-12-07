@@ -114,3 +114,91 @@ export class Kerberos {
     results: { resource: Pick<RequestResource, 'id' | 'kind'>; actions: Record<string, typeof effectAsBoolean extends true ? boolean : Effect> }[];
   };
 }
+
+export namespace Tests {
+  type PrincipalMockSchema = RequestPrincipal & { name: string };
+  export class PrincipalMock {
+    constructor(schema: PrincipalMockSchema);
+
+    get id(): string;
+
+    get name(): string;
+
+    get roles(): string[];
+
+    get attr(): Record<string, unknown>;
+  }
+
+  export class PrincipalsMock {
+    constructor(schemas: [PrincipalMock, ...PrincipalMock[]] | Record<string, Omit<PrincipalMockSchema, 'name'>>);
+
+    get mocks(): PrincipalMock[];
+
+    get(name: string): PrincipalMock | undefined;
+  }
+
+  export type ResourceMockSchema = RequestResource & { name: string };
+  export class ResourceMock {
+    constructor(schema: ResourceMockSchema);
+
+    get id(): string;
+
+    get name(): string;
+
+    get kind(): string;
+
+    get attr(): Record<string, unknown>;
+  }
+
+  export class ResourcesMock {
+    constructor(schemas: [ResourceMock, ...ResourceMock[]] | Record<string, Omit<ResourceMockSchema, 'name'>>);
+
+    get mocks(): ResourceMock[];
+
+    get(name: string): ResourceMock | undefined;
+
+    getById(id: string): ResourceMock | undefined;
+  }
+
+  type Describe = (name: string, fn: () => void) => void;
+  type It = (name: string, fn: () => void) => void;
+  type Assert = {
+    ok(value: unknown, message?: string): void;
+    strictEqual(actual: unknown, expected: unknown, message?: string): void;
+  };
+  type KerberosTestInputSchema = {
+    principals: PrincipalsMock | [string, ...string[]];
+    resources: ResourcesMock | [string, ...string[]];
+    actions: [string, ...string[]];
+  };
+  type KerberosTestExpectedItemSchema = {
+    principal: PrincipalMock | string;
+    resource: ResourceMock | string;
+    actions: Record<string, Effect | boolean>;
+  };
+  export type KerberosTestSchema = {
+    name: string;
+    input: KerberosTestInputSchema;
+    expected: [KerberosTestExpectedItemSchema, ...KerberosTestExpectedItemSchema[]];
+  };
+  export class KerberosTest {
+    constructor(schema: KerberosTestSchema, kerberos?: Kerberos);
+
+    run(
+      { kerberos, principals, resources, effectAsBoolean }: { kerberos: Kerberos; principals: PrincipalsMock[]; resources: ResourcesMock[]; effectAsBoolean?: boolean },
+      { describe, it, assert }: { describe: Describe; it: It; assert: Assert },
+    ): void;
+  }
+
+  type TestsPolicySchema = {
+    name: string;
+    principals: PrincipalsMock | [PrincipalMockSchema, ...PrincipalMockSchema[]];
+    resources: ResourcesMock | [ResourceMockSchema, ...ResourceMockSchema[]];
+    tests: KerberosTest[] | KerberosTestSchema[];
+  };
+  export class KerberosTests {
+    constructor(kerberos: Kerberos, policies: [TestsPolicySchema, ...TestsPolicySchema[]]);
+
+    run({ describe, it, assert }: { describe: Describe; it: It; assert: Assert }): void;
+  }
+}
