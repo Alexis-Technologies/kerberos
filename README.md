@@ -1,2 +1,2 @@
-# kerberos
+# Kerberos.js
 Kerberos
