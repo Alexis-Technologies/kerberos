@@ -2,13 +2,13 @@ const { z } = require('zod');
 
 const { Kerberos } = require('../Kerberos.js');
 const { KerberosTest, KerberosTestSchema } = require('./KerberosTest.js');
-const { ResourcesMock, ResourceMockSchema, PrincipalsMock, PrincipalMockSchema } = require('./Mocks');
+const { ResourcesMock, ResourcesMockSchema, PrincipalsMock, PrincipalsMockSchema } = require('./Mocks');
 
 const TestsPolicySchema = z
   .object({
     name: z.string(),
-    principals: z.union([z.instanceof(PrincipalsMock), z.array(PrincipalMockSchema).nonempty()]),
-    resources: z.union([z.instanceof(ResourcesMock), z.array(ResourceMockSchema).nonempty()]),
+    principals: z.union([z.instanceof(PrincipalsMock), PrincipalsMockSchema]),
+    resources: z.union([z.instanceof(ResourcesMock), ResourcesMockSchema]),
     tests: z.array(z.union([z.instanceof(KerberosTest), KerberosTestSchema])).nonempty(),
   })
   .strict();

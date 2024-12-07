@@ -3,13 +3,13 @@ const { z } = require('zod');
 const RequestPrincipalSchema = z.object({
   id: z.string(),
   roles: z.array(z.string()).nonempty(),
-  attr: z.record(z.string(), z.unknown()),
+  attr: z.record(z.string(), z.unknown()).optional(),
 });
 
 const RequestResourceSchema = z.object({
   id: z.string(),
   kind: z.string(),
-  attr: z.record(z.string(), z.unknown()),
+  attr: z.record(z.string(), z.unknown()).optional(),
 });
 
 const RequestSchema = z.object({

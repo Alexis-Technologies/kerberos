@@ -1,14 +1,13 @@
 export type RequestPrincipal = {
   id: string;
   roles: string[];
-  attr: Record<string, unknown>;
+  attr?: Record<string, unknown>;
 };
 
 export type RequestResource = {
-  name: string;
   id: string;
   kind: string;
-  attr: Record<string, unknown>;
+  attr?: Record<string, unknown>;
 };
 
 export type BaseRequest = {
@@ -103,7 +102,7 @@ type KerberosOptions = {
   logger?: Partial<Console> | boolean;
 };
 export class Kerberos {
-  constructor(policies: [KerberosPolicy, ...KerberosPolicy[]], derivedRoles: [KerberosDerivedRoles, ...KerberosDerivedRoles[]], options?: KerberosOptions);
+  constructor(policies: KerberosPolicy[], derivedRoles: KerberosDerivedRoles[], options?: KerberosOptions);
 
   isAllowed(args: { principal: RequestPrincipal; resource: RequestResource; action: string }): boolean;
 
@@ -126,11 +125,12 @@ export namespace Tests {
 
     get roles(): string[];
 
-    get attr(): Record<string, unknown>;
+    get attr(): Record<string, unknown> | undefined;
   }
 
+  export type PrincipalsMockSchema = [PrincipalMock, ...PrincipalMock[]] | Record<string, Omit<PrincipalMockSchema, 'name'>>;
   export class PrincipalsMock {
-    constructor(schemas: [PrincipalMock, ...PrincipalMock[]] | Record<string, Omit<PrincipalMockSchema, 'name'>>);
+    constructor(schemas: PrincipalsMockSchema);
 
     get mocks(): PrincipalMock[];
 
@@ -147,11 +147,12 @@ export namespace Tests {
 
     get kind(): string;
 
-    get attr(): Record<string, unknown>;
+    get attr(): Record<string, unknown> | undefined;
   }
 
+  export type ResourcesMockSchema = [ResourceMock, ...ResourceMock[]] | Record<string, Omit<ResourceMockSchema, 'name'>>;
   export class ResourcesMock {
-    constructor(schemas: [ResourceMock, ...ResourceMock[]] | Record<string, Omit<ResourceMockSchema, 'name'>>);
+    constructor(schemas: ResourcesMockSchema);
 
     get mocks(): ResourceMock[];
 
@@ -167,19 +168,19 @@ export namespace Tests {
     strictEqual(actual: unknown, expected: unknown, message?: string): void;
   };
   type KerberosTestInputSchema = {
-    principals: PrincipalsMock | [string, ...string[]];
-    resources: ResourcesMock | [string, ...string[]];
-    actions: [string, ...string[]];
+    principals: PrincipalsMock | string[];
+    resources: ResourcesMock | string[];
+    actions: string[];
   };
   type KerberosTestExpectedItemSchema = {
     principal: PrincipalMock | string;
     resource: ResourceMock | string;
-    actions: Record<string, Effect | boolean>;
+    actions: Record<string, Effect | string | boolean>;
   };
   export type KerberosTestSchema = {
     name: string;
     input: KerberosTestInputSchema;
-    expected: [KerberosTestExpectedItemSchema, ...KerberosTestExpectedItemSchema[]];
+    expected: KerberosTestExpectedItemSchema[];
   };
   export class KerberosTest {
     constructor(schema: KerberosTestSchema, kerberos?: Kerberos);
@@ -192,8 +193,8 @@ export namespace Tests {
 
   type TestsPolicySchema = {
     name: string;
-    principals: PrincipalsMock | [PrincipalMockSchema, ...PrincipalMockSchema[]];
-    resources: ResourcesMock | [ResourceMockSchema, ...ResourceMockSchema[]];
+    principals: PrincipalsMock | PrincipalsMockSchema;
+    resources: ResourcesMock | ResourcesMockSchema;
     tests: KerberosTest[] | KerberosTestSchema[];
   };
   export class KerberosTests {
