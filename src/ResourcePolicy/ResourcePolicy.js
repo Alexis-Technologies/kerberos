@@ -75,9 +75,6 @@ class ResourcePolicy {
         const conditionPasses = rule.condition ? rule.condition.isFulfilled(req) : true;
         if (conditionPasses) {
           actionEffects.push(rule.effect);
-        } else if (rule.effect === Effect.Allow) {
-          // If the condition is not met, the effect is Deny.
-          actionEffects.push(Effect.Deny);
         }
       }
 
