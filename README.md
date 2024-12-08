@@ -32,7 +32,8 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
 - [ ] scopes (WIP);
 - [ ] metadata (WIP);
 
-We are tying to keep the API as close as possible to Cerbos. If you are familiar with Cerbos, you will feel at home with Kerberos.js.
+---
+**_P.S. We are tying to keep the API as close as possible to Cerbos. If you are familiar with Cerbos, you will feel at home with Kerberos.js._**
 
 ## Installation
 
