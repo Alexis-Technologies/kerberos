@@ -48,7 +48,7 @@ class KerberosTests {
               resources: [this.resources],
               effectAsBoolean,
             },
-            { describe, it, assert },
+            { describe, it, assert }
           );
         }
       });
