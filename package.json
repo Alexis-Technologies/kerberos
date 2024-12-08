@@ -51,5 +51,12 @@
     "globals": "^15.11.0",
     "neostandard": "^0.11.7",
     "prettier": "^3.3.3"
-  }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "pre-commit": [
+    "lint",
+    "test"
+  ]
 }
