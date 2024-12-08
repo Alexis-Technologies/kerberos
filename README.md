@@ -2,7 +2,8 @@
 
 Kerberos.js is a JavaScript library for authorization solutions. It is a simple and lightweight Cerbos (Cerbos mini).
 
-Motivation:
+### Motivation:
+
 - Cerbos is a powerful authorization engine, but it is written in Go and requires a separate server to run.
 - We all know that gRPC is faster than REST API because it uses protobuf. But it can be even faster—by avoiding network requests altogether. Often, maintaining a separate service just for your permissions can be unnecessary, don’t you think?
 - Kerberos.js is a lightweight alternative that can be used in the browser or server-side JavaScript applications (only up to 6 KB).
@@ -13,8 +14,8 @@ Motivation:
 - lack of some functionality in your Cerbos policies. With Kerberos.js you can use all the power of JavaScript to create your policies.
 - if you are using Cerbos Hub and you want to test your policies locally, it can be a bit tricky. With Kerberos.js you can test your policies locally without any hassle.
 
+### Features:
 
-Features:
 - [x] Derived roles;
 - [x] Resource policies;
 - [x] Conditions;
@@ -27,8 +28,7 @@ Features:
 - [x] Logger;
 - [x] In-browser/serverless authorization;
 
-
-- [ ] outputs (WIP); 
+- [ ] outputs (WIP);
 - [ ] scopes (WIP);
 - [ ] metadata (WIP);
 
@@ -99,7 +99,82 @@ const isAllowed = await kerberos.isAllowed({
 console.log(isAllowed); // true
 ```
 
-### Sponsors
+## Testing
 
-[![Cerbos](https://cerbos.dev/img/logo.svg)](https://cerbos.dev)
+```javascript
+import { describe, it } from 'node:test';
+import { strict as assert } from 'node:assert';
+import { Kerberos, Tests } from '@alexify/kerberos';
 
+describe('KerberosTests', () => {
+  describe('Expense Policy (raw mode)', () => {
+    const expenseTestPolicy = {
+      name: 'Expenses test suite',
+      principals: {
+        sally: {
+          id: 'sally',
+          roles: ['USER'],
+          attr: {
+            department: 'SALES',
+            region: 'EMEA',
+          },
+        },
+        // ...
+      },
+      resources: {
+        expense1: {
+          id: 'expense1',
+          kind: 'expense',
+          attr: {
+            ownerId: 'sally',
+            createdAt: '2022-07-21T14:47:51.063Z',
+            vendor: 'Flux Water Gear',
+            region: 'EMEA',
+            amount: 500,
+            status: 'OPEN',
+          },
+        },
+        // ...
+      },
+      tests: [
+        {
+          name: 'Sales Roles',
+          input: {
+            principals: ['sally', 'sydney'],
+            resources: ['expense1', 'expense2'],
+            actions: ['view', 'view:approver', 'update', 'delete', 'approve'],
+          },
+          expected: [
+            {
+              principal: 'sally',
+              resource: 'expense1',
+              actions: {
+                view: 'EFFECT_ALLOW',
+                'view:approver': 'EFFECT_DENY',
+                delete: 'EFFECT_DENY',
+                update: 'EFFECT_ALLOW',
+                approve: 'EFFECT_DENY',
+              },
+            },
+            // ...
+          ],
+        },
+      ],
+    };
+
+    const kerberos = new Kerberos(policies, derivedRoles, { logger: true });
+    const tests = new Tests.KerberosTests(kerberos, [expenseTestPolicy]);
+
+    tests.run({}, { describe, it, assert });
+    // or -> tests.run({ effectAsBoolean: true }, { describe, it, assert });
+  });
+});
+```
+
+### Used by
+
+<table style="text-align:center;">
+<tr>
+<td><a href="https://hirevel.com" target="_blank"><img src="https://cdn.hirevel.com/hirevel/logo.svg" width="200" valign="middle" /></a></td>
+</tr>
+</table>
