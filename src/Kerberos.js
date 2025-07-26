@@ -126,7 +126,10 @@ class Kerberos {
     const req = Kerberos.parseRequest(parsedArgs.principal, parsedArgs.resource);
 
     const policy = this.policies.get(req.R.kind);
-    if (!policy) return false;
+    if (!policy) {
+      this.log([{ reqWithActions: { ...req, actions: [parsedArgs.action] }, result: { [parsedArgs.action]: Effect.Deny } }], 'IsAllowed');
+      return false;
+    }
 
     const isAllowed = policy.isAllowed({ ...req, action: parsedArgs.action }, this.getImportedDerivedRoles(policy, req));
     this.log([{ reqWithActions: { ...req, actions: [parsedArgs.action] }, result: { [parsedArgs.action]: isAllowed ? Effect.Allow : Effect.Deny } }], 'IsAllowed');
