@@ -2,7 +2,7 @@ const { ResourcePolicy } = require('./ResourcePolicy/index.js');
 const { DerivedRoles } = require('./DerivedRoles/index.js');
 const { Effect, ZodSchemas } = require('./schemas.js');
 
-class KerberosZodSchemas {
+class KerberosZodSchemas extends ZodSchemas {
   static buildResourcePolicyInstance(z) {
     return z.instanceof(ResourcePolicy);
   }
@@ -239,4 +239,4 @@ class Kerberos {
   }
 }
 
-module.exports = { Kerberos };
+module.exports = { Kerberos, KerberosZodSchemas };

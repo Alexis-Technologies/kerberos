@@ -1,32 +1,42 @@
-const { z } = require('zod');
+const { ZodSchemas } = require('../../schemas.js');
 
-const RequestPrincipalSchema = require('../../schemas.js').RequestPrincipalSchema;
-
-const PrincipalMockSchema = RequestPrincipalSchema.extend({ name: z.string() });
+class PrincipalMockZodSchemas extends ZodSchemas {
+  static buildShape(z) {
+    return z.object({ ...ZodSchemas.buildRequestPrincipal(z).shape, name: z.string() });
+  }
+}
 
 class PrincipalMock {
-  constructor(schema) {
-    this.schema = PrincipalMockSchema.parse(schema);
+  static parseShape(shape, { schema, z } = {}) {
+    if (schema) return schema.parse(shape);
+    if (z) return PrincipalMockZodSchemas.buildShape(z).parse(shape);
+    return shape;
+  }
+
+  #shape = null;
+
+  constructor(shape, { z } = {}) {
+    this.#shape = PrincipalMock.parseShape(shape, { z });
   }
 
   get id() {
-    return this.schema.id;
+    return this.#shape.id;
   }
 
   get name() {
-    return this.schema.name;
+    return this.#shape.name;
   }
 
   get roles() {
-    return this.schema.roles;
+    return this.#shape.roles;
   }
 
   get attr() {
-    return this.schema.attr;
+    return this.#shape.attr;
   }
 }
 
 module.exports = {
   PrincipalMock,
-  PrincipalMockSchema,
+  PrincipalMockZodSchemas,
 };
