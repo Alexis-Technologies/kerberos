@@ -1,29 +1,39 @@
-const { z } = require('zod');
+const { ZodSchemas } = require('../../schemas.js');
 
-const { RequestResourceSchema } = require('../../schemas.js');
-
-const ResourceMockSchema = RequestResourceSchema.extend({ name: z.string() });
-
-class ResourceMock {
-  constructor(schema) {
-    this.schema = ResourceMockSchema.parse(schema);
-  }
-
-  get id() {
-    return this.schema.id;
-  }
-
-  get name() {
-    return this.schema.name;
-  }
-
-  get kind() {
-    return this.schema.kind;
-  }
-
-  get attr() {
-    return this.schema.attr;
+class ResourceMockZodSchemas extends ZodSchemas {
+  static buildShape(z) {
+    return z.object({ ...ZodSchemas.buildRequestResource(z).shape, name: z.string() });
   }
 }
 
-module.exports = { ResourceMock, ResourceMockSchema };
+class ResourceMock {
+  static parseShape(shape, { schema, z } = {}) {
+    if (schema) return schema.parse(shape);
+    if (z) return ResourceMockZodSchemas.buildShape(z).parse(shape);
+    return shape;
+  }
+
+  #shape = null;
+
+  constructor(shape, { z } = {}) {
+    this.#shape = ResourceMock.parseShape(shape, { z });
+  }
+
+  get id() {
+    return this.#shape.id;
+  }
+
+  get name() {
+    return this.#shape.name;
+  }
+
+  get kind() {
+    return this.#shape.kind;
+  }
+
+  get attr() {
+    return this.#shape.attr;
+  }
+}
+
+module.exports = { ResourceMock, ResourceMockZodSchemas };
