@@ -1,6 +1,4 @@
-const { z } = require('zod');
-
-const { RequestSchema, ZodSchemas } = require('../schemas.js');
+const { ZodSchemas } = require('../schemas.js');
 
 class ConstantsZodSchemas extends ZodSchemas {
   static buildShape(z) {
@@ -16,15 +14,4 @@ class ConstantsZodSchemas extends ZodSchemas {
   }
 }
 
-const ConstantsSchemaSchema = z.record(z.string(), z.unknown());
-
-const RequestWithConstantsSchema = RequestSchema.extend({
-  constants: ConstantsSchemaSchema.optional(),
-  C: ConstantsSchemaSchema.optional(),
-});
-
-module.exports = {
-  ConstantsZodSchemas,
-  ConstantsSchemaSchema,
-  RequestWithConstantsSchema,
-};
+module.exports = { ConstantsZodSchemas };

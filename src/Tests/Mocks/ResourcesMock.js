@@ -1,8 +1,4 @@
-const { z } = require('zod');
-
-const { ResourceMock, ResourceMockZodSchemas, ResourceMockSchema } = require('./ResourceMock.js');
-
-const ResourcesMockSchema = z.union([z.array(z.instanceof(ResourceMock)).nonempty(), z.record(ResourceMockSchema.shape.name, ResourceMockSchema.omit({ name: true }))]);
+const { ResourceMock, ResourceMockZodSchemas } = require('./ResourceMock.js');
 
 class ResourcesMockZodSchemas extends ResourceMockZodSchemas {
   static buildShape(z) {
@@ -48,4 +44,4 @@ class ResourcesMock {
   }
 }
 
-module.exports = { ResourcesMock, ResourcesMockZodSchemas, ResourcesMockSchema };
+module.exports = { ResourcesMock, ResourcesMockZodSchemas };

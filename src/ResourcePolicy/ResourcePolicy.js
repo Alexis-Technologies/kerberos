@@ -1,4 +1,4 @@
-const { ResourcePolicyRootSchemaSchema } = require('./schemas.js');
+const { ResourcePolicyZodSchemas } = require('./schemas.js');
 
 const { ALL_ACTIONS, Effect } = require('../schemas.js');
 const { Variables } = require('../Variables');
@@ -6,6 +6,12 @@ const { Conditions } = require('../Conditions');
 const { Constants } = require('../Constants');
 
 class ResourcePolicy {
+  static parseShape(shape, { schema, z } = {}) {
+    if (schema) return schema.parse(shape);
+    if (z) return ResourcePolicyZodSchemas.buildShape(z).parse(shape);
+    return shape;
+  }
+
   static parseConstants(constants) {
     return constants instanceof Constants ? constants : new Constants(constants);
   }
@@ -19,39 +25,41 @@ class ResourcePolicy {
     return conditions instanceof Conditions ? conditions : new Conditions(conditions);
   }
 
-  constructor(schema) {
-    this.schema = ResourcePolicyRootSchemaSchema.parse(schema);
-    if (this.schema.resourcePolicy.constants) {
-      this.schema.resourcePolicy.constants = ResourcePolicy.parseConstants(this.schema.resourcePolicy.constants);
+  #shape = null;
+
+  constructor(shape, { z } = {}) {
+    this.#shape = ResourcePolicy.parseShape(shape, { z });
+    if (this.#shape.resourcePolicy.constants) {
+      this.#shape.resourcePolicy.constants = ResourcePolicy.parseConstants(this.#shape.resourcePolicy.constants);
     }
-    if (this.schema.resourcePolicy.variables) {
-      this.schema.resourcePolicy.variables = ResourcePolicy.parseVariables(this.schema.resourcePolicy.variables);
+    if (this.#shape.resourcePolicy.variables) {
+      this.#shape.resourcePolicy.variables = ResourcePolicy.parseVariables(this.#shape.resourcePolicy.variables);
     }
-    this.schema.resourcePolicy.rules = this.schema.resourcePolicy.rules.map((rule) => ({
+    this.#shape.resourcePolicy.rules = this.#shape.resourcePolicy.rules.map((rule) => ({
       ...rule,
       condition: ResourcePolicy.parseConditions(rule.condition),
     }));
   }
 
   get kind() {
-    return this.schema.resourcePolicy.resource;
+    return this.#shape.resourcePolicy.resource;
   }
 
   get importDerivedRoles() {
-    return this.schema.resourcePolicy.importDerivedRoles ?? [];
+    return this.#shape.resourcePolicy.importDerivedRoles ?? [];
   }
 
   get rules() {
-    return this.schema.resourcePolicy.rules;
+    return this.#shape.resourcePolicy.rules;
   }
 
   populateVariables(req) {
-    const variables = this.schema.resourcePolicy.variables?.get(req);
+    const variables = this.#shape.resourcePolicy.variables?.get(req);
     return { ...req, variables, V: variables };
   }
 
   populateConstants(req) {
-    const constants = this.schema.resourcePolicy.constants?.get();
+    const constants = this.#shape.resourcePolicy.constants?.get();
     return { ...req, constants, C: constants };
   }
 

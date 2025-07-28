@@ -1,29 +1,6 @@
-const { z } = require('zod');
-
 const { ZodSchemas } = require('../schemas.js');
-const { VariablesZodSchemas, RequestWithVariablesSchema } = require('../Variables');
-const { ConstantsZodSchemas, RequestWithConstantsSchema } = require('../Constants');
-
-const RequestSchema = RequestWithConstantsSchema.merge(RequestWithVariablesSchema);
-
-const ConditionSingleMatchExprSchema = z.function().args(RequestSchema).returns(z.boolean());
-
-const ConditionMatchSchema = z.lazy(() =>
-  z.union([
-    ConditionSingleMatchExprSchema,
-    z.object({
-      any: z.array(ConditionMatchSchema).nonempty(),
-    }),
-    z.object({
-      all: z.array(ConditionMatchSchema).nonempty(),
-    }),
-    z.object({
-      none: z.array(ConditionMatchSchema).nonempty(),
-    }),
-  ])
-);
-
-const ConditionSchemaSchema = z.object({ match: ConditionMatchSchema }).strict();
+const { VariablesZodSchemas } = require('../Variables');
+const { ConstantsZodSchemas } = require('../Constants');
 
 class ConditionsZodSchemas extends ZodSchemas {
   static buildFullRequest(z) {
@@ -62,8 +39,4 @@ class ConditionsZodSchemas extends ZodSchemas {
   }
 }
 
-module.exports = {
-  ConditionsZodSchemas,
-  ConditionMatchSchema,
-  ConditionSchemaSchema,
-};
+module.exports = { ConditionsZodSchemas };

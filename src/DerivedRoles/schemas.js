@@ -3,7 +3,7 @@ const { ConditionsZodSchemas, Conditions } = require('../Conditions');
 const { VariablesZodSchemas, Variables } = require('../Variables');
 const { ConstantsZodSchemas, Constants } = require('../Constants');
 
-export class DerivedRolesZodSchemas extends ZodSchemas {
+class DerivedRolesZodSchemas extends ZodSchemas {
   static buildDerivedRolesDefinitionShape(z) {
     return z.object({
       name: z.string(),

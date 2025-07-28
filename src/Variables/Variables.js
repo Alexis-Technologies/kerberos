@@ -1,5 +1,3 @@
-const { z } = require('zod');
-
 const { VariablesSchemaSchema } = require('./schemas.js');
 
 class Variables {
@@ -12,6 +10,4 @@ class Variables {
   }
 }
 
-const VariablesInstanceSchema = z.instanceof(Variables);
-
-module.exports = { Variables, VariablesInstanceSchema };
+module.exports = { Variables };

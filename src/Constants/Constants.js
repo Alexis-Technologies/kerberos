@@ -1,5 +1,3 @@
-const { z } = require('zod');
-
 const { ConstantsZodSchemas } = require('./schemas.js');
 
 class Constants {
@@ -20,9 +18,4 @@ class Constants {
   }
 }
 
-const ConstantsInstanceSchema = z.instanceof(Constants);
-
-module.exports = {
-  Constants,
-  ConstantsInstanceSchema,
-};
+module.exports = { Constants };

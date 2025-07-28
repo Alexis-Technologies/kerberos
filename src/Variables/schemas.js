@@ -1,20 +1,15 @@
-const { z } = require('zod');
-
-const { ZodSchemas, RequestSchema } = require('../schemas.js');
-const { RequestWithConstantsSchema } = require('../Constants');
-
-const VariablesReturnTypeSchema = z.unknown();
-
-const VariablesSchemaSchema = z.record(z.string(), z.function().args(RequestWithConstantsSchema).returns(VariablesReturnTypeSchema));
-
-const RequestWithVariablesSchema = RequestSchema.extend({
-  variables: z.record(z.string(), VariablesReturnTypeSchema).optional(),
-  V: z.record(z.string(), VariablesReturnTypeSchema).optional(),
-});
+const { ZodSchemas } = require('../schemas.js');
+const { ConstantsZodSchemas } = require('../Constants');
 
 class VariablesZodSchemas extends ZodSchemas {
   static buildShape(z) {
-    return z.record(z.string(), z.function().args(RequestWithConstantsSchema).returns(VariablesZodSchemas.buildVariablesReturnType(z)));
+    return z.record(
+      z.string(),
+      z.function({
+        input: [ConstantsZodSchemas.buildRequestWithConstants(z)],
+        output: VariablesZodSchemas.buildVariablesReturnType(z),
+      })
+    );
   }
 
   static buildRequestWithVariables(z) {
@@ -30,9 +25,4 @@ class VariablesZodSchemas extends ZodSchemas {
   }
 }
 
-module.exports = {
-  VariablesZodSchemas,
-  VariablesSchemaSchema,
-  RequestWithVariablesSchema,
-  VariablesReturnTypeSchema,
-};
+module.exports = { VariablesZodSchemas };

@@ -1,8 +1,4 @@
-const { z } = require('zod');
-
-const { PrincipalMock, PrincipalMockZodSchemas, PrincipalMockSchema } = require('./PrincipalMock.js');
-
-const PrincipalsMockSchema = z.union([z.array(z.instanceof(PrincipalMock)).nonempty(), z.record(PrincipalMockSchema.shape.name, PrincipalMockSchema.omit({ name: true }))]);
+const { PrincipalMock, PrincipalMockZodSchemas } = require('./PrincipalMock.js');
 
 class PrincipalsMockZodSchemas extends PrincipalMockZodSchemas {
   static buildShape(z) {
@@ -44,4 +40,4 @@ class PrincipalsMock {
   }
 }
 
-module.exports = { PrincipalsMockZodSchemas, PrincipalsMockSchema, PrincipalsMock };
+module.exports = { PrincipalsMockZodSchemas, PrincipalsMock };
