@@ -1,34 +1,51 @@
 const { z } = require('zod');
 
-const { ResourceMock, ResourceMockSchema } = require('./ResourceMock.js');
+const { ResourceMock, ResourceMockZodSchemas, ResourceMockSchema } = require('./ResourceMock.js');
 
 const ResourcesMockSchema = z.union([z.array(z.instanceof(ResourceMock)).nonempty(), z.record(ResourceMockSchema.shape.name, ResourceMockSchema.omit({ name: true }))]);
 
+class ResourcesMockZodSchemas extends ResourceMockZodSchemas {
+  static buildShape(z) {
+    const ResourceMockShapeZodSchema = ResourceMockZodSchemas.buildShape(z);
+    return z.union([
+      z.array(z.instanceof(ResourceMock)).nonempty(),
+      z.record(ResourceMockShapeZodSchema.shape.name, ResourceMockShapeZodSchema.omit({ name: true })),
+    ]);
+  }
+}
+
 class ResourcesMock {
-  constructor(resources) {
-    const parsedResources = ResourcesMockSchema.parse(resources);
-    this.resources = new Map();
+  static parseShape(shape, { schema, z } = {}) {
+    if (schema) return schema.parse(shape);
+    if (z) return ResourcesMockZodSchemas.buildShape(z).parse(shape);
+    return shape;
+  }
+
+  #resources = new Map();
+
+  constructor(resources, { z } = {}) {
+    const parsedResources = ResourcesMock.parseShape(resources, { z });
     if (Array.isArray(parsedResources)) {
-      parsedResources.forEach((resource) => this.resources.set(resource.name, resource));
+      parsedResources.forEach((resource) => this.#resources.set(resource.name, resource));
     } else {
       Object.entries(parsedResources).forEach(([name, resource]) => {
         const mock = new ResourceMock({ ...resource, name });
-        this.resources.set(mock.name, mock);
+        this.#resources.set(mock.name, mock);
       });
     }
   }
 
   get mocks() {
-    return [...this.resources.values()];
+    return [...this.#resources.values()];
   }
 
   get(name) {
-    return this.resources.get(name);
+    return this.#resources.get(name);
   }
 
   getById(id) {
-    return [...this.resources.values()].find((r) => r.id === id);
+    return [...this.#resources.values()].find((r) => r.id === id);
   }
 }
 
-module.exports = { ResourcesMock, ResourcesMockSchema };
+module.exports = { ResourcesMock, ResourcesMockZodSchemas, ResourcesMockSchema };

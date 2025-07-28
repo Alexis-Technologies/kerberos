@@ -1,54 +1,63 @@
-const { z } = require('zod');
-
 const { ResourceMock, ResourcesMock, PrincipalMock, PrincipalsMock } = require('./Mocks/index.js');
-const { Effect } = require('../schemas.js');
+const { ZodSchemas, Effect } = require('../schemas.js');
 const { Kerberos } = require('../Kerberos.js');
 
-const KerberosTestInputSchema = z
-  .object({
-    principals: z.union([z.array(z.string()).nonempty(), z.instanceof(PrincipalsMock)]),
-    resources: z.union([z.array(z.string()).nonempty(), z.instanceof(ResourcesMock)]),
-    actions: z
-      .array(z.string())
-      .nonempty()
-      .transform((actions) => new Set(actions)),
-  })
-  .strict();
+class KerberosTestZodSchemas extends ZodSchemas {
+  static buildInputShape(z) {
+    return z
+      .object({
+        principals: z.union([z.array(z.string()).nonempty(), z.instanceof(PrincipalsMock)]),
+        resources: z.union([z.array(z.string()).nonempty(), z.instanceof(ResourcesMock)]),
+        actions: z
+          .array(z.string())
+          .nonempty()
+          .transform((actions) => new Set(actions)),
+      });
+  }
 
-const KerberosTestExpectedItemSchema = z
-  .object({
-    principal: z.union([z.string(), z.instanceof(PrincipalMock)]),
-    resource: z.union([z.string(), z.instanceof(ResourceMock)]),
-    actions: z.record(z.string(), z.union([z.nativeEnum(Effect), z.boolean()])),
-  })
-  .strict();
+  static buildExpectedItemShape(z) {
+    return z
+      .object({
+        principal: z.union([z.string(), z.instanceof(PrincipalMock)]),
+        resource: z.union([z.string(), z.instanceof(ResourceMock)]),
+        actions: z.record(z.string(), z.union([z.nativeEnum(Effect), z.boolean()])),
+      });
+  }
 
-const KerberosTestSchema = z
-  .object({
-    name: z.string(),
-    input: KerberosTestInputSchema,
-    expected: z.array(KerberosTestExpectedItemSchema).nonempty(),
-  })
-  .strict()
-  .superRefine(({ input, expected }, ctx) => {
-    const inputActions = input.actions;
-    for (const item of expected) {
-      const expectedActions = new Set(Object.keys(item.actions));
-      for (const action of expectedActions) {
-        if (!inputActions.has(action)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ['expected', 'actions'],
-            message: `Action "${action}" in expected is not present in input actions`,
-          });
+  static buildShape(z) {
+    return z
+      .object({
+        name: z.string(),
+        input: KerberosTestZodSchemas.buildInputShape(z),
+        expected: z.array(KerberosTestZodSchemas.buildExpectedItemShape(z)).nonempty(),
+      })
+      .check((ctx) => {
+        const inputActions = ctx.value.input.actions;
+        for (const item of ctx.value.expected) {
+          const expectedActions = new Set(Object.keys(item.actions));
+          for (const action of expectedActions) {
+            if (!inputActions.has(action)) {
+              ctx.issues.push({
+                code: 'custom',
+                path: ['expected', 'actions'],
+                message: `Action "${action}" in expected is not present in input actions`,
+              });
+            }
+          }
         }
-      }
-    }
-  });
+      });
+  }
+}
 
 class KerberosTest {
-  constructor(schema, kerberos) {
-    this.schema = KerberosTestSchema.parse(schema);
+  static parseShape(shape, { schema, z } = {}) {
+    if (schema) return schema.parse(shape);
+    if (z) return KerberosTestZodSchemas.buildShape(z).parse(shape);
+    return shape;
+  }
+
+  constructor(schema, kerberos, { z } = {}) {
+    this.schema = KerberosTest.parseShape(schema, { z });
     if (kerberos && !(kerberos instanceof Kerberos)) throw new Error('Invalid Kerberos instance!');
     this.kerberos = kerberos;
     this.principals = this.schema.input.principals instanceof PrincipalsMock ? [this.schema.input.principals] : [];
@@ -174,5 +183,5 @@ class KerberosTest {
 
 module.exports = {
   KerberosTest,
-  KerberosTestSchema,
+  KerberosTestZodSchemas,
 };

@@ -1,28 +1,26 @@
-const { z } = require('zod');
+const { ZodSchemas } = require('../schemas.js');
+const { ConditionsZodSchemas, Conditions } = require('../Conditions');
+const { VariablesZodSchemas, Variables } = require('../Variables');
+const { ConstantsZodSchemas, Constants } = require('../Constants');
 
-const { ConditionSchemaSchema, ConditionsInstanceSchema } = require('../Conditions');
-const { VariablesSchemaSchema, VariablesInstanceSchema } = require('../Variables');
-const { ConstantsInstanceSchema, ConstantsSchemaSchema } = require('../Constants');
+export class DerivedRolesZodSchemas extends ZodSchemas {
+  static buildDerivedRolesDefinitionShape(z) {
+    return z.object({
+      name: z.string(),
+      parentRoles: z.array(z.string()).nonempty(),
+      condition: z.union([ConditionsZodSchemas.buildShape(z), z.instanceof(Conditions)]),
+    });
+  }
 
-const DerivedRolesDefinitionSchemaSchema = z
-  .object({
-    name: z.string(),
-    parentRoles: z.array(z.string()).nonempty(),
-    condition: z.union([ConditionSchemaSchema, ConditionsInstanceSchema]),
-  })
-  .strict();
+  static buildShape(z) {
+    return z.object({
+      name: z.string(),
+      description: z.string().optional(),
+      variables: z.union([VariablesZodSchemas.buildShape(z), z.instanceof(Variables)]).optional(),
+      constants: z.union([ConstantsZodSchemas.buildShape(z), z.instanceof(Constants)]).optional(),
+      definitions: z.array(DerivedRolesZodSchemas.buildDerivedRolesDefinitionShape(z)).nonempty(),
+    });
+  }
+}
 
-const DerivedRolesSchemaSchema = z
-  .object({
-    name: z.string(),
-    description: z.string().optional(),
-    variables: z.union([VariablesSchemaSchema, VariablesInstanceSchema]).optional(),
-    constants: z.union([ConstantsSchemaSchema, ConstantsInstanceSchema]).optional(),
-    definitions: z.array(DerivedRolesDefinitionSchemaSchema).nonempty(),
-  })
-  .strict();
-
-module.exports = {
-  DerivedRolesDefinitionSchemaSchema,
-  DerivedRolesSchemaSchema,
-};
+module.exports = { DerivedRolesZodSchemas };

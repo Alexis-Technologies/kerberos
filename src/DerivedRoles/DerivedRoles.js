@@ -1,10 +1,16 @@
-const { DerivedRolesSchemaSchema } = require('./schemas.js');
+const { DerivedRolesZodSchemas } = require('./schemas.js');
 
 const { Variables } = require('../Variables');
 const { Conditions } = require('../Conditions');
 const { Constants } = require('../Constants');
 
 class DerivedRoles {
+  static parseShape(shape, { schema, z } = {}) {
+    if (schema) return schema.parse(shape);
+    if (z) return DerivedRolesZodSchemas.buildShape(z).parse(shape);
+    return shape;
+  }
+
   static parseConstants(constants) {
     return constants instanceof Constants ? constants : new Constants(constants);
   }
@@ -17,22 +23,24 @@ class DerivedRoles {
     return conditions instanceof Conditions ? conditions : new Conditions(conditions);
   }
 
-  constructor(schema) {
-    this.schema = DerivedRolesSchemaSchema.parse(schema);
-    if (this.schema.constants) this.schema.constants = DerivedRoles.parseConstants(this.schema.constants);
-    if (this.schema.variables) this.schema.variables = DerivedRoles.parseVariables(this.schema.variables);
-    this.schema.definitions = this.schema.definitions.map((def) => ({
+  #shape = null;
+
+  constructor(shape, { z } = {}) {
+    this.#shape = DerivedRoles.parseShape(shape, { z });
+    if (this.#shape.constants) this.#shape.constants = DerivedRoles.parseConstants(this.#shape.constants);
+    if (this.#shape.variables) this.#shape.variables = DerivedRoles.parseVariables(this.#shape.variables);
+    this.#shape.definitions = this.#shape.definitions.map((def) => ({
       ...def,
       condition: DerivedRoles.parseConditions(def.condition),
     }));
   }
 
   get name() {
-    return this.schema.name;
+    return this.#shape.name;
   }
 
   get roles() {
-    return new Map(this.schema.definitions.map((def) => [def.name, def]));
+    return new Map(this.#shape.definitions.map((def) => [def.name, def]));
   }
 
   get(req) {
@@ -46,12 +54,12 @@ class DerivedRoles {
   }
 
   populateVariables(req) {
-    const variables = this.schema.variables?.get(req);
+    const variables = this.#shape.variables?.get(req);
     return { ...req, variables, V: variables };
   }
 
   populateConstants(req) {
-    const constants = this.schema.constants?.get();
+    const constants = this.#shape.constants?.get();
     return { ...req, constants, C: constants };
   }
 

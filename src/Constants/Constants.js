@@ -1,14 +1,22 @@
 const { z } = require('zod');
 
-const { ConstantsSchemaSchema } = require('./schemas.js');
+const { ConstantsZodSchemas } = require('./schemas.js');
 
 class Constants {
-  constructor(schema) {
-    this.schema = ConstantsSchemaSchema.parse(schema);
+  static parseShape(shape, { schema, z } = {}) {
+    if (schema) return schema.parse(shape);
+    if (z) return ConstantsZodSchemas.buildShape(z).parse(shape);
+    return shape;
+  }
+
+  #shape = null;
+
+  constructor(shape, { z } = {}) {
+    this.#shape = ConstantsZodSchemas.buildShape(z).parse(shape);
   }
 
   get() {
-    return this.schema;
+    return this.#shape;
   }
 }
 

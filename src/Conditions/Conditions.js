@@ -1,16 +1,24 @@
 const { z } = require('zod');
 
-const { ConditionSchemaSchema } = require('./schemas');
+const { ConditionsZodSchemas } = require('./schemas');
 
 class Conditions {
+  static parseShape(shape, { schema, z } = {}) {
+    if (schema) return schema.parse(shape);
+    if (z) return ConditionsZodSchemas.buildShape(z).parse(shape);
+    return shape;
+  }
+
   strategies = {
     any: (conds, req) => conds.some((cond) => this.evaluateCondition(cond, req)),
     all: (conds, req) => conds.every((cond) => this.evaluateCondition(cond, req)),
     none: (conds, req) => !conds.some((cond) => this.evaluateCondition(cond, req)),
   };
 
-  constructor(schema) {
-    this.schema = ConditionSchemaSchema.parse(schema);
+  #shape = null;
+
+  constructor(shape, { z } = {}) {
+    this.#shape = Conditions.parseShape(shape, { z });
   }
 
   evaluateCondition(cond, req) {
@@ -31,7 +39,7 @@ class Conditions {
   }
 
   isFulfilled(req) {
-    return this.evaluateCondition(this.schema.match, req);
+    return this.evaluateCondition(this.#shape.match, req);
   }
 }
 
