@@ -34,9 +34,6 @@
     "url": "https://github.com/Alexis-Technologies/kerberos/issues"
   },
   "homepage": "https://alexis.dev",
-  "dependencies": {
-    "zod": "^3.23.8"
-  },
   "devDependencies": {
     "@eslint/js": "^9.13.0",
     "@stylistic/eslint-plugin-js": "^2.10.1",
@@ -58,5 +55,6 @@
   "pre-commit": [
     "lint",
     "test"
-  ]
+  ],
+  "packageManager": "pnpm@10.10.0"
 }
