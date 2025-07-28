@@ -1,5 +1,3 @@
-const { z } = require('zod');
-
 const { ConditionsZodSchemas } = require('./schemas');
 
 class Conditions {
@@ -43,6 +41,4 @@ class Conditions {
   }
 }
 
-const ConditionsInstanceSchema = z.instanceof(Conditions);
-
-module.exports = { Conditions, ConditionsInstanceSchema };
+module.exports = { Conditions };
