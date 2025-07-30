@@ -21,15 +21,9 @@ class ConditionsZodSchemas extends ZodSchemas {
     return z.lazy(() =>
       z.union([
         ConditionsZodSchemas.buildConditionSingleMatchExpr(z),
-        z.object({
-          any: z.array(ConditionsZodSchemas.buildConditionMatchShape(z)).nonempty(),
-        }),
-        z.object({
-          all: z.array(ConditionsZodSchemas.buildConditionMatchShape(z)).nonempty(),
-        }),
-        z.object({
-          none: z.array(ConditionsZodSchemas.buildConditionMatchShape(z)).nonempty(),
-        }),
+        z.object({ any: z.array(ConditionsZodSchemas.buildConditionMatchShape(z)).nonempty() }),
+        z.object({ all: z.array(ConditionsZodSchemas.buildConditionMatchShape(z)).nonempty() }),
+        z.object({ none: z.array(ConditionsZodSchemas.buildConditionMatchShape(z)).nonempty() }),
       ])
     );
   }

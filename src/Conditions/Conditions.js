@@ -7,10 +7,19 @@ class Conditions {
     return shape;
   }
 
-  strategies = {
-    any: (conds, req) => conds.some((cond) => this.evaluateCondition(cond, req)),
-    all: (conds, req) => conds.every((cond) => this.evaluateCondition(cond, req)),
-    none: (conds, req) => !conds.some((cond) => this.evaluateCondition(cond, req)),
+  #strategies = {
+    any: (conds, req) => {
+      for (const cond of conds) if (cond(req)) return true;
+      return false;
+    },
+    all: (conds, req) => {
+      for (const cond of conds) if (!cond(req)) return false;
+      return true;
+    },
+    none: (conds, req) => {
+      for (const cond of conds) if (cond(req)) return false;
+      return true;
+    },
   };
 
   #shape = null;
@@ -19,25 +28,15 @@ class Conditions {
     this.#shape = Conditions.parseShape(shape, { z });
   }
 
-  evaluateCondition(cond, req) {
-    if (typeof cond === 'function') {
-      return cond(req);
-    }
-
-    if (typeof cond === 'object') {
-      const [strategyKey] = Object.keys(cond);
-      const strategy = this.strategies[strategyKey];
-      if (!strategy) {
-        throw new Error(`Unknown strategy: ${strategyKey}`);
-      }
-      return strategy(cond[strategyKey], req);
-    }
-
-    throw new Error(`Invalid condition: ${cond}`);
-  }
-
   isFulfilled(req) {
-    return this.evaluateCondition(this.#shape.match, req);
+    const cond = this.#shape.match;
+    if (typeof cond === 'function') return cond(req);
+    if (typeof cond !== 'object') throw new TypeError(`Invalid condition: ${cond}`);
+
+    const [strategyKey] = Object.keys(cond);
+    const strategy = this.#strategies[strategyKey];
+    if (!strategy) throw new Error(`Unknown strategy: ${strategyKey}`);
+    return strategy(cond[strategyKey], req);
   }
 }
 
