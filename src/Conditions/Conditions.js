@@ -28,6 +28,10 @@ class Conditions {
     this.#shape = Conditions.parseShape(shape, { z });
   }
 
+  get shape() {
+    return this.#shape;
+  }
+
   isFulfilled(req) {
     const cond = this.#shape.match;
     if (typeof cond === 'function') return cond(req);

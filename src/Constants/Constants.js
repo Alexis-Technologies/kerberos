@@ -10,11 +10,15 @@ class Constants {
   #shape = null;
 
   constructor(shape, { z } = {}) {
-    this.#shape = ConstantsZodSchemas.buildShape(z).parse(shape);
+    this.#shape = Constants.parseShape(shape, { z });
+  }
+
+  get shape() {
+    return this.#shape;
   }
 
   get() {
-    return this.#shape;
+    return this.shape;
   }
 }
 
