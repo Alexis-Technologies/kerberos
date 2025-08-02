@@ -40,32 +40,40 @@ class DerivedRoles {
   }
 
   get roles() {
-    return new Map(this.#shape.definitions.map((def) => [def.name, def]));
+    const rolesMap = new Map();
+    for (const def of this.#shape.definitions) rolesMap.set(def.name, def);
+    return rolesMap;
+  }
+
+  get shape() {
+    return this.#shape;
   }
 
   get(req) {
     const roles = new Set();
 
-    for (const [name, def] of this.roles) {
-      if (this.isRoleMatched(def, this.populateVariables(this.populateConstants(req)))) roles.add(name);
+    if (!this.#shape.definitions.length) return roles;
+
+    const constants = this.#shape.constants?.get();
+    const reqWithConstants = { ...req, constants, C: constants };
+
+    const variables = this.#shape.variables?.get(reqWithConstants);
+    const reqWithVariables = { ...reqWithConstants, variables, V: variables };
+
+    for (const def of this.#shape.definitions) {
+      let isRoleMatched = false;
+      for (const role of def.parentRoles) {
+        if (reqWithVariables.P.roles.includes(role)) {
+          isRoleMatched = true;
+          break;
+        }
+      }
+      if (!isRoleMatched) continue;
+
+      if (def.condition.isFulfilled(reqWithVariables)) roles.add(def.name);
     }
 
     return roles;
-  }
-
-  populateVariables(req) {
-    const variables = this.#shape.variables?.get(req);
-    return { ...req, variables, V: variables };
-  }
-
-  populateConstants(req) {
-    const constants = this.#shape.constants?.get();
-    return { ...req, constants, C: constants };
-  }
-
-  isRoleMatched(def, req) {
-    if (!def.parentRoles.some((role) => req.P.roles.includes(role))) return false;
-    return def.condition.isFulfilled(req);
   }
 }
 
