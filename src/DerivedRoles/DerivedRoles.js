@@ -11,28 +11,32 @@ class DerivedRoles {
     return shape;
   }
 
-  static parseConstants(constants) {
-    return constants instanceof Constants ? constants : new Constants(constants);
+  static parseConstants(constants, { z } = {}) {
+    return constants instanceof Constants ? constants : new Constants(constants, { z });
   }
 
-  static parseVariables(variables) {
-    return variables instanceof Variables ? variables : new Variables(variables);
+  static parseVariables(variables, { z } = {}) {
+    return variables instanceof Variables ? variables : new Variables(variables, { z });
   }
 
-  static parseConditions(conditions) {
-    return conditions instanceof Conditions ? conditions : new Conditions(conditions);
+  static parseConditions(conditions, { z } = {}) {
+    return conditions instanceof Conditions ? conditions : new Conditions(conditions, { z });
   }
 
   #shape = null;
 
   constructor(shape, { z } = {}) {
     this.#shape = DerivedRoles.parseShape(shape, { z });
-    if (this.#shape.constants) this.#shape.constants = DerivedRoles.parseConstants(this.#shape.constants);
-    if (this.#shape.variables) this.#shape.variables = DerivedRoles.parseVariables(this.#shape.variables);
-    this.#shape.definitions = this.#shape.definitions.map((def) => ({
-      ...def,
-      condition: DerivedRoles.parseConditions(def.condition),
-    }));
+    if (this.#shape.constants) this.#shape.constants = DerivedRoles.parseConstants(this.#shape.constants, { z });
+    if (this.#shape.variables) this.#shape.variables = DerivedRoles.parseVariables(this.#shape.variables, { z });
+    if (this.#shape.definitions) {
+      const defs = [];
+      for (const def of this.#shape.definitions) {
+        const newDef = { ...def, condition: DerivedRoles.parseConditions(def.condition, { z }) };
+        defs.push(newDef);
+      }
+      this.#shape.definitions = defs;
+    }
   }
 
   get name() {
