@@ -79,20 +79,10 @@ class Kerberos {
     return args;
   }
 
-  static parseCheckResourcesResponse(response, effectAsBoolean = false, { schema, z } = {}) {
+  static parseCheckResourcesResponse(response, { schema, z } = {}) {
     if (schema) return schema.parse(response);
     if (z) return KerberosZodSchemas.buildCheckResourcesResponse(z).parse(response);
     return response;
-  }
-
-  static transformCheckResourcesResponse(response, effectAsBoolean = false) {
-    return {
-      ...response,
-      results: response.results.map((r) => ({
-        ...r,
-        actions: Object.fromEntries(Object.entries(r.actions).map(([action, effect]) => [action, !effectAsBoolean ? effect : effect === Effect.Allow])),
-      })),
-    };
   }
 
   #policies = new Map();
@@ -115,6 +105,8 @@ class Kerberos {
 
   #checkResourcesArgsZodSchema = null;
 
+  #checkResourcesResponseZodSchema = null;
+
   constructor(policies, derivedRoles, { logger, z } = { logger: false, z: null }) {
     if (z) {
       this.#z = z;
@@ -123,6 +115,7 @@ class Kerberos {
       this.#requestZodSchema = ZodSchemas.buildRequest(z);
       this.#isAllowedArgsZodSchema = KerberosZodSchemas.buildIsAllowedArgs(z);
       this.#checkResourcesArgsZodSchema = KerberosZodSchemas.buildCheckResourcesArgs(z);
+      this.#checkResourcesResponseZodSchema = KerberosZodSchemas.buildCheckResourcesResponse(z);
     }
 
     this.#policies = this.#getPoliciesMap(policies);
@@ -229,7 +222,7 @@ class Kerberos {
       }
 
       const reqWithActions = { ...req, actions };
-      const result = policy.check(reqWithActions, this.#getImportedDerivedRoles(policy, req));
+      const result = policy.check(reqWithActions, this.#getImportedDerivedRoles(policy, req), effectAsBoolean);
 
       const actionsResult = Object.fromEntries([...result.entries()]);
       inputForLog.push({ reqWithActions, result: actionsResult });
@@ -239,7 +232,7 @@ class Kerberos {
 
     this.#log(inputForLog, 'CheckResources');
 
-    return Kerberos.parseCheckResourcesResponse(Kerberos.transformCheckResourcesResponse({ results }));
+    return Kerberos.parseCheckResourcesResponse({ results }, { schema: this.#checkResourcesResponseZodSchema });
   }
 }
 

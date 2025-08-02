@@ -61,7 +61,7 @@ class ResourcePolicy {
   }
 
   // returns map of actions and effects
-  check(req, derivedRoles) {
+  check(req, derivedRoles, effectAsBoolean = false) {
     const result = new Map();
 
     if (!req.actions?.length) return result;
@@ -91,12 +91,12 @@ class ResourcePolicy {
       }
 
       if (actionEffects.includes(Effect.Deny)) {
-        result.set(action, Effect.Deny);
+        result.set(action, !effectAsBoolean ? Effect.Deny : false);
       } else if (actionEffects.includes(Effect.Allow)) {
-        result.set(action, Effect.Allow);
+        result.set(action, !effectAsBoolean ? Effect.Allow : true);
       } else {
         // If there are no rules allowing the action, the default is Deny
-        result.set(action, Effect.Deny);
+        result.set(action, !effectAsBoolean ? Effect.Deny : false);
       }
     }
 
