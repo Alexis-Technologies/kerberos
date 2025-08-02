@@ -29,11 +29,10 @@ class DerivedRoles {
     this.#shape = DerivedRoles.parseShape(shape, { z });
     if (this.#shape.constants) this.#shape.constants = DerivedRoles.parseConstants(this.#shape.constants, { z });
     if (this.#shape.variables) this.#shape.variables = DerivedRoles.parseVariables(this.#shape.variables, { z });
-    if (this.#shape.definitions) {
+    if (this.#shape.definitions?.length) {
       const defs = [];
       for (const def of this.#shape.definitions) {
-        const newDef = { ...def, condition: DerivedRoles.parseConditions(def.condition, { z }) };
-        defs.push(newDef);
+        defs.push({ ...def, condition: DerivedRoles.parseConditions(def.condition, { z }) });
       }
       this.#shape.definitions = defs;
     }

@@ -1,6 +1,6 @@
 const { ResourcePolicy } = require('./ResourcePolicy/index.js');
 const { DerivedRoles } = require('./DerivedRoles/index.js');
-const { Effect, ZodSchemas } = require('./schemas.js');
+const { ALL_ACTIONS, Effect, ZodSchemas } = require('./schemas.js');
 
 class KerberosZodSchemas extends ZodSchemas {
   static buildResourcePolicyInstance(z) {
@@ -200,13 +200,17 @@ class Kerberos {
     const req = Kerberos.parseRequest(parsedArgs.principal, parsedArgs.resource, { schema: this.#requestZodSchema });
 
     const policy = this.#policies.get(req.R.kind);
+    const reqWithActions = { ...req, actions: [parsedArgs.action] };
     if (!policy) {
-      this.#log([{ reqWithActions: { ...req, actions: [parsedArgs.action] }, result: { [parsedArgs.action]: Effect.Deny } }], 'IsAllowed');
+      this.#log([{ reqWithActions, result: { [parsedArgs.action]: Effect.Deny } }], 'IsAllowed');
       return false;
     }
 
-    const isAllowed = policy.isAllowed({ ...req, action: parsedArgs.action }, this.#getImportedDerivedRoles(policy, req));
+    const result = policy.check(reqWithActions, this.#getImportedDerivedRoles(policy, req));
+    const isAllowed = result.get(parsedArgs.action) === Effect.Allow || result.get(ALL_ACTIONS) === Effect.Allow;
+
     this.#log([{ reqWithActions: { ...req, actions: [parsedArgs.action] }, result: { [parsedArgs.action]: isAllowed ? Effect.Allow : Effect.Deny } }], 'IsAllowed');
+
     return isAllowed;
   }
 

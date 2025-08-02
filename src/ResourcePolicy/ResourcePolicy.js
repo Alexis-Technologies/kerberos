@@ -12,17 +12,17 @@ class ResourcePolicy {
     return shape;
   }
 
-  static parseConstants(constants) {
-    return constants instanceof Constants ? constants : new Constants(constants);
+  static parseConstants(constants, { z } = {}) {
+    return constants instanceof Constants ? constants : new Constants(constants, { z });
   }
 
-  static parseVariables(variables) {
-    return variables instanceof Variables ? variables : new Variables(variables);
+  static parseVariables(variables, { z } = {}) {
+    return variables instanceof Variables ? variables : new Variables(variables, { z });
   }
 
-  static parseConditions(conditions) {
+  static parseConditions(conditions, { z } = {}) {
     if (!conditions) return undefined;
-    return conditions instanceof Conditions ? conditions : new Conditions(conditions);
+    return conditions instanceof Conditions ? conditions : new Conditions(conditions, { z });
   }
 
   #shape = null;
@@ -30,15 +30,18 @@ class ResourcePolicy {
   constructor(shape, { z } = {}) {
     this.#shape = ResourcePolicy.parseShape(shape, { z });
     if (this.#shape.resourcePolicy.constants) {
-      this.#shape.resourcePolicy.constants = ResourcePolicy.parseConstants(this.#shape.resourcePolicy.constants);
+      this.#shape.resourcePolicy.constants = ResourcePolicy.parseConstants(this.#shape.resourcePolicy.constants, { z });
     }
     if (this.#shape.resourcePolicy.variables) {
-      this.#shape.resourcePolicy.variables = ResourcePolicy.parseVariables(this.#shape.resourcePolicy.variables);
+      this.#shape.resourcePolicy.variables = ResourcePolicy.parseVariables(this.#shape.resourcePolicy.variables, { z });
     }
-    this.#shape.resourcePolicy.rules = this.#shape.resourcePolicy.rules.map((rule) => ({
-      ...rule,
-      condition: ResourcePolicy.parseConditions(rule.condition),
-    }));
+    if (this.#shape.resourcePolicy.rules?.length) {
+      const rules = [];
+      for (const rule of this.#shape.resourcePolicy.rules) {
+        rules.push({ ...rule, condition: ResourcePolicy.parseConditions(rule.condition, { z }) });
+      }
+      this.#shape.resourcePolicy.rules = rules;
+    }
   }
 
   get kind() {
@@ -53,20 +56,23 @@ class ResourcePolicy {
     return this.#shape.resourcePolicy.rules;
   }
 
-  populateVariables(req) {
-    const variables = this.#shape.resourcePolicy.variables?.get(req);
-    return { ...req, variables, V: variables };
+  get shape() {
+    return this.#shape;
   }
 
-  populateConstants(req) {
-    const constants = this.#shape.resourcePolicy.constants?.get();
-    return { ...req, constants, C: constants };
-  }
-
-  buildEffects(req, derivedRoles) {
+  // returns map of actions and effects
+  check(req, derivedRoles) {
     const result = new Map();
 
-    for (const action of req.actions) {
+    if (!req.actions?.length) return result;
+
+    const constants = this.#shape.resourcePolicy.constants?.get();
+    const reqWithConstants = { ...req, constants, C: constants };
+
+    const variables = this.#shape.resourcePolicy.variables?.get(reqWithConstants);
+    const reqWithVariables = { ...reqWithConstants, variables, V: variables };
+
+    for (const action of reqWithVariables.actions) {
       const actionEffects = [];
 
       for (const rule of this.rules) {
@@ -74,16 +80,14 @@ class ResourcePolicy {
         if (!rule.actions.includes(ALL_ACTIONS) && !rule.actions.includes(action)) continue;
 
         // Checking if the roles match
-        const rolesMatch = rule.roles?.some((role) => req.P.roles.includes(role)) ?? false;
+        const rolesMatch = rule.roles?.some((role) => reqWithVariables.P.roles.includes(role)) ?? false;
         const derivedRolesMatch = rule.derivedRoles?.some((role) => derivedRoles.has(role)) ?? false;
 
         if (!rolesMatch && !derivedRolesMatch) continue;
 
         // Checking the condition
-        const conditionPasses = rule.condition ? rule.condition.isFulfilled(req) : true;
-        if (conditionPasses) {
-          actionEffects.push(rule.effect);
-        }
+        const isConditionFulfilled = rule.condition ? rule.condition.isFulfilled(reqWithVariables) : true;
+        if (isConditionFulfilled) actionEffects.push(rule.effect);
       }
 
       if (actionEffects.includes(Effect.Deny)) {
@@ -97,16 +101,6 @@ class ResourcePolicy {
     }
 
     return result;
-  }
-
-  isAllowed(req, derivedRoles) {
-    const effects = this.buildEffects(this.populateVariables(this.populateConstants({ ...req, actions: [req.action] })), derivedRoles);
-    return effects.get(req.action) === Effect.Allow || effects.get(ALL_ACTIONS) === Effect.Allow;
-  }
-
-  // returns map of actions and effects
-  check(req, derivedRoles) {
-    return this.buildEffects(this.populateVariables(this.populateConstants(req)), derivedRoles);
   }
 }
 
