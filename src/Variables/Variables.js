@@ -18,7 +18,11 @@ class Variables {
   }
 
   get(req) {
-    return Object.fromEntries(Object.entries(this.#shape).map(([name, fn]) => [name, fn(req)]));
+    const result = {};
+    for (const name in this.#shape) {
+      if (Object.prototype.hasOwnProperty.call(this.#shape, name)) result[name] = this.#shape[name](req);
+    }
+    return result;
   }
 }
 
