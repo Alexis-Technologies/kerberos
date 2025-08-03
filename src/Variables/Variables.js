@@ -20,7 +20,8 @@ class Variables {
   get(req) {
     const result = {};
     for (const name in this.#shape) {
-      if (Object.prototype.hasOwnProperty.call(this.#shape, name)) result[name] = this.#shape[name](req);
+      if (!Object.prototype.hasOwnProperty.call(this.#shape, name)) continue;
+      result[name] = this.#shape[name](req);
     }
     return result;
   }

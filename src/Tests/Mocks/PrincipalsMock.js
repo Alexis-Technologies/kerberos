@@ -22,12 +22,14 @@ class PrincipalsMock {
   constructor(principals, { z } = {}) {
     const parsedPrincipals = PrincipalsMock.parseShape(principals, { z });
     if (Array.isArray(parsedPrincipals)) {
-      parsedPrincipals.forEach((principal) => this.#principals.set(principal.name, principal));
+      for (const principal of parsedPrincipals) this.#principals.set(principal.name, principal);
     } else {
-      Object.entries(parsedPrincipals).forEach(([name, principal]) => {
+      for (const name in parsedPrincipals) {
+        if (!Object.prototype.hasOwnProperty.call(parsedPrincipals, name)) continue;
+        const principal = parsedPrincipals[name];
         const mock = new PrincipalMock({ ...principal, name });
         this.#principals.set(mock.name, mock);
-      });
+      }
     }
   }
 

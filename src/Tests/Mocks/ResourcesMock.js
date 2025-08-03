@@ -22,12 +22,14 @@ class ResourcesMock {
   constructor(resources, { z } = {}) {
     const parsedResources = ResourcesMock.parseShape(resources, { z });
     if (Array.isArray(parsedResources)) {
-      parsedResources.forEach((resource) => this.#resources.set(resource.name, resource));
+      for (const resource of parsedResources) this.#resources.set(resource.name, resource);
     } else {
-      Object.entries(parsedResources).forEach(([name, resource]) => {
+      for (const name in parsedResources) {
+        if (!Object.prototype.hasOwnProperty.call(parsedResources, name)) continue;
+        const resource = parsedResources[name];
         const mock = new ResourceMock({ ...resource, name });
         this.#resources.set(mock.name, mock);
-      });
+      }
     }
   }
 
