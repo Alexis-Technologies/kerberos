@@ -8,10 +8,7 @@ class KerberosTestZodSchemas extends ZodSchemas {
       .object({
         principals: z.union([z.array(z.string()).nonempty(), z.instanceof(PrincipalsMock)]),
         resources: z.union([z.array(z.string()).nonempty(), z.instanceof(ResourcesMock)]),
-        actions: z
-          .array(z.string())
-          .nonempty()
-          .transform((actions) => new Set(actions)),
+        actions: z.array(z.string()).nonempty().transform((actions) => new Set(actions)),
       });
   }
 
@@ -56,34 +53,46 @@ class KerberosTest {
     return shape;
   }
 
-  constructor(schema, kerberos, { z } = {}) {
-    this.schema = KerberosTest.parseShape(schema, { z });
+  #shape = null;
+
+  #kerberos = null;
+
+  #principals = [];
+
+  #resources = [];
+
+  constructor(shape, kerberos, { z } = {}) {
+    this.#shape = KerberosTest.parseShape(shape, { z });
     if (kerberos && !(kerberos instanceof Kerberos)) throw new Error('Invalid Kerberos instance!');
-    this.kerberos = kerberos;
-    this.principals = this.schema.input.principals instanceof PrincipalsMock ? [this.schema.input.principals] : [];
-    this.resources = this.schema.input.resources instanceof ResourcesMock ? [this.schema.input.resources] : [];
+    this.#kerberos = kerberos;
+    if (this.#shape.input.principals instanceof PrincipalsMock) this.#principals.push(this.#shape.input.principals);
+    if (this.#shape.input.resources instanceof ResourcesMock) this.#resources.push(this.#shape.input.resources);
   }
 
   run({ kerberos, principals, resources, effectAsBoolean = false }, { describe, it, assert }) {
-    describe(this.schema.name, () => {
+    describe(this.#shape.name, () => {
       if (kerberos && !(kerberos instanceof Kerberos)) throw new Error('Invalid Kerberos instance!');
-      if (principals && principals?.some((p) => !(p instanceof PrincipalsMock))) {
-        throw new Error('Invalid PrincipalsMock instance!');
+      if (principals) {
+        for (const p of principals) {
+          if (!(p instanceof PrincipalsMock)) throw new Error('Invalid PrincipalsMock instance!');
+        }
       }
-      if (resources && resources?.some((r) => !(r instanceof ResourcesMock))) {
-        throw new Error('Invalid ResourcesMock instance!');
+      if (resources) {
+        for (const r of resources) {
+          if (!(r instanceof ResourcesMock)) throw new Error('Invalid ResourcesMock instance!');
+        }
       }
 
-      const kerberosInstance = this.kerberos || kerberos;
+      const kerberosInstance = this.#kerberos || kerberos;
       if (!kerberosInstance) throw new Error('Kerberos instance is required!');
 
       const allPrincipalsMock = new PrincipalsMock([
         ...(principals?.flatMap((p) => p.mocks) || []),
-        ...this.principals.flatMap((p) => p.mocks),
+        ...this.#principals.flatMap((p) => p.mocks),
       ]);
       const allResourcesMock = new ResourcesMock([
         ...(resources?.flatMap((r) => r.mocks) || []),
-        ...this.resources.flatMap((r) => r.mocks),
+        ...this.#resources.flatMap((r) => r.mocks),
       ]);
 
       const principalsMap = new Map(allPrincipalsMock.mocks.map((p) => [p.name, p]));
@@ -91,7 +100,7 @@ class KerberosTest {
 
       // Group expected results by principals
       const expectedByPrincipal = new Map();
-      for (const expectedItem of this.schema.expected) {
+      for (const expectedItem of this.#shape.expected) {
         const principalName =
           expectedItem.principal instanceof PrincipalMock ? expectedItem.principal.name : expectedItem.principal;
         const resourceName =
