@@ -50,14 +50,14 @@ class KerberosZodSchemas extends ZodSchemas {
 // TODO: 1) outputs, 2) scopes, 3) metadata
 class Kerberos {
   static parsePolicy(policy, { schema, z } = {}) {
-    if (schema) return policy instanceof ResourcePolicy ? schema.parse(policy) : new ResourcePolicy(policy);
-    if (z) return policy instanceof ResourcePolicy ? KerberosZodSchemas.buildResourcePolicyInstance(z).parse(policy) : new ResourcePolicy(policy);
+    if (schema) return policy instanceof ResourcePolicy ? schema.parse(policy) : new ResourcePolicy(policy, { z });
+    if (z) return policy instanceof ResourcePolicy ? KerberosZodSchemas.buildResourcePolicyInstance(z).parse(policy) : new ResourcePolicy(policy, { z });
     return policy instanceof ResourcePolicy ? policy : new ResourcePolicy(policy);
   }
 
   static parseDerivedRoles(roles, { schema, z } = {}) {
-    if (schema) return roles instanceof DerivedRoles ? schema.parse(roles) : new DerivedRoles(roles);
-    if (z) return roles instanceof DerivedRoles ? KerberosZodSchemas.buildDerivedRolesInstance(z).parse(roles) : new DerivedRoles(roles);
+    if (schema) return roles instanceof DerivedRoles ? schema.parse(roles) : new DerivedRoles(roles, { z });
+    if (z) return roles instanceof DerivedRoles ? KerberosZodSchemas.buildDerivedRolesInstance(z).parse(roles) : new DerivedRoles(roles, { z });
     return roles instanceof DerivedRoles ? roles : new DerivedRoles(roles);
   }
 
@@ -126,44 +126,52 @@ class Kerberos {
   }
 
   #getPoliciesMap(policies) {
-    return new Map(
-      policies.map((policy) => {
-        const handledPolicy = Kerberos.parsePolicy(policy, { schema: this.#resourcePolicyInstanceZodSchema });
-        return [handledPolicy.kind, handledPolicy];
-      })
-    );
+    const policiesMap = new Map();
+    for (const policy of policies) {
+      const handledPolicy = Kerberos.parsePolicy(policy, { schema: this.#resourcePolicyInstanceZodSchema, z: this.#z });
+      policiesMap.set(handledPolicy.kind, handledPolicy);
+    }
+    return policiesMap;
   }
 
   #getDerivedRolesMap(roles) {
-    return (
-      new Map(
-        roles?.map((role) => {
-          const handledRole = Kerberos.parseDerivedRoles(role, { schema: this.#derivedRolesInstanceZodSchema });
-          return [handledRole.name, handledRole];
-        })
-      ) ?? new Map()
-    );
+    const derivedRolesMap = new Map();
+    if (!roles) return derivedRolesMap;
+    for (const role of roles) {
+      const handledRole = Kerberos.parseDerivedRoles(role, { schema: this.#derivedRolesInstanceZodSchema, z: this.#z });
+      derivedRolesMap.set(handledRole.name, handledRole);
+    }
+    return derivedRolesMap;
   }
 
   #getImportedDerivedRoles(policy, req) {
-    return policy.importDerivedRoles
-      .map((name) => this.#derivedRoles.get(name))
-      .filter((v) => !!v)
-      .reduce((acc, curr) => new Set([...acc, ...curr.get(req)]), new Set());
+    const importedRoles = new Set();
+    for (const name of policy.importDerivedRoles) {
+      const role = this.#derivedRoles.get(name);
+      if (!role) continue;
+      const derivedRoles = role.get(req);
+      if (!derivedRoles) continue;
+      for (const derivedRole of derivedRoles) importedRoles.add(derivedRole);
+    }
+    return importedRoles;
   }
 
   #buildLogData(input, reqKind) {
-    return input.flatMap(({ reqWithActions, result }) =>
-      reqWithActions.actions.map((action) => ({
-        Timestamp: new Date().toISOString(),
-        'Request kind': reqKind,
-        'Principal ID': reqWithActions.P.id,
-        'Resource kind': reqWithActions.R.kind,
-        'Resource ID': reqWithActions.R.id,
-        Action: action,
-        Effect: result[action],
-      }))
-    );
+    const logData = [];
+    for (const { reqWithActions, result } of input) {
+      for (const action of reqWithActions.actions) {
+        logData.push({
+          Timestamp: new Date().toISOString(),
+          'Request kind': reqKind,
+          'Principal ID': reqWithActions.P.id,
+          'Resource kind': reqWithActions.R.kind,
+          'Resource ID': reqWithActions.R.id,
+          Action: action,
+          Effect: result[action],
+        });
+      }
+    }
+    return logData;
   }
 
   #log(input, reqKind) {
@@ -175,7 +183,7 @@ class Kerberos {
       const [{ reqWithActions, result }] = input;
       const [action] = reqWithActions.actions;
       const effect = result[action];
-      this.#logger.log?.(`Principal ${reqWithActions.P.id} is ${effect === Effect.Allow ? 'ALLOWED' : 'DENIED'} to perform action ${action} on resource ${reqWithActions.R.id}`);
+      this.#logger.log?.(`Principal ${reqWithActions.P.id} is ${effect === Effect.Allow || effect === true ? 'ALLOWED' : 'DENIED'} to perform action ${action} on resource ${reqWithActions.R.id}`);
     }
 
     const debugData = this.#buildLogData(input, reqKind);
@@ -189,8 +197,8 @@ class Kerberos {
   }
 
   async isAllowed(args) {
-    const parsedArgs = Kerberos.parseIsAllowedArgs(args, { schema: this.#isAllowedArgsZodSchema });
-    const req = Kerberos.parseRequest(parsedArgs.principal, parsedArgs.resource, { schema: this.#requestZodSchema });
+    const parsedArgs = Kerberos.parseIsAllowedArgs(args, { schema: this.#isAllowedArgsZodSchema, z: this.#z });
+    const req = Kerberos.parseRequest(parsedArgs.principal, parsedArgs.resource, { schema: this.#requestZodSchema, z: this.#z });
 
     const policy = this.#policies.get(req.R.kind);
     const reqWithActions = { ...req, actions: [parsedArgs.action] };
@@ -208,31 +216,33 @@ class Kerberos {
   }
 
   async checkResources(args, effectAsBoolean = false) {
+    const results = [];
     const inputForLog = [];
-    const parsedArgs = Kerberos.parseCheckResourcesArgs(args, { schema: this.#checkResourcesArgsZodSchema });
-    const results = parsedArgs.resources.map(({ resource, actions }) => {
-      const req = Kerberos.parseRequest(parsedArgs.principal, resource, { schema: this.#requestZodSchema });
+    const parsedArgs = Kerberos.parseCheckResourcesArgs(args, { schema: this.#checkResourcesArgsZodSchema, z: this.#z });
+
+    for (const { resource, actions } of parsedArgs.resources) {
+      const req = Kerberos.parseRequest(parsedArgs.principal, resource, { schema: this.#requestZodSchema, z: this.#z });
 
       const policy = this.#policies.get(req.R.kind);
       if (!policy) {
-        return {
-          resource,
-          actions: Object.fromEntries(actions.map((action) => [action, !effectAsBoolean ? Effect.Deny : false])),
-        };
+        const actionsResult = {};
+        for (const action of actions) actionsResult[action] = !effectAsBoolean ? Effect.Deny : false;
+        results.push({ resource, actions: actionsResult });
+        inputForLog.push({ reqWithActions: { ...req, actions }, result: actionsResult });
+        continue;
       }
 
       const reqWithActions = { ...req, actions };
       const result = policy.check(reqWithActions, this.#getImportedDerivedRoles(policy, req), effectAsBoolean);
 
       const actionsResult = Object.fromEntries([...result.entries()]);
+      results.push({ resource, actions: actionsResult });
       inputForLog.push({ reqWithActions, result: actionsResult });
-
-      return { resource, actions: actionsResult };
-    });
+    }
 
     this.#log(inputForLog, 'CheckResources');
 
-    return Kerberos.parseCheckResourcesResponse({ results }, { schema: this.#checkResourcesResponseZodSchema });
+    return Kerberos.parseCheckResourcesResponse({ results }, { schema: this.#checkResourcesResponseZodSchema, z: this.#z });
   }
 }
 
