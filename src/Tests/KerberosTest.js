@@ -72,31 +72,31 @@ class KerberosTest {
   run({ kerberos, principals, resources, effectAsBoolean = false }, { describe, it, assert }) {
     describe(this.#shape.name, () => {
       if (kerberos && !(kerberos instanceof Kerberos)) throw new Error('Invalid Kerberos instance!');
+
+      const kerberosInstance = this.#kerberos || kerberos;
+      if (!kerberosInstance) throw new Error('Kerberos instance is required!');
+
+      const principalMocks = [];
+      const resourceMocks = [];
+
       if (principals) {
         for (const p of principals) {
           if (!(p instanceof PrincipalsMock)) throw new Error('Invalid PrincipalsMock instance!');
+          principalMocks.push(...p.mocks);
         }
       }
       if (resources) {
         for (const r of resources) {
           if (!(r instanceof ResourcesMock)) throw new Error('Invalid ResourcesMock instance!');
+          resourceMocks.push(...r.mocks);
         }
       }
 
-      const kerberosInstance = this.#kerberos || kerberos;
-      if (!kerberosInstance) throw new Error('Kerberos instance is required!');
+      for (const p of this.#principals) principalMocks.push(...p.mocks);
+      const allPrincipalsMock = new PrincipalsMock(principalMocks);
 
-      const allPrincipalsMock = new PrincipalsMock([
-        ...(principals?.flatMap((p) => p.mocks) || []),
-        ...this.#principals.flatMap((p) => p.mocks),
-      ]);
-      const allResourcesMock = new ResourcesMock([
-        ...(resources?.flatMap((r) => r.mocks) || []),
-        ...this.#resources.flatMap((r) => r.mocks),
-      ]);
-
-      const principalsMap = new Map(allPrincipalsMock.mocks.map((p) => [p.name, p]));
-      const resourcesMap = new Map(allResourcesMock.mocks.map((r) => [r.name, r]));
+      for (const r of this.#resources) resourceMocks.push(...r.mocks);
+      const allResourcesMock = new ResourcesMock(resourceMocks);
 
       // Group expected results by principals
       const expectedByPrincipal = new Map();
@@ -106,15 +106,11 @@ class KerberosTest {
         const resourceName =
           expectedItem.resource instanceof ResourceMock ? expectedItem.resource.name : expectedItem.resource;
 
-        const principal = principalsMap.get(principalName);
-        const resource = resourcesMap.get(resourceName);
+        const principal = allPrincipalsMock.get(principalName);
+        const resource = allResourcesMock.get(resourceName);
 
-        if (!principal) {
-          throw new Error(`Principal "${principalName}" not found!`);
-        }
-        if (!resource) {
-          throw new Error(`Resource "${resourceName}" not found!`);
-        }
+        if (!principal) throw new Error(`Principal "${principalName}" not found!`);
+        if (!resource) throw new Error(`Resource "${resourceName}" not found!`);
 
         if (!expectedByPrincipal.has(principalName)) {
           expectedByPrincipal.set(principalName, {
@@ -148,26 +144,16 @@ class KerberosTest {
         it(`should match expected actions for principal "${principalName}"`, () => {
           const resourcesToCheck = [];
           for (const resourceData of principalResourcesMap.values()) {
-            resourcesToCheck.push({
-              resource: resourceData.resource,
-              actions: Array.from(resourceData.actions),
-            });
+            resourcesToCheck.push({ resource: resourceData.resource, actions: Array.from(resourceData.actions) });
           }
 
-          const { results } = kerberosInstance.checkResources(
-            {
-              principal,
-              resources: resourcesToCheck,
-            },
-            effectAsBoolean
-          );
+          const { results } = kerberosInstance.checkResources({ principal, resources: resourcesToCheck }, effectAsBoolean);
 
           // Check results
           for (const result of results) {
             const resource = allResourcesMock.getById(result.resource.id);
-            if (!resource) {
-              throw new Error(`Resource with ID "${result.resource.id}" not found!`);
-            }
+            if (!resource) throw new Error(`Resource with ID "${result.resource.id}" not found!`);
+
             const resourceName = resource.name;
             const resourceData = principalResourcesMap.get(resourceName);
 
