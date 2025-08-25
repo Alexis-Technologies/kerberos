@@ -141,13 +141,13 @@ class KerberosTest {
       for (const [principalName, principalData] of expectedByPrincipal.entries()) {
         const { principal, resources: principalResourcesMap } = principalData;
 
-        it(`should match expected actions for principal "${principalName}"`, () => {
+        it(`should match expected actions for principal "${principalName}"`, async () => {
           const resourcesToCheck = [];
           for (const resourceData of principalResourcesMap.values()) {
             resourcesToCheck.push({ resource: resourceData.resource, actions: Array.from(resourceData.actions) });
           }
 
-          const { results } = kerberosInstance.checkResources({ principal, resources: resourcesToCheck }, effectAsBoolean);
+          const { results } = await kerberosInstance.checkResources({ principal, resources: resourcesToCheck }, effectAsBoolean);
 
           // Check results
           for (const result of results) {
