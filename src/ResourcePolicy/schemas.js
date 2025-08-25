@@ -1,12 +1,14 @@
 const { VariablesZodSchemas, Variables } = require('../Variables');
 const { ConditionsZodSchemas, Conditions } = require('../Conditions');
 const { ConstantsZodSchemas, Constants } = require('../Constants');
+const { OutputsZodSchemas, Outputs } = require('../Outputs');
 const { ALL_ACTIONS, Effect, ZodSchemas } = require('../schemas.js');
 
 class ResourcePolicyZodSchemas extends ZodSchemas {
   static buildRuleShape(z) {
     return z
       .object({
+        name: z.string().optional(),
         actions: z.array(z.string()).nonempty(),
         effect: z.nativeEnum(Effect),
         roles: z
@@ -15,6 +17,7 @@ class ResourcePolicyZodSchemas extends ZodSchemas {
           .optional(),
         derivedRoles: z.array(z.string()).nonempty().optional(),
         condition: z.union([ConditionsZodSchemas.buildShape(z), z.instanceof(Conditions)]).optional(),
+        output: z.union([OutputsZodSchemas.buildShape(z), z.instanceof(Outputs)]).optional(),
       })
       .check((ctx) => {
         if (ctx.value.roles && ctx.value.derivedRoles) {

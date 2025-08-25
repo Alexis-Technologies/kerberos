@@ -1,5 +1,6 @@
 const { ResourcePolicy } = require('./ResourcePolicy/index.js');
 const { DerivedRoles } = require('./DerivedRoles/index.js');
+const { Outputs } = require('./Outputs/index.js');
 const { ALL_ACTIONS, Effect, ZodSchemas } = require('./schemas.js');
 
 class KerberosZodSchemas extends ZodSchemas {
@@ -34,7 +35,7 @@ class KerberosZodSchemas extends ZodSchemas {
   }
 }
 
-// TODO: 1) outputs, 2) scopes, 3) metadata
+// TODO: 1) scopes, 2) metadata
 class Kerberos {
   static parsePolicy(policy, { schema, z } = {}) {
     if (schema) return policy instanceof ResourcePolicy ? schema.parse(policy) : new ResourcePolicy(policy, { z });
@@ -138,6 +139,15 @@ class Kerberos {
     const logData = [];
     for (const { reqWithActions, result } of input) {
       for (const action of reqWithActions.actions) {
+        // TODO: enable output logging
+        // const policy = this.#policies.get(reqWithActions.R.kind);
+        // const output = result.outputs?.get(Outputs.buildSrc({
+        //   version: policy.shape.resourcePolicy.version,
+        //   name: policy.shape.resourcePolicy.name,
+        //   kind: policy.kind,
+        //   index: undefined,
+        // }));
+
         logData.push({
           Timestamp: new Date().toISOString(),
           'Request kind': reqKind,
@@ -145,7 +155,8 @@ class Kerberos {
           'Resource kind': reqWithActions.R.kind,
           'Resource ID': reqWithActions.R.id,
           Action: action,
-          Effect: result[action],
+          Effect: result.effects.get(action),
+          // Output: output?.val,
         });
       }
     }
@@ -160,7 +171,7 @@ class Kerberos {
     if (reqKind === 'IsAllowed') {
       const [{ reqWithActions, result }] = input;
       const [action] = reqWithActions.actions;
-      const effect = result[action];
+      const effect = result.effects.get(action);
       this.#logger.log?.(`Principal ${reqWithActions.P.id} is ${effect === Effect.Allow || effect === true ? 'ALLOWED' : 'DENIED'} to perform action ${action} on resource ${reqWithActions.R.id}`);
     }
 
@@ -181,14 +192,15 @@ class Kerberos {
     const policy = this.#policies.get(req.R.kind);
     const reqWithActions = { ...req, actions: [parsedArgs.action] };
     if (!policy) {
-      this.#log([{ reqWithActions, result: { [parsedArgs.action]: Effect.Deny } }], 'IsAllowed');
+      const effects = new Map([[parsedArgs.action, Effect.Deny]]);
+      this.#log([{ reqWithActions, result: { effects, outputs: new Map() } }], 'IsAllowed');
       return false;
     }
 
-    const result = policy.check(reqWithActions, this.#getImportedDerivedRoles(policy, req));
-    const isAllowed = result.get(parsedArgs.action) === Effect.Allow || result.get(ALL_ACTIONS) === Effect.Allow;
+    const { effects, outputs } = policy.check(reqWithActions, this.#getImportedDerivedRoles(policy, req));
+    const isAllowed = effects.get(parsedArgs.action) === Effect.Allow || effects.get(ALL_ACTIONS) === Effect.Allow;
 
-    this.#log([{ reqWithActions: { ...req, actions: [parsedArgs.action] }, result: { [parsedArgs.action]: isAllowed ? Effect.Allow : Effect.Deny } }], 'IsAllowed');
+    this.#log([{ reqWithActions: { ...req, actions: [parsedArgs.action] }, result: { effects, outputs } }], 'IsAllowed');
 
     return isAllowed;
   }
@@ -203,19 +215,27 @@ class Kerberos {
 
       const policy = this.#policies.get(req.R.kind);
       if (!policy) {
-        const actionsResult = {};
-        for (const action of actions) actionsResult[action] = !effectAsBoolean ? Effect.Deny : false;
-        results.push({ resource, actions: actionsResult });
-        inputForLog.push({ reqWithActions: { ...req, actions }, result: actionsResult });
+        const effects = new Map();
+        const outputs = new Map();
+        for (const action of actions) effects.set(action, !effectAsBoolean ? Effect.Deny : false);
+        results.push({
+          resource: { id: resource.id, kind: resource.kind },
+          actions: Object.fromEntries([...effects.entries()]),
+          outputs: [...outputs.values()],
+        });
+        inputForLog.push({ reqWithActions: { ...req, actions }, result: { effects, outputs } });
         continue;
       }
 
       const reqWithActions = { ...req, actions };
-      const result = policy.check(reqWithActions, this.#getImportedDerivedRoles(policy, req), effectAsBoolean);
+      const { effects, outputs } = policy.check(reqWithActions, this.#getImportedDerivedRoles(policy, req), effectAsBoolean);
 
-      const actionsResult = Object.fromEntries([...result.entries()]);
-      results.push({ resource: { id: resource.id, kind: resource.kind }, actions: actionsResult });
-      inputForLog.push({ reqWithActions, result: actionsResult });
+      results.push({
+        resource: { id: resource.id, kind: resource.kind },
+        actions: Object.fromEntries([...effects.entries()]),
+        outputs: [...outputs.values()],
+      });
+      inputForLog.push({ reqWithActions, result: { effects, outputs } });
     }
 
     this.#log(inputForLog, 'CheckResources');

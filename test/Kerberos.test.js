@@ -47,10 +47,12 @@ describe('Kerberos', () => {
             {
               resource: { id: 'expense1', kind: 'expense' },
               actions: { view: Effect.Allow, create: Effect.Allow, delete: Effect.Deny },
+              outputs: [],
             },
             {
               resource: { id: 'expense4', kind: 'expense' },
               actions: { view: Effect.Deny, create: Effect.Allow },
+              outputs: [],
             },
           ],
         });
@@ -70,10 +72,12 @@ describe('Kerberos', () => {
             {
               resource: { id: 'expense1', kind: 'expense' },
               actions: { view: true, create: true, delete: false },
+              outputs: [],
             },
             {
               resource: { id: 'expense4', kind: 'expense' },
               actions: { view: false, create: true },
+              outputs: [],
             },
           ],
         });
@@ -121,10 +125,12 @@ describe('Kerberos', () => {
             {
               resource: { id: 'expense1', kind: 'expense' },
               actions: { view: Effect.Allow, create: Effect.Allow, delete: Effect.Deny },
+              outputs: [],
             },
             {
               resource: { id: 'expense4', kind: 'expense' },
               actions: { view: Effect.Deny, create: Effect.Allow },
+              outputs: [],
             },
           ],
         });
@@ -144,10 +150,12 @@ describe('Kerberos', () => {
             {
               resource: { id: 'expense1', kind: 'expense' },
               actions: { view: true, create: true, delete: false },
+              outputs: [],
             },
             {
               resource: { id: 'expense4', kind: 'expense' },
               actions: { view: false, create: true },
+              outputs: [],
             },
           ],
         });
@@ -195,10 +203,12 @@ describe('Kerberos', () => {
             {
               resource: { id: 'expense1', kind: 'expense' },
               actions: { view: Effect.Allow, create: Effect.Allow, delete: Effect.Deny },
+              outputs: [],
             },
             {
               resource: { id: 'expense4', kind: 'expense' },
               actions: { view: Effect.Deny, create: Effect.Allow },
+              outputs: [],
             },
           ],
         });
@@ -218,10 +228,12 @@ describe('Kerberos', () => {
             {
               resource: { id: 'expense1', kind: 'expense' },
               actions: { view: true, create: true, delete: false },
+              outputs: [],
             },
             {
               resource: { id: 'expense4', kind: 'expense' },
               actions: { view: false, create: true },
+              outputs: [],
             },
           ],
         });
