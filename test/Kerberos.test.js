@@ -9,36 +9,36 @@ describe('Kerberos', () => {
   const kerberos = new Kerberos([expensePolicy], [commonRolesPolicy], { logger: true });
 
   describe('isAllowed', () => {
-    it('should return true if the action is allowed', () => {
+    it('should return true if the action is allowed', async () => {
       const principal = principalsPolicy.sally;
       const resource = resourcesPolicy.expense1;
       const action = 'view';
 
-      const isAllowed = kerberos.isAllowed({ principal, action, resource });
+      const isAllowed = await kerberos.isAllowed({ principal, action, resource });
 
       assert.strictEqual(isAllowed, true);
     });
 
-    it('should return false if the action is not allowed', () => {
+    it('should return false if the action is not allowed', async () => {
       const principal = principalsPolicy.sally;
       const resource = resourcesPolicy.expense1;
       const action = 'approve';
 
-      const isAllowed = kerberos.isAllowed({ principal, action, resource });
+      const isAllowed = await kerberos.isAllowed({ principal, action, resource });
 
       assert.strictEqual(isAllowed, false);
     });
   });
 
   describe('checkResources', () => {
-    it('should return the effect actions map for each resource (Effect mode)', () => {
+    it('should return the effect actions map for each resource (Effect mode)', async () => {
       const principal = principalsPolicy.sally;
       const resources = [
         { resource: resourcesPolicy.expense1, actions: ['view', 'create', 'delete'] },
         { resource: resourcesPolicy.expense4, actions: ['view', 'create'] },
       ];
 
-      const results = kerberos.checkResources({ principal, resources });
+      const results = await kerberos.checkResources({ principal, resources });
 
       assert.deepStrictEqual(results, {
         results: [
@@ -54,14 +54,14 @@ describe('Kerberos', () => {
       });
     });
 
-    it('should return the effect actions map for each resource (Boolean mode)', () => {
+    it('should return the effect actions map for each resource (Boolean mode)', async () => {
       const principal = principalsPolicy.sally;
       const resources = [
         { resource: resourcesPolicy.expense1, actions: ['view', 'create', 'delete'] },
         { resource: resourcesPolicy.expense4, actions: ['view', 'create'] },
       ];
 
-      const results = kerberos.checkResources({ principal, resources }, true);
+      const results = await kerberos.checkResources({ principal, resources }, true);
 
       assert.deepStrictEqual(results, {
         results: [

@@ -1,5 +1,6 @@
 const { describe, it } = require('node:test');
 const { strict: assert } = require('node:assert');
+const { z } = require('zod');
 
 const { Variables } = require('../src/Variables/index.js');
 
@@ -69,10 +70,10 @@ describe('Variables', () => {
     });
   });
 
-  it('should throw an error with an invalid schema', () => {
+  it('should throw an error with an invalid schema if zod is provided', () => {
     assert.throws(() => {
       // eslint-disable-next-line no-new
-      new Variables({ invalidKey: 'invalidValue' });
+      new Variables({ invalidKey: 'invalidValue' }, { z });
     });
   });
 });

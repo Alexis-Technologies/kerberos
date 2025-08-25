@@ -25,9 +25,9 @@ class KerberosTests {
     return policies;
   }
 
-  static parseTests(tests, { z } = {}) {
+  static parseTests(tests, kerberos, { z } = {}) {
     const parsedTests = [];
-    for (const test of tests) parsedTests.push(test instanceof KerberosTest ? test : new KerberosTest(test, { z }));
+    for (const test of tests) parsedTests.push(test instanceof KerberosTest ? test : new KerberosTest(test, kerberos, { z }));
     return parsedTests;
   }
 
@@ -53,7 +53,7 @@ class KerberosTests {
     if (!kerberos || !(kerberos instanceof Kerberos)) throw new Error('Kerberos instance is required');
     this.#kerberos = kerberos;
     this.#policies = KerberosTests.parsePolicies(policies, { z });
-    for (const policy of this.#policies) this.#tests.push(...KerberosTests.parseTests(policy.tests, { z }));
+    for (const policy of this.#policies) this.#tests.push(...KerberosTests.parseTests(policy.tests, kerberos, { z }));
     const principals = [];
     for (const policy of policies) principals.push(...KerberosTests.parsePrincipals(policy.principals, { z }));
     this.#principals = new PrincipalsMock(principals, { z });

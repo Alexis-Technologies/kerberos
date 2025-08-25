@@ -1,5 +1,6 @@
 const { describe, it } = require('node:test');
 const { strict: assert } = require('node:assert');
+const { z } = require('zod');
 
 const { Conditions } = require('../src/Conditions');
 
@@ -113,10 +114,10 @@ describe('Conditions', () => {
     assert.strictEqual(condition.isFulfilled(reqMock), false);
   });
 
-  it('should match with invalid schema', () => {
+  it('should throw an error with an invalid schema if zod is provided', () => {
     assert.throws(() => {
       // eslint-disable-next-line no-new
-      new Conditions({ invalidKey: 'invalidValue' });
+      new Conditions({ invalidKey: 'invalidValue' }, { z });
     });
   });
 
