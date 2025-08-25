@@ -220,7 +220,7 @@ class Kerberos {
 
     this.#log(inputForLog, 'CheckResources');
 
-    return results;
+    return { results };
   }
 }
 
