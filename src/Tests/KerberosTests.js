@@ -59,7 +59,7 @@ class KerberosTests {
     this.#principals = new PrincipalsMock(principals, { z });
     const resources = [];
     for (const policy of policies) resources.push(...KerberosTests.parseResources(policy.resources, { z }));
-    this.resources = new ResourcesMock(resources, { z });
+    this.#resources = new ResourcesMock(resources, { z });
   }
 
   run({ effectAsBoolean = false }, { describe, it, assert }) {
