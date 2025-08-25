@@ -9,15 +9,15 @@ class Conditions {
 
   #strategies = {
     any: (conds, req) => {
-      for (const cond of conds) if (cond(req)) return true;
+      for (const cond of conds) if (this.isFulfilled(req, cond)) return true;
       return false;
     },
     all: (conds, req) => {
-      for (const cond of conds) if (!cond(req)) return false;
+      for (const cond of conds) if (!this.isFulfilled(req, cond)) return false;
       return true;
     },
     none: (conds, req) => {
-      for (const cond of conds) if (cond(req)) return false;
+      for (const cond of conds) if (this.isFulfilled(req, cond)) return false;
       return true;
     },
   };
@@ -32,15 +32,20 @@ class Conditions {
     return this.#shape;
   }
 
-  isFulfilled(req) {
-    const cond = this.#shape.match;
+  isFulfilled(req, condition = null) {
+    const cond = condition || this.#shape.match;
     if (typeof cond === 'function') return cond(req);
     if (typeof cond !== 'object') throw new TypeError(`Invalid condition: ${cond}`);
 
-    const [strategyKey] = Object.keys(cond);
-    const strategy = this.#strategies[strategyKey];
-    if (!strategy) throw new Error(`Unknown strategy: ${strategyKey}`);
-    return strategy(cond[strategyKey], req);
+    const strategyKeys = Object.keys(cond);
+    const results = new Set();
+    for (const strategyKey of strategyKeys) {
+      const strategy = this.#strategies[strategyKey];
+      if (!strategy) throw new Error(`Unknown strategy: ${strategyKey}`);
+      const result = strategy(cond[strategyKey], req);
+      results.add(result);
+    }
+    return !results.has(false);
   }
 }
 

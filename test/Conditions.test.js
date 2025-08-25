@@ -128,7 +128,7 @@ describe('Conditions', () => {
           ({ P }) => P.id === 'user-123',
           {
             any: [({ P }) => P.attr.account.email === 'test@example.com', ({ P }) => P.attr.account.email === 'other@example.com'],
-            none: [({ P }) => P.attr.account.email === 'test@example.com', ({ P }) => P.id === 'user-999'],
+            none: [({ P }) => P.attr.account.email === 'wrong@example.com', ({ P }) => P.id === 'user-999'],
           },
         ],
       },
@@ -143,8 +143,8 @@ describe('Conditions', () => {
         all: [
           ({ P }) => P.id === 'user-123',
           {
-            any: [({ P }) => P.attr.account.email === '', ({ P }) => P.attr.account.email === ''],
-            none: [({ P }) => P.attr.account.email === '', ({ P }) => P.id === 'user-999'],
+            any: [({ P }) => P.attr.account.email === 'wrong@example.com', ({ P }) => P.attr.account.email === 'other@example.com'],
+            none: [({ P }) => P.attr.account.email === 'wrong@example.com', ({ P }) => P.id === 'user-999'],
           },
         ],
       },
