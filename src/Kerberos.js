@@ -168,7 +168,7 @@ class Kerberos {
     if (this.#logger.table) {
       this.#logger.table?.(debugData);
     } else {
-      this.#logger.debug?.(`Kerberos.js request log: ${JSON.stringify(debugData, null, 2)}`);
+      this.#logger.debug?.(debugData, `Kerberos.js request log`);
     }
 
     this.#logger.groupEnd?.();
