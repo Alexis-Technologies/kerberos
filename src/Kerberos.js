@@ -22,6 +22,7 @@ class KerberosZodSchemas extends ZodSchemas {
 
   static buildCheckResourcesArgs(z) {
     return z.object({
+      reqId: z.string().optional(),
       principal: ZodSchemas.buildRequestPrincipal(z),
       resources: z
         .array(
@@ -240,7 +241,9 @@ class Kerberos {
 
     this.#log(inputForLog, 'CheckResources');
 
-    return { results };
+    const response = { results };
+    if (parsedArgs.reqId) response.reqId = parsedArgs.reqId;
+    return response;
   }
 }
 

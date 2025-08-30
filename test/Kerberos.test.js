@@ -240,4 +240,49 @@ describe('Kerberos', () => {
       });
     });
   });
+
+  describe('checkResources with reqId', () => {
+    const kerberos = new Kerberos([expensePolicy], [commonRolesPolicy]);
+
+    it('should return reqId in response when provided in request', async () => {
+      const principal = principalsPolicy.sally;
+      const resources = [
+        { resource: resourcesPolicy.expense1, actions: ['view', 'create'] },
+      ];
+      const reqId = 'test-request-123';
+
+      const results = await kerberos.checkResources({ reqId, principal, resources });
+
+      assert.deepStrictEqual(results, {
+        reqId: 'test-request-123',
+        results: [
+          {
+            resource: { id: 'expense1', kind: 'expense' },
+            actions: { view: Effect.Allow, create: Effect.Allow },
+            outputs: [],
+          },
+        ],
+      });
+    });
+
+    it('should not include reqId in response when not provided in request', async () => {
+      const principal = principalsPolicy.sally;
+      const resources = [
+        { resource: resourcesPolicy.expense1, actions: ['view', 'create'] },
+      ];
+
+      const results = await kerberos.checkResources({ principal, resources });
+
+      assert.deepStrictEqual(results, {
+        results: [
+          {
+            resource: { id: 'expense1', kind: 'expense' },
+            actions: { view: Effect.Allow, create: Effect.Allow },
+            outputs: [],
+          },
+        ],
+      });
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(results, 'reqId'), false);
+    });
+  });
 });
