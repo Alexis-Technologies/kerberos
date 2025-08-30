@@ -1,12 +1,16 @@
 export type RequestPrincipal = {
   id: string;
   roles: string[];
+  policyVersion?: string;
+  scope?: string;
   attr?: Record<string, unknown>;
 };
 
 export type RequestResource = {
   id: string;
   kind: string;
+  policyVersion?: string;
+  scope?: string;
   attr?: Record<string, unknown>;
 };
 
@@ -15,6 +19,10 @@ export type BaseRequest = {
   P: RequestPrincipal;
   resource: RequestResource;
   R: RequestResource;
+  actions: string[];
+  reqId?: string;
+  callId?: string;
+  includeMeta?: boolean;
 };
 
 export enum Effect {
@@ -108,12 +116,29 @@ export class Kerberos {
   isAllowed(args: { principal: RequestPrincipal; resource: RequestResource; action: string }): boolean;
 
   checkResources(
-    args: { reqId?: string; principal: RequestPrincipal; resources: { resource: RequestResource; actions: string[] }[] },
+    args: { 
+      reqId?: string; 
+      principal: RequestPrincipal; 
+      resources: { resource: RequestResource; actions: string[] }[];
+      includeMeta?: boolean;
+    },
     effectAsBoolean?: boolean,
   ): {
     reqId?: string;
     kerberosCallId: string;
-    results: { resource: Pick<RequestResource, 'id' | 'kind'>; actions: Record<string, typeof effectAsBoolean extends true ? boolean : Effect> }[];
+    results: {
+      resource: Pick<RequestResource, 'id' | 'kind' | 'policyVersion' | 'scope'>; 
+      actions: Record<string, typeof effectAsBoolean extends true ? boolean : Effect>;
+      outputs: unknown[];
+      meta?: {
+        actions: Record<string, {
+          matchedPolicy: string;
+          matchedRule?: string;
+          matchedScope?: string;
+        }>;
+        effectiveDerivedRoles: string[];
+      };
+    }[];
   };
 }
 

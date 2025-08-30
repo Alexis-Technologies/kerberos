@@ -7,10 +7,6 @@ class Outputs {
     return shape;
   }
 
-  static buildSrc({ version, name, kind, index }) {
-    return `resource.${kind}.v${version}#${name || 'UNNAMED_RULE' + (index !== undefined ? `_${index}` : '')}`;
-  }
-
   #shape = null;
 
   constructor(shape, { z } = {}) {
@@ -21,7 +17,7 @@ class Outputs {
     return this.#shape;
   }
 
-  build(req, { version, name, kind, isConditionFulfilled, index }) {
+  build(req, isConditionFulfilled, src) {
     try {
       let outputFunction = null;
 
@@ -33,19 +29,10 @@ class Outputs {
         outputFunction = this.#shape.when.conditionNotMet;
       }
 
-      return {
-        src: Outputs.buildSrc({ version, name, kind, index }),
-        val: outputFunction?.(req)
-      };
+      return { src, val: outputFunction?.(req) ?? null };
     } catch (error) {
       // If output function fails, add error information
-      return {
-        src: Outputs.buildSrc({ version, name, kind, index }),
-        val: {
-          error: 'Output function evaluation failed',
-          message: error.message,
-        },
-      };
+      return { src, val: { error: 'Output function evaluation failed', message: error.message } };
     }
   }
 }

@@ -479,4 +479,171 @@ describe('Kerberos', () => {
       // but our fallback should generate v4-like format
     });
   });
+
+  describe('checkResources with metadata support', () => {
+    const kerberos = new Kerberos([expensePolicy], [commonRolesPolicy]);
+
+    it('should include metadata when includeMeta is true', async () => {
+      const principal = {
+        ...principalsPolicy.sally,
+        policyVersion: '20210210',
+        scope: 'acme.corp'
+      };
+      const resource = {
+        ...resourcesPolicy.expense1,
+        policyVersion: '20210210',
+        scope: 'acme.corp'
+      };
+      const resources = [
+        { resource, actions: ['view', 'create'] }
+      ];
+
+      const results = await kerberos.checkResources({ 
+        reqId: 'test-meta-123',
+        principal, 
+        resources,
+        includeMeta: true 
+      });
+
+      assert.strictEqual(results.reqId, 'test-meta-123');
+      assert.ok(results.kerberosCallId);
+      assert.strictEqual(results.results.length, 1);
+
+      const result = results.results[0];
+      assert.ok(result.meta);
+      assert.ok(result.meta.actions);
+      assert.ok(result.meta.effectiveDerivedRoles);
+      assert.strictEqual(Array.isArray(result.meta.effectiveDerivedRoles), true);
+
+      // Check that actions metadata is included
+      assert.ok(result.meta.actions.view);
+      assert.ok(result.meta.actions.create);
+      assert.ok(result.meta.actions.view.matchedPolicy);
+      assert.ok(result.meta.actions.create.matchedPolicy);
+    });
+
+    it('should not include metadata when includeMeta is false or not provided', async () => {
+      const principal = principalsPolicy.sally;
+      const resources = [
+        { resource: resourcesPolicy.expense1, actions: ['view'] }
+      ];
+
+      const results1 = await kerberos.checkResources({ principal, resources, includeMeta: false });
+      const results2 = await kerberos.checkResources({ principal, resources });
+
+      assert.strictEqual(results1.results[0].meta, undefined);
+      assert.strictEqual(results2.results[0].meta, undefined);
+    });
+
+    it('should include policyVersion and scope in resource response when provided', async () => {
+      const principal = {
+        ...principalsPolicy.sally,
+        policyVersion: '20210210',
+        scope: 'acme.corp'
+      };
+      const resource = {
+        ...resourcesPolicy.expense1,
+        policyVersion: '20210210', 
+        scope: 'acme.corp'
+      };
+      const resources = [
+        { resource, actions: ['view'] }
+      ];
+
+      const results = await kerberos.checkResources({ principal, resources });
+
+      assert.strictEqual(results.results[0].resource.policyVersion, '20210210');
+      assert.strictEqual(results.results[0].resource.scope, 'acme.corp');
+    });
+
+    it('should not include policyVersion and scope in resource response when not provided', async () => {
+      const principal = principalsPolicy.sally;
+      const resources = [
+        { resource: resourcesPolicy.expense1, actions: ['view'] }
+      ];
+
+      const results = await kerberos.checkResources({ principal, resources });
+
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(results.results[0].resource, 'policyVersion'), false);
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(results.results[0].resource, 'scope'), false);
+    });
+
+    it('should generate correct matchedPolicy format in metadata', async () => {
+      const principal = {
+        ...principalsPolicy.sally,
+        scope: 'acme.corp'
+      };
+      const resource = {
+        ...resourcesPolicy.expense1,
+        policyVersion: '20210210',
+        scope: 'acme.corp'
+      };
+      const resources = [
+        { resource, actions: ['view'] }
+      ];
+
+      const results = await kerberos.checkResources({ 
+        principal, 
+        resources,
+        includeMeta: true 
+      });
+
+      const actionMeta = results.results[0].meta.actions.view;
+      assert.ok(actionMeta.matchedPolicy.includes('v20210210'));
+      assert.ok(actionMeta.matchedPolicy.includes('acme.corp'));
+    });
+
+    it('should include matchedScope in metadata when scope is provided', async () => {
+      const principal = {
+        ...principalsPolicy.sally,
+        scope: 'acme.corp'
+      };
+      const resource = {
+        ...resourcesPolicy.expense1,
+        scope: 'acme.corp'
+      };
+      const resources = [
+        { resource, actions: ['view'] }
+      ];
+
+      const results = await kerberos.checkResources({ 
+        principal, 
+        resources,
+        includeMeta: true 
+      });
+
+      const actionMeta = results.results[0].meta.actions.view;
+      assert.strictEqual(actionMeta.matchedScope, 'acme');
+    });
+
+    it('should work with boolean mode and metadata', async () => {
+      const principal = {
+        ...principalsPolicy.sally,
+        policyVersion: '20210210',
+        scope: 'acme.corp'
+      };
+      const resource = {
+        ...resourcesPolicy.expense1,
+        policyVersion: '20210210',
+        scope: 'acme.corp'
+      };
+      const resources = [
+        { resource, actions: ['view', 'create', 'delete'] }
+      ];
+
+      const results = await kerberos.checkResources({ 
+        principal, 
+        resources,
+        includeMeta: true 
+      }, true);
+
+      assert.strictEqual(results.results[0].actions.view, true);
+      assert.strictEqual(results.results[0].actions.create, true);
+      assert.strictEqual(results.results[0].actions.delete, false);
+      assert.ok(results.results[0].meta);
+      assert.ok(results.results[0].meta.actions.view);
+      assert.ok(results.results[0].meta.actions.create);
+      assert.ok(results.results[0].meta.actions.delete);
+    });
+  });
 });

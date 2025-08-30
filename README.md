@@ -28,9 +28,8 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
 - [x] Audit logs;
 - [x] Logger;
 - [x] In-browser/serverless authorization;
-
-- [ ] scopes (WIP);
-- [ ] metadata (WIP);
+- [x] Scopes;
+- [x] Metadata;
 
 ---
 **_P.S. We are tying to keep the API as close as possible to Cerbos. If you are familiar with Cerbos, you will feel at home with Kerberos.js._**
@@ -281,6 +280,115 @@ Available context parameters:
 Output functions are called when:
 - **ruleActivated**: The rule matches and its condition is satisfied
 - **conditionNotMet**: The rule matches but its condition is not satisfied
+
+### Using Scopes and Policy Versions
+
+Kerberos.js supports scoped policies and policy versions, allowing you to organize policies for different environments or versions:
+
+```javascript
+const results = await kerberos.checkResources({
+  reqId: 'test-request',
+  principal: {
+    id: 'alice',
+    policyVersion: '20210210',  // Optional: specify principal policy version
+    scope: 'acme.corp',         // Optional: specify principal scope
+    roles: ['employee'],
+    attr: {
+      department: 'accounting',
+      geography: 'GB'
+    }
+  },
+  resources: [
+    {
+      resource: {
+        id: 'XX125',
+        kind: 'leave_request',
+        policyVersion: '20210210', // Optional: specify resource policy version
+        scope: 'acme.corp',        // Optional: specify resource scope
+        attr: {
+          department: 'accounting',
+          owner: 'john'
+        }
+      },
+      actions: ['view:public', 'approve', 'create']
+    }
+  ],
+  includeMeta: true  // Optional: include metadata in response
+});
+```
+
+### Using Metadata
+
+When `includeMeta: true` is set, the response includes additional metadata about policy evaluation:
+
+```javascript
+const results = await kerberos.checkResources({
+  principal: { 
+    id: 'alice', 
+    scope: 'acme.corp',
+    roles: ['employee'] 
+  },
+  resources: [
+    {
+      resource: { 
+        id: 'XX125', 
+        kind: 'leave_request',
+        policyVersion: '20210210',
+        scope: 'acme.corp' 
+      },
+      actions: ['view:public', 'approve']
+    }
+  ],
+  includeMeta: true
+});
+
+console.log(results);
+// {
+//   reqId: 'test-request',
+//   kerberosCallId: '01HHENANTHFD5DV3HZGDKB87PJ',
+//   results: [
+//     {
+//       resource: {
+//         id: 'XX125',
+//         kind: 'leave_request',
+//         policyVersion: '20210210',
+//         scope: 'acme.corp'
+//       },
+//       actions: {
+//         'view:public': 'EFFECT_ALLOW',
+//         'approve': 'EFFECT_DENY'
+//       },
+//       outputs: [
+//         {
+//           src: 'resource.leave_request.v20210210/acme#rule-001',
+//           val: 'create_allowed:john'
+//         }
+//       ],
+//       meta: {
+//         actions: {
+//           'view:public': {
+//             matchedPolicy: 'resource.leave_request.v20210210/acme.corp',
+//             matchedScope: 'acme'
+//           },
+//           'approve': {
+//             matchedPolicy: 'resource.leave_request.v20210210/acme.corp',
+//             matchedScope: 'acme'
+//           }
+//         },
+//         effectiveDerivedRoles: [
+//           'employee_that_owns_the_record',
+//           'any_employee'
+//         ]
+//       }
+//     }
+//   ]
+// }
+```
+
+The metadata includes:
+- **matchedPolicy**: The name of the policy that produced the decision
+- **matchedScope**: The scope that was active when the decision was made  
+- **effectiveDerivedRoles**: List of derived roles that were activated
 
 ## Testing
 

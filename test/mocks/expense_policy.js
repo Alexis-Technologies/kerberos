@@ -3,6 +3,7 @@ const { Effect } = require('../../src');
 const expensePolicy = {
   resourcePolicy: {
     version: 'default',
+    scope: 'acme.corp',
     // Importing `common_roles` so they can be used in the resource policy.
     importDerivedRoles: ['common_roles'],
     // This resource file is reviewed for when checking permissions when a resource

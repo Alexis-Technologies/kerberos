@@ -58,6 +58,14 @@ class ResourcePolicy {
     return this.#shape.resourcePolicy.resource;
   }
 
+  get version() {
+    return this.#shape.resourcePolicy.version;
+  }
+
+  get scope() {
+    return this.#shape.resourcePolicy.scope;
+  }
+
   get importDerivedRoles() {
     return this.#shape.resourcePolicy.importDerivedRoles ?? [];
   }
@@ -74,8 +82,11 @@ class ResourcePolicy {
   check(req, derivedRoles, effectAsBoolean = false) {
     const effects = new Map();
     const outputs = new Map();
+    const metaSrcPrefix = `resource.${this.kind}.v${this.version}`;
+    const metaSrcBase = this.scope ? `${metaSrcPrefix}/${this.scope}` : metaSrcPrefix;
+    const meta = { actions: {}, effectiveDerivedRoles: [...derivedRoles.values()] };
 
-    if (!req.actions?.length) return { effects, outputs };
+    if (!req.actions?.length) return { effects, outputs, meta };
 
     const constants = this.#shape.resourcePolicy.constants?.get();
     const reqWithConstants = { ...req, constants, C: constants };
@@ -85,6 +96,7 @@ class ResourcePolicy {
 
     for (const action of reqWithVariables.actions) {
       const actionEffects = [];
+      meta.actions[action] = { matchedPolicy: metaSrcBase };
 
       for (let i = 0; i < this.rules.length; i++) {
         const rule = this.rules[i];
@@ -116,20 +128,19 @@ class ResourcePolicy {
 
         // Checking the condition
         const isConditionFulfilled = rule.condition ? rule.condition.isFulfilled(reqWithVariables) : true;
+        const metaSrc = `${metaSrcBase}#${rule.name || 'UNNAMED_RULE' + `_${i + 1}`}`;
 
         // Build outputs based on rule activation and condition fulfillment
         if (rule.output) {
-          const output = rule.output.build(reqWithVariables, {
-            version: this.#shape.resourcePolicy.version,
-            name: rule.name,
-            kind: this.#shape.resourcePolicy.resource,
-            isConditionFulfilled,
-            index: i,
-          });
+          const output = rule.output.build(reqWithVariables, isConditionFulfilled, metaSrc);
           outputs.set(output.src, output);
         }
 
-        if (isConditionFulfilled) actionEffects.push(rule.effect);
+        if (isConditionFulfilled) {
+          actionEffects.push(rule.effect);
+          meta.actions[action].matchedRule = metaSrc;
+          if (this.scope) meta.actions[action].matchedScope = this.scope;
+        }
       }
 
       if (actionEffects.includes(Effect.Deny)) {
@@ -142,7 +153,7 @@ class ResourcePolicy {
       }
     }
 
-    return { effects, outputs };
+    return { effects, outputs, meta };
   }
 }
 

@@ -1,6 +1,5 @@
 const { ResourcePolicy } = require('./ResourcePolicy/index.js');
 const { DerivedRoles } = require('./DerivedRoles/index.js');
-const { Outputs } = require('./Outputs/index.js');
 const { ALL_ACTIONS, Effect, ZodSchemas } = require('./schemas.js');
 
 // Import crypto for Node.js environment
@@ -37,14 +36,14 @@ class KerberosZodSchemas extends ZodSchemas {
           z.object({
             resource: ZodSchemas.buildRequestResource(z),
             actions: z.array(z.string()).nonempty(),
-          })
+          }),
         )
         .nonempty(),
+      includeMeta: z.boolean().optional(),
     });
   }
 }
 
-// TODO: 1) scopes, 2) metadata
 class Kerberos {
   static generateCallId() {
     // Try Node.js crypto.randomUUID first
@@ -52,9 +51,9 @@ class Kerberos {
     // Try Browser crypto.randomUUID
     if (window?.crypto?.randomUUID) return window.crypto.randomUUID();
     // Fall back to pseudo UUID v4-like generator
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-      const r = Math.random() * 16 | 0;
-      const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+      const r = (Math.random() * 16) | 0;
+      const v = c === 'x' ? r : (r & 0x3) | 0x8;
       return v.toString(16);
     });
   }
@@ -71,10 +70,10 @@ class Kerberos {
     return roles instanceof DerivedRoles ? roles : new DerivedRoles(roles);
   }
 
-  static parseRequest(principal, resource, { schema, z } = {}) {
-    if (schema) return schema.parse({ principal, resource, P: principal, R: resource });
-    if (z) return ZodSchemas.buildRequest(z).parse({ principal, resource, P: principal, R: resource });
-    return { principal, resource, P: principal, R: resource };
+  static parseRequest({ principal, resource, actions, reqId, callId, includeMeta }, { schema, z } = {}) {
+    if (schema) return schema.parse({ principal, resource, P: principal, R: resource, actions, reqId, callId, includeMeta });
+    if (z) return ZodSchemas.buildRequest(z).parse({ principal, resource, P: principal, R: resource, actions, reqId, callId, includeMeta });
+    return { principal, resource, P: principal, R: resource, actions, reqId, callId, includeMeta };
   }
 
   static parseIsAllowedArgs(args, { schema, z } = {}) {
@@ -135,7 +134,7 @@ class Kerberos {
     const policiesMap = new Map();
     for (const policy of policies) {
       const handledPolicy = Kerberos.parsePolicy(policy, { schema: this.#resourcePolicyInstanceZodSchema, z: this.#z });
-      policiesMap.set(handledPolicy.kind, handledPolicy);
+      policiesMap.set(`${handledPolicy.kind}.${handledPolicy.version}.${handledPolicy.scope ?? ''}`, handledPolicy);
     }
     return policiesMap;
   }
@@ -163,34 +162,67 @@ class Kerberos {
   }
 
   #buildLogData(input, reqKind, callId) {
-    const logData = [];
-    for (const { reqWithActions, result } of input) {
-      for (const action of reqWithActions.actions) {
-        // TODO: enable output logging
-        // const policy = this.#policies.get(reqWithActions.R.kind);
-        // const output = result.outputs?.get(Outputs.buildSrc({
-        //   version: policy.shape.resourcePolicy.version,
-        //   name: policy.shape.resourcePolicy.name,
-        //   kind: policy.kind,
-        //   index: undefined,
-        // }));
-
+    const logData = { table: [], json: [] };
+    for (const { req, result } of input) {
+      for (const action of req.actions) {
         const logEntry = {
-          'Call ID': callId,
-          'Request ID': reqWithActions.reqId,
-          Timestamp: new Date().toISOString(),
-          'Request kind': reqKind,
-          'Principal ID': reqWithActions.P.id,
-          'Resource kind': reqWithActions.R.kind,
-          'Resource ID': reqWithActions.R.id,
-          Action: action,
-          Effect: result.effects.get(action),
-          // Output: output?.val,
+          callId,
+          reqId: req.reqId,
+          timestamp: new Date().toISOString(),
+          reqKind,
+          principalId: req.P.id,
+          principalScope: req.P.scope,
+          principalPolicyVersion: req.P.policyVersion,
+          resourceKind: req.R.kind,
+          resourceId: req.R.id,
+          resourceScope: req.R.scope,
+          resourcePolicyVersion: req.R.policyVersion,
+          action,
+          effect: result.effects.get(action),
+          outputs: result.outputs ? [...result.outputs.values()] : [],
+          meta: result.meta,
         };
 
-        if (!logEntry['Request ID']) delete logEntry['Request ID'];
+        if (!logEntry.callId) delete logEntry.callId;
+        if (!logEntry.reqId) delete logEntry.reqId;
+        if (!logEntry.principalScope) delete logEntry.principalScope;
+        if (!logEntry.principalPolicyVersion) delete logEntry.principalPolicyVersion;
+        if (!logEntry.resourceScope) delete logEntry.resourceScope;
+        if (!logEntry.resourcePolicyVersion) delete logEntry.resourcePolicyVersion;
+        if (!logEntry.meta) delete logEntry.meta;
 
-        logData.push(logEntry);
+        logData.json.push(logEntry);
+
+        const logEntryForTable = { ...logEntry };
+
+        const exludedForTable = ['reqId', 'principalScope', 'principalPolicyVersion', 'resourceScope', 'resourcePolicyVersion', 'outputs', 'meta'];
+        const readableHeadersMap = {
+          callId: 'Call ID',
+          reqId: 'Request ID',
+          timestamp: 'Timestamp',
+          reqKind: 'Request kind',
+          principalId: 'Principal ID',
+          principalScope: 'Principal Scope',
+          principalPolicyVersion: 'Principal Policy Version',
+          resourceKind: 'Resource kind',
+          resourceId: 'Resource ID',
+          resourceScope: 'Resource Scope',
+          resourcePolicyVersion: 'Resource Policy Version',
+          action: 'Action',
+          effect: 'Effect',
+          outputs: 'Outputs',
+          meta: 'Meta',
+        };
+
+        for (const key of Object.keys(logEntryForTable)) {
+          if (exludedForTable.includes(key)) delete logEntryForTable[key];
+          else {
+            logEntryForTable[readableHeadersMap[key]] = logEntryForTable[key];
+            delete logEntryForTable[key];
+          }
+        }
+
+        logData.table.push(logEntryForTable);
       }
     }
     return logData;
@@ -202,36 +234,59 @@ class Kerberos {
     this.#logger.group?.('Kerberos.js');
 
     if (reqKind === 'IsAllowed') {
-      const [{ reqWithActions, result }] = input;
-      const [action] = reqWithActions.actions;
+      const [{ req, result }] = input;
+      const [action] = req.actions;
       const effect = result.effects.get(action);
-      this.#logger.log?.(`Principal ${reqWithActions.P.id} is ${effect === Effect.Allow || effect === true ? 'ALLOWED' : 'DENIED'} to perform action ${action} on resource ${reqWithActions.R.id}`);
+      this.#logger.log?.(`Principal ${req.P.id} is ${effect === Effect.Allow || effect === true ? 'ALLOWED' : 'DENIED'} to perform action ${action} on resource ${req.R.id}`);
     }
 
     const logData = this.#buildLogData(input, reqKind, callId);
-    this.#logger.table?.(logData);
-    this.#logger.debug?.(logData, `Kerberos.js request log`);
+    this.#logger.table?.(logData.table);
+    if (this.#logger.debug) {
+      for (const logEntry of logData.json) this.#logger.debug?.(logEntry, `Kerberos.js request log`);
+    }
 
     this.#logger.groupEnd?.();
+  }
+
+  #getPolicy(req) {
+    const scopes = [''];
+    if (req.R.scope) scopes.push(...req.R.scope.split('.'));
+    for (let i = scopes.length; i >= 0; i--) {
+      const policy = this.#policies.get(`${req.R.kind}.${req.R.policyVersion ?? 'default'}.${scopes.slice(0, i).join('.')}`);
+      if (policy) return policy;
+    }
+    return null;
   }
 
   async isAllowed(args) {
     const callId = this.#getCallId();
     const parsedArgs = Kerberos.parseIsAllowedArgs(args, { schema: this.#isAllowedArgsZodSchema, z: this.#z });
-    const req = Kerberos.parseRequest(parsedArgs.principal, parsedArgs.resource, { schema: this.#requestZodSchema, z: this.#z });
+    const req = Kerberos.parseRequest(
+      {
+        principal: parsedArgs.principal,
+        resource: parsedArgs.resource,
+        actions: [parsedArgs.action],
+        reqId: parsedArgs.reqId,
+        callId,
+        includeMeta: parsedArgs.includeMeta,
+      },
+      { schema: this.#requestZodSchema, z: this.#z },
+    );
 
-    const policy = this.#policies.get(req.R.kind);
-    const reqWithActions = { ...req, actions: [parsedArgs.action] };
+    const policy = this.#getPolicy(req);
     if (!policy) {
       const effects = new Map([[parsedArgs.action, Effect.Deny]]);
-      this.#log([{ reqWithActions, result: { effects, outputs: new Map() } }], 'IsAllowed', callId);
+      const outputs = new Map();
+      const meta = { actions: {}, effectiveDerivedRoles: [] };
+      this.#log([{ req, result: { effects, outputs, meta } }], 'IsAllowed', callId);
       return false;
     }
 
-    const { effects, outputs } = policy.check(reqWithActions, this.#getImportedDerivedRoles(policy, req));
+    const { effects, outputs, meta } = policy.check(req, this.#getImportedDerivedRoles(policy, req));
     const isAllowed = effects.get(parsedArgs.action) === Effect.Allow || effects.get(ALL_ACTIONS) === Effect.Allow;
 
-    this.#log([{ reqWithActions: { ...req, actions: [parsedArgs.action] }, result: { effects, outputs } }], 'IsAllowed', callId);
+    this.#log([{ req, result: { effects, outputs, meta } }], 'IsAllowed', callId);
 
     return isAllowed;
   }
@@ -243,31 +298,45 @@ class Kerberos {
     const parsedArgs = Kerberos.parseCheckResourcesArgs(args, { schema: this.#checkResourcesArgsZodSchema, z: this.#z });
 
     for (const { resource, actions } of parsedArgs.resources) {
-      const req = Kerberos.parseRequest(parsedArgs.principal, resource, { schema: this.#requestZodSchema, z: this.#z });
+      const req = Kerberos.parseRequest(
+        {
+          principal: parsedArgs.principal,
+          resource,
+          actions,
+          reqId: parsedArgs.reqId,
+          callId,
+          includeMeta: parsedArgs.includeMeta,
+        },
+        { schema: this.#requestZodSchema, z: this.#z },
+      );
 
-      const policy = this.#policies.get(req.R.kind);
+      const policy = this.#getPolicy(req);
       if (!policy) {
         const effects = new Map();
         const outputs = new Map();
+        const meta = { actions: {}, effectiveDerivedRoles: [] };
         for (const action of actions) effects.set(action, !effectAsBoolean ? Effect.Deny : false);
-        results.push({
+        const result = {
           resource: { id: resource.id, kind: resource.kind },
           actions: Object.fromEntries([...effects.entries()]),
           outputs: [...outputs.values()],
-        });
-        inputForLog.push({ reqWithActions: { ...req, actions }, result: { effects, outputs } });
+        };
+        if (req.includeMeta) result.meta = meta;
+        results.push(result);
+        inputForLog.push({ req, result: { effects, outputs, meta } });
         continue;
       }
 
-      const reqWithActions = { ...req, actions };
-      const { effects, outputs } = policy.check(reqWithActions, this.#getImportedDerivedRoles(policy, req), effectAsBoolean);
+      const { effects, outputs, meta } = policy.check(req, this.#getImportedDerivedRoles(policy, req), effectAsBoolean);
 
-      results.push({
+      const result = {
         resource: { id: resource.id, kind: resource.kind },
         actions: Object.fromEntries([...effects.entries()]),
         outputs: [...outputs.values()],
-      });
-      inputForLog.push({ reqWithActions, result: { effects, outputs } });
+      };
+      if (req.includeMeta) result.meta = meta;
+      results.push(result);
+      inputForLog.push({ req, result: { effects, outputs, meta } });
     }
 
     this.#log(inputForLog, 'CheckResources', callId);
