@@ -42,20 +42,20 @@ describe('Kerberos', () => {
 
         const results = await kerberos.checkResources({ principal, resources });
 
-        assert.deepStrictEqual(results, {
-          results: [
-            {
-              resource: { id: 'expense1', kind: 'expense' },
-              actions: { view: Effect.Allow, create: Effect.Allow, delete: Effect.Deny },
-              outputs: [],
-            },
-            {
-              resource: { id: 'expense4', kind: 'expense' },
-              actions: { view: Effect.Deny, create: Effect.Allow },
-              outputs: [],
-            },
-          ],
-        });
+        assert.ok(results.kerberosCallId);
+        assert.strictEqual(typeof results.kerberosCallId, 'string');
+        assert.deepStrictEqual(results.results, [
+          {
+            resource: { id: 'expense1', kind: 'expense' },
+            actions: { view: Effect.Allow, create: Effect.Allow, delete: Effect.Deny },
+            outputs: [],
+          },
+          {
+            resource: { id: 'expense4', kind: 'expense' },
+            actions: { view: Effect.Deny, create: Effect.Allow },
+            outputs: [],
+          },
+        ]);
       });
 
       it('should return the effect actions map for each resource (Boolean mode)', async () => {
@@ -67,20 +67,20 @@ describe('Kerberos', () => {
 
         const results = await kerberos.checkResources({ principal, resources }, true);
 
-        assert.deepStrictEqual(results, {
-          results: [
-            {
-              resource: { id: 'expense1', kind: 'expense' },
-              actions: { view: true, create: true, delete: false },
-              outputs: [],
-            },
-            {
-              resource: { id: 'expense4', kind: 'expense' },
-              actions: { view: false, create: true },
-              outputs: [],
-            },
-          ],
-        });
+        assert.ok(results.kerberosCallId);
+        assert.strictEqual(typeof results.kerberosCallId, 'string');
+        assert.deepStrictEqual(results.results, [
+          {
+            resource: { id: 'expense1', kind: 'expense' },
+            actions: { view: true, create: true, delete: false },
+            outputs: [],
+          },
+          {
+            resource: { id: 'expense4', kind: 'expense' },
+            actions: { view: false, create: true },
+            outputs: [],
+          },
+        ]);
       });
     });
   });
@@ -120,20 +120,20 @@ describe('Kerberos', () => {
 
         const results = await kerberos.checkResources({ principal, resources });
 
-        assert.deepStrictEqual(results, {
-          results: [
-            {
-              resource: { id: 'expense1', kind: 'expense' },
-              actions: { view: Effect.Allow, create: Effect.Allow, delete: Effect.Deny },
-              outputs: [],
-            },
-            {
-              resource: { id: 'expense4', kind: 'expense' },
-              actions: { view: Effect.Deny, create: Effect.Allow },
-              outputs: [],
-            },
-          ],
-        });
+        assert.ok(results.kerberosCallId);
+        assert.strictEqual(typeof results.kerberosCallId, 'string');
+        assert.deepStrictEqual(results.results, [
+          {
+            resource: { id: 'expense1', kind: 'expense' },
+            actions: { view: Effect.Allow, create: Effect.Allow, delete: Effect.Deny },
+            outputs: [],
+          },
+          {
+            resource: { id: 'expense4', kind: 'expense' },
+            actions: { view: Effect.Deny, create: Effect.Allow },
+            outputs: [],
+          },
+        ]);
       });
 
       it('should return the effect actions map for each resource (Boolean mode)', async () => {
@@ -145,20 +145,20 @@ describe('Kerberos', () => {
 
         const results = await kerberos.checkResources({ principal, resources }, true);
 
-        assert.deepStrictEqual(results, {
-          results: [
-            {
-              resource: { id: 'expense1', kind: 'expense' },
-              actions: { view: true, create: true, delete: false },
-              outputs: [],
-            },
-            {
-              resource: { id: 'expense4', kind: 'expense' },
-              actions: { view: false, create: true },
-              outputs: [],
-            },
-          ],
-        });
+        assert.ok(results.kerberosCallId);
+        assert.strictEqual(typeof results.kerberosCallId, 'string');
+        assert.deepStrictEqual(results.results, [
+          {
+            resource: { id: 'expense1', kind: 'expense' },
+            actions: { view: true, create: true, delete: false },
+            outputs: [],
+          },
+          {
+            resource: { id: 'expense4', kind: 'expense' },
+            actions: { view: false, create: true },
+            outputs: [],
+          },
+        ]);
       });
     });
   });
@@ -198,20 +198,20 @@ describe('Kerberos', () => {
 
         const results = await kerberos.checkResources({ principal, resources });
 
-        assert.deepStrictEqual(results, {
-          results: [
-            {
-              resource: { id: 'expense1', kind: 'expense' },
-              actions: { view: Effect.Allow, create: Effect.Allow, delete: Effect.Deny },
-              outputs: [],
-            },
-            {
-              resource: { id: 'expense4', kind: 'expense' },
-              actions: { view: Effect.Deny, create: Effect.Allow },
-              outputs: [],
-            },
-          ],
-        });
+        assert.ok(results.kerberosCallId);
+        assert.strictEqual(typeof results.kerberosCallId, 'string');
+        assert.deepStrictEqual(results.results, [
+          {
+            resource: { id: 'expense1', kind: 'expense' },
+            actions: { view: Effect.Allow, create: Effect.Allow, delete: Effect.Deny },
+            outputs: [],
+          },
+          {
+            resource: { id: 'expense4', kind: 'expense' },
+            actions: { view: Effect.Deny, create: Effect.Allow },
+            outputs: [],
+          },
+        ]);
       });
 
       it('should return the effect actions map for each resource (Boolean mode)', async () => {
@@ -223,20 +223,20 @@ describe('Kerberos', () => {
 
         const results = await kerberos.checkResources({ principal, resources }, true);
 
-        assert.deepStrictEqual(results, {
-          results: [
-            {
-              resource: { id: 'expense1', kind: 'expense' },
-              actions: { view: true, create: true, delete: false },
-              outputs: [],
-            },
-            {
-              resource: { id: 'expense4', kind: 'expense' },
-              actions: { view: false, create: true },
-              outputs: [],
-            },
-          ],
-        });
+        assert.ok(results.kerberosCallId);
+        assert.strictEqual(typeof results.kerberosCallId, 'string');
+        assert.deepStrictEqual(results.results, [
+          {
+            resource: { id: 'expense1', kind: 'expense' },
+            actions: { view: true, create: true, delete: false },
+            outputs: [],
+          },
+          {
+            resource: { id: 'expense4', kind: 'expense' },
+            actions: { view: false, create: true },
+            outputs: [],
+          },
+        ]);
       });
     });
   });
@@ -253,16 +253,16 @@ describe('Kerberos', () => {
 
       const results = await kerberos.checkResources({ reqId, principal, resources });
 
-      assert.deepStrictEqual(results, {
-        reqId: 'test-request-123',
-        results: [
-          {
-            resource: { id: 'expense1', kind: 'expense' },
-            actions: { view: Effect.Allow, create: Effect.Allow },
-            outputs: [],
-          },
-        ],
-      });
+      assert.strictEqual(results.reqId, 'test-request-123');
+      assert.ok(results.kerberosCallId);
+      assert.strictEqual(typeof results.kerberosCallId, 'string');
+      assert.deepStrictEqual(results.results, [
+        {
+          resource: { id: 'expense1', kind: 'expense' },
+          actions: { view: Effect.Allow, create: Effect.Allow },
+          outputs: [],
+        },
+      ]);
     });
 
     it('should not include reqId in response when not provided in request', async () => {
@@ -273,16 +273,107 @@ describe('Kerberos', () => {
 
       const results = await kerberos.checkResources({ principal, resources });
 
-      assert.deepStrictEqual(results, {
-        results: [
-          {
-            resource: { id: 'expense1', kind: 'expense' },
-            actions: { view: Effect.Allow, create: Effect.Allow },
-            outputs: [],
-          },
-        ],
-      });
       assert.strictEqual(Object.prototype.hasOwnProperty.call(results, 'reqId'), false);
+      assert.ok(results.kerberosCallId);
+      assert.strictEqual(typeof results.kerberosCallId, 'string');
+      assert.deepStrictEqual(results.results, [
+        {
+          resource: { id: 'expense1', kind: 'expense' },
+          actions: { view: Effect.Allow, create: Effect.Allow },
+          outputs: [],
+        },
+      ]);
+    });
+  });
+
+  describe('checkResources with kerberosCallId', () => {
+    const kerberos = new Kerberos([expensePolicy], [commonRolesPolicy]);
+
+    it('should always return kerberosCallId in response', async () => {
+      const principal = principalsPolicy.sally;
+      const resources = [
+        { resource: resourcesPolicy.expense1, actions: ['view', 'create'] },
+      ];
+
+      const results = await kerberos.checkResources({ principal, resources });
+
+      assert.ok(results.kerberosCallId);
+      assert.strictEqual(typeof results.kerberosCallId, 'string');
+      assert.ok(results.kerberosCallId.length > 0);
+    });
+
+    it('should generate valid UUID format for kerberosCallId', async () => {
+      const principal = principalsPolicy.sally;
+      const resources = [
+        { resource: resourcesPolicy.expense1, actions: ['view'] },
+      ];
+
+      const results = await kerberos.checkResources({ principal, resources });
+      
+      // UUID v4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      assert.ok(uuidRegex.test(results.kerberosCallId), `kerberosCallId should be valid UUID format, got: ${results.kerberosCallId}`);
+    });
+
+    it('should generate unique kerberosCallId for each request', async () => {
+      const principal = principalsPolicy.sally;
+      const resources = [
+        { resource: resourcesPolicy.expense1, actions: ['view'] },
+      ];
+
+      const results1 = await kerberos.checkResources({ principal, resources });
+      const results2 = await kerberos.checkResources({ principal, resources });
+
+      assert.ok(results1.kerberosCallId);
+      assert.ok(results2.kerberosCallId);
+      assert.notStrictEqual(results1.kerberosCallId, results2.kerberosCallId);
+    });
+
+    it('should work with Boolean mode', async () => {
+      const principal = principalsPolicy.sally;
+      const resources = [
+        { resource: resourcesPolicy.expense1, actions: ['view', 'create'] },
+      ];
+
+      const results = await kerberos.checkResources({ principal, resources }, true);
+
+      assert.ok(results.kerberosCallId);
+      assert.strictEqual(typeof results.kerberosCallId, 'string');
+      assert.deepStrictEqual(results.results, [
+        {
+          resource: { id: 'expense1', kind: 'expense' },
+          actions: { view: true, create: true },
+          outputs: [],
+        },
+      ]);
+    });
+  });
+
+  describe('Kerberos with custom getCallId', () => {
+    let callCount = 0;
+    const customGetCallId = () => `custom-id-${++callCount}`;
+    const kerberos = new Kerberos([expensePolicy], [commonRolesPolicy], { getCallId: customGetCallId });
+
+    it('should use custom getCallId function', async () => {
+      const principal = principalsPolicy.sally;
+      const resources = [
+        { resource: resourcesPolicy.expense1, actions: ['view'] },
+      ];
+
+      const results = await kerberos.checkResources({ principal, resources });
+
+      assert.strictEqual(results.kerberosCallId, 'custom-id-1');
+    });
+
+    it('should increment call count with custom getCallId', async () => {
+      const principal = principalsPolicy.sally;
+      const resources = [
+        { resource: resourcesPolicy.expense1, actions: ['view'] },
+      ];
+
+      const results = await kerberos.checkResources({ principal, resources });
+
+      assert.strictEqual(results.kerberosCallId, 'custom-id-2');
     });
   });
 });

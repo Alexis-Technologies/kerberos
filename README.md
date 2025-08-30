@@ -97,8 +97,60 @@ const isAllowed = await kerberos.isAllowed({
   },
 });
 
+// checkResources API returns results with kerberosCallId for audit tracking
+const results = await kerberos.checkResources({
+  principal: { id: 'user1', roles: ['USER'] },
+  resources: [
+    {
+      resource: { id: 'expense1', kind: 'expense' },
+      actions: ['view', 'create'],
+    },
+  ],
+});
+
+console.log(results);
+// {
+//   kerberosCallId: 'b9c4362d-b92a-4c2b-9d49-845f00d7a372', // Generated UUID for audit tracking
+//   results: [
+//     {
+//       resource: { id: 'expense1', kind: 'expense' },
+//       actions: { view: 'EFFECT_ALLOW', create: 'EFFECT_DENY' },
+//       outputs: []
+//     }
+//   ]
+// }
+
 console.log(isAllowed); // true
 ```
+
+## Configuration Options
+
+The Kerberos constructor accepts an optional third parameter with configuration options:
+
+```javascript
+const kerberos = new Kerberos(policies, derivedRoles, {
+  logger: true, // Enable audit logging (default: false)
+  getCallId: () => `custom-${Date.now()}`, // Custom call ID generator (optional)
+});
+```
+
+### Options:
+
+- **`logger`** (boolean | Console): Enable audit logging. Can be `true` for default console logging or a custom logger object.
+- **`getCallId`** (function): Custom function to generate call IDs for audit tracking. 
+  - **Default behavior**: Uses `crypto.randomUUID()` in Node.js, `window.crypto.randomUUID()` in browsers, or falls back to a pseudo UUID generator
+  - **Custom example**: `() => \`req-\${Date.now()}-\${Math.random()}\``
+
+### Call ID Generation
+
+Every `checkResources` call automatically generates a unique `kerberosCallId` for audit tracking:
+
+- **Node.js**: Uses `crypto.randomUUID()` 
+- **Browser**: Uses `window.crypto.randomUUID()`
+- **Fallback**: Pseudo UUID v4 generator if crypto APIs are unavailable
+- **Custom**: Provide your own `getCallId` function for custom ID formats
+
+This ID is included in both the response and audit logs for correlation.
 
 ## Outputs
 

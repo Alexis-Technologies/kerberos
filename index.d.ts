@@ -100,6 +100,7 @@ type KerberosPolicy = ResourcePolicy | ResourcePolicyRootSchema;
 type KerberosDerivedRoles = DerivedRoles | DerivedRolesSchema;
 type KerberosOptions = {
   logger?: Partial<Console> | boolean;
+  getCallId?: () => string;
 };
 export class Kerberos {
   constructor(policies: KerberosPolicy[], derivedRoles: KerberosDerivedRoles[], options?: KerberosOptions);
@@ -107,9 +108,11 @@ export class Kerberos {
   isAllowed(args: { principal: RequestPrincipal; resource: RequestResource; action: string }): boolean;
 
   checkResources(
-    args: { principal: RequestPrincipal; resources: { resource: RequestResource; actions: string[] }[] },
+    args: { reqId?: string; principal: RequestPrincipal; resources: { resource: RequestResource; actions: string[] }[] },
     effectAsBoolean?: boolean,
   ): {
+    reqId?: string;
+    kerberosCallId: string;
     results: { resource: Pick<RequestResource, 'id' | 'kind'>; actions: Record<string, typeof effectAsBoolean extends true ? boolean : Effect> }[];
   };
 }
