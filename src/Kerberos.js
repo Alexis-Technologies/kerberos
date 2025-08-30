@@ -3,6 +3,14 @@ const { DerivedRoles } = require('./DerivedRoles/index.js');
 const { Outputs } = require('./Outputs/index.js');
 const { ALL_ACTIONS, Effect, ZodSchemas } = require('./schemas.js');
 
+// Import crypto for Node.js environment
+let nodeCrypto;
+try {
+  nodeCrypto = require('crypto');
+} catch (error) {
+  // Ignore error, will fall back to browser crypto or manual generation
+}
+
 class KerberosZodSchemas extends ZodSchemas {
   static buildResourcePolicyInstance(z) {
     return z.instanceof(ResourcePolicy);
@@ -39,8 +47,10 @@ class KerberosZodSchemas extends ZodSchemas {
 // TODO: 1) scopes, 2) metadata
 class Kerberos {
   static generateCallId() {
-    // Try Node.js/Browser crypto.randomUUID
-    if (typeof crypto !== 'undefined' && crypto.randomUUID) crypto.randomUUID();
+    // Try Node.js crypto.randomUUID first
+    if (nodeCrypto?.randomUUID) return nodeCrypto.randomUUID();
+    // Try Browser crypto.randomUUID
+    if (window?.crypto?.randomUUID) return window.crypto.randomUUID();
     // Fall back to pseudo UUID v4-like generator
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
       const r = Math.random() * 16 | 0;
@@ -199,11 +209,8 @@ class Kerberos {
     }
 
     const logData = this.#buildLogData(input, reqKind, callId);
-    if (this.#logger.table) {
-      this.#logger.table?.(logData);
-    } else {
-      this.#logger.debug?.(logData, `Kerberos.js request log`);
-    }
+    this.#logger.table?.(logData);
+    this.#logger.debug?.(logData, `Kerberos.js request log`);
 
     this.#logger.groupEnd?.();
   }

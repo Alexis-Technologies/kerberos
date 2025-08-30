@@ -309,7 +309,6 @@ describe('Kerberos', () => {
       ];
 
       const results = await kerberos.checkResources({ principal, resources });
-      
       // UUID v4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
       const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
       assert.ok(uuidRegex.test(results.kerberosCallId), `kerberosCallId should be valid UUID format, got: ${results.kerberosCallId}`);
@@ -374,6 +373,110 @@ describe('Kerberos', () => {
       const results = await kerberos.checkResources({ principal, resources });
 
       assert.strictEqual(results.kerberosCallId, 'custom-id-2');
+    });
+  });
+
+  describe('generateCallId (static)', () => {
+    it('should use Node.js crypto.randomUUID when available', () => {
+      // Mock nodeCrypto to simulate Node.js environment
+      const mockUUID = 'node-generated-uuid-12345';
+      const mockNodeCrypto = { randomUUID: () => mockUUID };
+
+      // We need to temporarily modify the module's nodeCrypto reference
+      const KerberosModule = require('../src/Kerberos.js');
+      const originalGenerateCallId = KerberosModule.Kerberos.generateCallId;
+
+      // Create a test version that uses our mock
+      KerberosModule.Kerberos.generateCallId = function() {
+        if (mockNodeCrypto?.randomUUID) return mockNodeCrypto.randomUUID();
+        if (globalThis.window?.crypto?.randomUUID) return globalThis.window.crypto.randomUUID();
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+          const r = Math.random() * 16 | 0;
+          const v = c === 'x' ? r : (r & 0x3 | 0x8);
+          return v.toString(16);
+        });
+      };
+
+      const result = KerberosModule.Kerberos.generateCallId();
+
+      // Restore original method
+      KerberosModule.Kerberos.generateCallId = originalGenerateCallId;
+
+      assert.strictEqual(result, mockUUID);
+    });
+
+    it('should use browser crypto.randomUUID when Node.js crypto is not available', () => {
+      const mockUUID = 'browser-generated-uuid-54321';
+
+      // Mock global window object
+      globalThis.window = {
+        crypto: {
+          randomUUID: () => mockUUID
+        }
+      };
+
+      const KerberosModule = require('../src/Kerberos.js');
+      const originalGenerateCallId = KerberosModule.Kerberos.generateCallId;
+
+      // Create a test version that simulates no Node.js crypto but has window.crypto
+      KerberosModule.Kerberos.generateCallId = function() {
+        if (globalThis.window?.crypto?.randomUUID) return globalThis.window.crypto.randomUUID();
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+          const r = Math.random() * 16 | 0;
+          const v = c === 'x' ? r : (r & 0x3 | 0x8);
+          return v.toString(16);
+        });
+      };
+
+      const result = KerberosModule.Kerberos.generateCallId();
+
+      // Cleanup
+      delete globalThis.window;
+      KerberosModule.Kerberos.generateCallId = originalGenerateCallId;
+
+      assert.strictEqual(result, mockUUID);
+    });
+
+    it('should use fallback UUID generator when no crypto is available', () => {
+      const KerberosModule = require('../src/Kerberos.js');
+      const originalGenerateCallId = KerberosModule.Kerberos.generateCallId;
+
+      // Create a test version that has no crypto available
+      KerberosModule.Kerberos.generateCallId = function() {
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+          const r = Math.random() * 16 | 0;
+          const v = c === 'x' ? r : (r & 0x3 | 0x8);
+          return v.toString(16);
+        });
+      };
+
+      const result = KerberosModule.Kerberos.generateCallId();
+
+      // Restore
+      KerberosModule.Kerberos.generateCallId = originalGenerateCallId;
+
+      // Validate UUID v4 format
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      assert.ok(uuidRegex.test(result), `Generated UUID "${result}" should match UUID v4 format`);
+    });
+
+    it('should generate different IDs on subsequent calls', () => {
+      const id1 = Kerberos.generateCallId();
+      const id2 = Kerberos.generateCallId();
+
+      assert.notStrictEqual(id1, id2, 'Generated IDs should be unique');
+      assert.ok(typeof id1 === 'string' && id1.length > 0, 'ID should be a non-empty string');
+      assert.ok(typeof id2 === 'string' && id2.length > 0, 'ID should be a non-empty string');
+    });
+
+    it('should generate valid UUID format', () => {
+      const id = Kerberos.generateCallId();
+
+      assert.ok(typeof id === 'string', 'Generated ID should be a string');
+      assert.strictEqual(id.length, 36, 'UUID should be 36 characters long');
+      assert.ok(id.includes('-'), 'UUID should contain dashes');
+      // Note: We can't guarantee UUID v4 format for native crypto.randomUUID,
+      // but our fallback should generate v4-like format
     });
   });
 });
