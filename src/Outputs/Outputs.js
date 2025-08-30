@@ -25,7 +25,9 @@ class Outputs {
     try {
       let outputFunction = null;
 
-      if (isConditionFulfilled && this.#shape.when.ruleActivated) {
+      if (typeof this.#shape === 'function') {
+        outputFunction = this.#shape;
+      } else if (isConditionFulfilled && this.#shape.when.ruleActivated) {
         outputFunction = this.#shape.when.ruleActivated;
       } else if (!isConditionFulfilled && this.#shape.when.conditionNotMet) {
         outputFunction = this.#shape.when.conditionNotMet;

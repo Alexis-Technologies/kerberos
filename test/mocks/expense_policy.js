@@ -78,12 +78,16 @@ const expensePolicy = {
             ],
           },
         },
-        // output: ({ P, R }) => ({
-        //   principal: P.id,
-        //   resource: R.id,
-        //   amount: R.attr.amount,
-        //   message: 'Finance team members can only approve up to $10,000',
-        // }),
+        output: {
+          when: {
+            conditionNotMet: ({ P, R }) => ({
+              principal: P.id,
+              resource: R.id,
+              amount: R.attr.amount,
+              message: 'Finance team members can only approve up to $10,000',
+            })
+          }
+        },
       },
       // Rule 9: 'FINANCE_MANAGER' can 'delete'.
       {

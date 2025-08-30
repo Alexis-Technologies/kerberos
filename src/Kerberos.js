@@ -175,11 +175,11 @@ class Kerberos {
       this.#logger.log?.(`Principal ${reqWithActions.P.id} is ${effect === Effect.Allow || effect === true ? 'ALLOWED' : 'DENIED'} to perform action ${action} on resource ${reqWithActions.R.id}`);
     }
 
-    const debugData = this.#buildLogData(input, reqKind);
+    const logData = this.#buildLogData(input, reqKind);
     if (this.#logger.table) {
-      this.#logger.table?.(debugData);
+      this.#logger.table?.(logData);
     } else {
-      this.#logger.debug?.(debugData, `Kerberos.js request log`);
+      this.#logger.debug?.(logData, `Kerberos.js request log`);
     }
 
     this.#logger.groupEnd?.();

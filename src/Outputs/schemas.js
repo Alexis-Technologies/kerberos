@@ -3,22 +3,28 @@ const { ZodSchemas } = require('../schemas.js');
 
 class OutputsZodSchemas extends ZodSchemas {
   static buildShape(z) {
-    return z.object({
-      when: z.object({
-        ruleActivated: z
-          .function({
-            input: [ConditionsZodSchemas.buildFullRequest(z)],
-            output: z.unknown(),
-          })
-          .optional(),
-        conditionNotMet: z
-          .function({
-            input: [ConditionsZodSchemas.buildFullRequest(z)],
-            output: z.unknown(),
-          })
-          .optional(),
+    return z.union([
+      z.object({
+        when: z.object({
+          ruleActivated: z
+            .function({
+              input: [ConditionsZodSchemas.buildFullRequest(z)],
+              output: z.unknown(),
+            })
+            .optional(),
+          conditionNotMet: z
+            .function({
+              input: [ConditionsZodSchemas.buildFullRequest(z)],
+              output: z.unknown(),
+            })
+            .optional(),
+        }),
       }),
-    });
+      z.function({
+        input: [ConditionsZodSchemas.buildFullRequest(z)],
+        output: z.unknown(),
+      })
+    ]);
   }
 }
 
