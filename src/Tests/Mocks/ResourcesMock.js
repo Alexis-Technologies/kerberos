@@ -1,33 +1,37 @@
-const { ResourceMock, ResourceMockZodSchemas } = require('./ResourceMock.js');
+const { ResourceMock } = require('./ResourceMock.js');
+const { ResourcesMockZodSchemas } = require('./schemas');
+const { parseResourcesMockShape } = require('./validation');
 
-class ResourcesMockZodSchemas extends ResourceMockZodSchemas {
-  static buildShape(z) {
-    const ResourceMockShapeZodSchema = ResourceMockZodSchemas.buildShape(z);
-    return z.union([
-      z.array(z.instanceof(ResourceMock)).nonempty(),
-      z.record(ResourceMockShapeZodSchema.shape.name, ResourceMockShapeZodSchema.omit({ name: true })),
-    ]);
-  }
-}
-
+/**
+ * Collection of named resource fixtures used in tests.
+ */
 class ResourcesMock {
-  static parseShape(shape, { schema, z } = {}) {
-    if (schema) return schema.parse(shape);
-    if (z) return ResourcesMockZodSchemas.buildShape(z).parse(shape);
-    return shape;
+  /**
+   * Parses resources mocks with the configured validation backend.
+   *
+   * @param {unknown} shape
+   * @param {object} [options]
+   * @returns {unknown}
+   */
+  static parseShape(shape, options = {}) {
+    return parseResourcesMockShape(shape, ResourceMock, options);
   }
 
   #resources = new Map();
 
-  constructor(resources, { z } = {}) {
-    const parsedResources = ResourcesMock.parseShape(resources, { z });
+  /**
+   * @param {unknown} resources
+   * @param {object} [options]
+   */
+  constructor(resources, options = {}) {
+    const parsedResources = ResourcesMock.parseShape(resources, options);
     if (Array.isArray(parsedResources)) {
       for (const resource of parsedResources) this.#resources.set(resource.name, resource);
     } else {
       for (const name in parsedResources) {
         if (!Object.prototype.hasOwnProperty.call(parsedResources, name)) continue;
         const resource = parsedResources[name];
-        const mock = new ResourceMock({ ...resource, name });
+        const mock = new ResourceMock({ ...resource, name }, options);
         this.#resources.set(mock.name, mock);
       }
     }

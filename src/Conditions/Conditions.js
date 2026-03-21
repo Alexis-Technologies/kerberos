@@ -1,10 +1,18 @@
-const { ConditionsZodSchemas } = require('./schemas');
+const { parseConditionsShape } = require('./validation');
 
+/**
+ * Evaluates condition trees used in policies, derived roles and outputs.
+ */
 class Conditions {
-  static parseShape(shape, { schema, z } = {}) {
-    if (schema) return schema.parse(shape);
-    if (z) return ConditionsZodSchemas.buildShape(z).parse(shape);
-    return shape;
+  /**
+   * Parses a condition shape with the configured validation backend.
+   *
+   * @param {unknown} shape
+   * @param {object} [options]
+   * @returns {unknown}
+   */
+  static parseShape(shape, options = {}) {
+    return parseConditionsShape(shape, options);
   }
 
   #strategies = {
@@ -24,14 +32,25 @@ class Conditions {
 
   #shape = null;
 
-  constructor(shape, { z } = {}) {
-    this.#shape = Conditions.parseShape(shape, { z });
+  /**
+   * @param {unknown} shape
+   * @param {object} [options]
+   */
+  constructor(shape, options = {}) {
+    this.#shape = Conditions.parseShape(shape, options);
   }
 
   get shape() {
     return this.#shape;
   }
 
+  /**
+   * Evaluates the current condition or a nested condition against the request.
+   *
+   * @param {Record<string, unknown>} req
+   * @param {unknown} [condition]
+   * @returns {boolean}
+   */
   isFulfilled(req, condition = null) {
     const cond = condition || this.#shape.match;
     if (typeof cond === 'function') return cond(req);

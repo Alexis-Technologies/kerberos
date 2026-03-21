@@ -1,38 +1,50 @@
-const { DerivedRolesZodSchemas } = require('./schemas.js');
+const { parseDerivedRolesShape } = require('./validation');
 
 const { Variables } = require('../Variables');
 const { Conditions } = require('../Conditions');
 const { Constants } = require('../Constants');
 
+/**
+ * Represents a derived roles definition set.
+ */
 class DerivedRoles {
-  static parseShape(shape, { schema, z } = {}) {
-    if (schema) return schema.parse(shape);
-    if (z) return DerivedRolesZodSchemas.buildShape(z).parse(shape);
-    return shape;
+  /**
+   * Parses a derived roles shape with the configured validation backend.
+   *
+   * @param {unknown} shape
+   * @param {object} [options]
+   * @returns {unknown}
+   */
+  static parseShape(shape, options = {}) {
+    return parseDerivedRolesShape(shape, options);
   }
 
-  static parseConstants(constants, { z } = {}) {
-    return constants instanceof Constants ? constants : new Constants(constants, { z });
+  static parseConstants(constants, options = {}) {
+    return constants instanceof Constants ? constants : new Constants(constants, options);
   }
 
-  static parseVariables(variables, { z } = {}) {
-    return variables instanceof Variables ? variables : new Variables(variables, { z });
+  static parseVariables(variables, options = {}) {
+    return variables instanceof Variables ? variables : new Variables(variables, options);
   }
 
-  static parseConditions(conditions, { z } = {}) {
-    return conditions instanceof Conditions ? conditions : new Conditions(conditions, { z });
+  static parseConditions(conditions, options = {}) {
+    return conditions instanceof Conditions ? conditions : new Conditions(conditions, options);
   }
 
   #shape = null;
 
-  constructor(shape, { z } = {}) {
-    this.#shape = DerivedRoles.parseShape(shape, { z });
-    if (this.#shape.constants) this.#shape.constants = DerivedRoles.parseConstants(this.#shape.constants, { z });
-    if (this.#shape.variables) this.#shape.variables = DerivedRoles.parseVariables(this.#shape.variables, { z });
+  /**
+   * @param {unknown} shape
+   * @param {object} [options]
+   */
+  constructor(shape, options = {}) {
+    this.#shape = DerivedRoles.parseShape(shape, options);
+    if (this.#shape.constants) this.#shape.constants = DerivedRoles.parseConstants(this.#shape.constants, options);
+    if (this.#shape.variables) this.#shape.variables = DerivedRoles.parseVariables(this.#shape.variables, options);
     if (this.#shape.definitions?.length) {
       const defs = [];
       for (const def of this.#shape.definitions) {
-        defs.push({ ...def, condition: DerivedRoles.parseConditions(def.condition, { z }) });
+        defs.push({ ...def, condition: DerivedRoles.parseConditions(def.condition, options) });
       }
       this.#shape.definitions = defs;
     }
@@ -52,6 +64,12 @@ class DerivedRoles {
     return this.#shape;
   }
 
+  /**
+   * Resolves active derived roles for a request.
+   *
+   * @param {Record<string, unknown>} req
+   * @returns {Set<string>}
+   */
   get(req) {
     const roles = new Set();
 

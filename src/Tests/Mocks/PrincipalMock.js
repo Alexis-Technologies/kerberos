@@ -1,22 +1,29 @@
-const { ZodSchemas } = require('../../schemas.js');
+const { PrincipalMockZodSchemas } = require('./schemas');
+const { parsePrincipalMockShape } = require('./validation');
 
-class PrincipalMockZodSchemas extends ZodSchemas {
-  static buildShape(z) {
-    return z.object({ ...ZodSchemas.buildRequestPrincipal(z).shape, name: z.string() });
-  }
-}
-
+/**
+ * Represents a named principal fixture used by the test helpers.
+ */
 class PrincipalMock {
-  static parseShape(shape, { schema, z } = {}) {
-    if (schema) return schema.parse(shape);
-    if (z) return PrincipalMockZodSchemas.buildShape(z).parse(shape);
-    return shape;
+  /**
+   * Parses a principal mock shape with the configured validation backend.
+   *
+   * @param {unknown} shape
+   * @param {object} [options]
+   * @returns {unknown}
+   */
+  static parseShape(shape, options = {}) {
+    return parsePrincipalMockShape(shape, options);
   }
 
   #shape = null;
 
-  constructor(shape, { z } = {}) {
-    this.#shape = PrincipalMock.parseShape(shape, { z });
+  /**
+   * @param {unknown} shape
+   * @param {object} [options]
+   */
+  constructor(shape, options = {}) {
+    this.#shape = PrincipalMock.parseShape(shape, options);
   }
 
   get id() {

@@ -1,56 +1,20 @@
 const { ResourceMock, ResourcesMock, PrincipalMock, PrincipalsMock } = require('./Mocks/index.js');
-const { ZodSchemas, Effect } = require('../schemas.js');
 const { Kerberos } = require('../Kerberos.js');
+const { parseKerberosTestShape } = require('./validation');
 
-class KerberosTestZodSchemas extends ZodSchemas {
-  static buildInputShape(z) {
-    return z
-      .object({
-        principals: z.union([z.array(z.string()).nonempty(), z.instanceof(PrincipalsMock)]),
-        resources: z.union([z.array(z.string()).nonempty(), z.instanceof(ResourcesMock)]),
-        actions: z.array(z.string()).nonempty().transform((actions) => new Set(actions)),
-      });
-  }
-
-  static buildExpectedItemShape(z) {
-    return z
-      .object({
-        principal: z.union([z.string(), z.instanceof(PrincipalMock)]),
-        resource: z.union([z.string(), z.instanceof(ResourceMock)]),
-        actions: z.record(z.string(), z.union([z.nativeEnum(Effect), z.boolean()])),
-      });
-  }
-
-  static buildShape(z) {
-    return z
-      .object({
-        name: z.string(),
-        input: KerberosTestZodSchemas.buildInputShape(z),
-        expected: z.array(KerberosTestZodSchemas.buildExpectedItemShape(z)).nonempty(),
-      })
-      .check((ctx) => {
-        const inputActions = ctx.value.input.actions;
-        for (const item of ctx.value.expected) {
-          const expectedActions = new Set(Object.keys(item.actions));
-          for (const action of expectedActions) {
-            if (!inputActions.has(action)) {
-              ctx.issues.push({
-                code: 'custom',
-                path: ['expected', 'actions'],
-                message: `Action "${action}" in expected is not present in input actions`,
-              });
-            }
-          }
-        }
-      });
-  }
-}
-
+/**
+ * Declarative test case for running authorization expectations against Kerberos.
+ */
 class KerberosTest {
-  static parseShape(shape, { schema, z } = {}) {
-    if (schema) return schema.parse(shape);
-    if (z) return KerberosTestZodSchemas.buildShape(z).parse(shape);
-    return shape;
+  /**
+   * Parses a KerberosTest shape with the configured validation backend.
+   *
+   * @param {unknown} shape
+   * @param {object} [options]
+   * @returns {unknown}
+   */
+  static parseShape(shape, options = {}) {
+    return parseKerberosTestShape(shape, options);
   }
 
   #shape = null;
@@ -61,14 +25,30 @@ class KerberosTest {
 
   #resources = [];
 
-  constructor(shape, kerberos, { z } = {}) {
-    this.#shape = KerberosTest.parseShape(shape, { z });
+  /**
+   * @param {unknown} shape
+   * @param {Kerberos} [kerberos]
+   * @param {object} [options]
+   */
+  constructor(shape, kerberos, options = {}) {
+    this.#shape = KerberosTest.parseShape(shape, options);
     if (kerberos && !(kerberos instanceof Kerberos)) throw new Error('Invalid Kerberos instance!');
     this.#kerberos = kerberos;
     if (this.#shape.input.principals instanceof PrincipalsMock) this.#principals.push(this.#shape.input.principals);
     if (this.#shape.input.resources instanceof ResourcesMock) this.#resources.push(this.#shape.input.resources);
   }
 
+  /**
+   * Registers the generated test cases in the provided test runtime.
+   *
+   * @param {object} options
+   * @param {Kerberos} [options.kerberos]
+   * @param {PrincipalsMock[]} [options.principals]
+   * @param {ResourcesMock[]} [options.resources]
+   * @param {boolean} [options.effectAsBoolean=false]
+   * @param {{ describe: Function, it: Function, assert: { ok: Function, strictEqual: Function } }} runtime
+   * @returns {void}
+   */
   run({ kerberos, principals, resources, effectAsBoolean = false }, { describe, it, assert }) {
     describe(this.#shape.name, () => {
       if (kerberos && !(kerberos instanceof Kerberos)) throw new Error('Invalid Kerberos instance!');
@@ -178,5 +158,4 @@ class KerberosTest {
 
 module.exports = {
   KerberosTest,
-  KerberosTestZodSchemas,
 };

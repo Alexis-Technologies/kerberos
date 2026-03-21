@@ -1,53 +1,65 @@
 const { Outputs } = require('../Outputs');
-const { ResourcePolicyZodSchemas } = require('./schemas.js');
+const { parseResourcePolicyShape } = require('./validation');
 
-const { ALL_ACTIONS, Effect } = require('../schemas.js');
+const { ALL_ACTIONS, Effect } = require('../schemas');
 const { Variables } = require('../Variables');
 const { Conditions } = require('../Conditions');
 const { Constants } = require('../Constants');
 
+/**
+ * Represents a resource policy and evaluates actions for requests.
+ */
 class ResourcePolicy {
-  static parseShape(shape, { schema, z } = {}) {
-    if (schema) return schema.parse(shape);
-    if (z) return ResourcePolicyZodSchemas.buildShape(z).parse(shape);
-    return shape;
+  /**
+   * Parses a resource policy shape with the configured validation backend.
+   *
+   * @param {unknown} shape
+   * @param {object} [options]
+   * @returns {unknown}
+   */
+  static parseShape(shape, options = {}) {
+    return parseResourcePolicyShape(shape, options);
   }
 
-  static parseConstants(constants, { z } = {}) {
-    return constants instanceof Constants ? constants : new Constants(constants, { z });
+  static parseConstants(constants, options = {}) {
+    return constants instanceof Constants ? constants : new Constants(constants, options);
   }
 
-  static parseVariables(variables, { z } = {}) {
-    return variables instanceof Variables ? variables : new Variables(variables, { z });
+  static parseVariables(variables, options = {}) {
+    return variables instanceof Variables ? variables : new Variables(variables, options);
   }
 
-  static parseConditions(conditions, { z } = {}) {
+  static parseConditions(conditions, options = {}) {
     if (!conditions) return undefined;
-    return conditions instanceof Conditions ? conditions : new Conditions(conditions, { z });
+    return conditions instanceof Conditions ? conditions : new Conditions(conditions, options);
   }
 
-  static parseOutputs(outputs, { z } = {}) {
+  static parseOutputs(outputs, options = {}) {
     if (!outputs) return undefined;
-    return outputs instanceof Outputs ? outputs : new Outputs(outputs, { z });
+    return outputs instanceof Outputs ? outputs : new Outputs(outputs, options);
   }
 
   #shape = null;
 
-  constructor(shape, { z } = {}) {
-    this.#shape = ResourcePolicy.parseShape(shape, { z });
+  /**
+   * @param {unknown} shape
+   * @param {object} [options]
+   */
+  constructor(shape, options = {}) {
+    this.#shape = ResourcePolicy.parseShape(shape, options);
     if (this.#shape.resourcePolicy.constants) {
-      this.#shape.resourcePolicy.constants = ResourcePolicy.parseConstants(this.#shape.resourcePolicy.constants, { z });
+      this.#shape.resourcePolicy.constants = ResourcePolicy.parseConstants(this.#shape.resourcePolicy.constants, options);
     }
     if (this.#shape.resourcePolicy.variables) {
-      this.#shape.resourcePolicy.variables = ResourcePolicy.parseVariables(this.#shape.resourcePolicy.variables, { z });
+      this.#shape.resourcePolicy.variables = ResourcePolicy.parseVariables(this.#shape.resourcePolicy.variables, options);
     }
     if (this.#shape.resourcePolicy.rules?.length) {
       const rules = [];
       for (const rule of this.#shape.resourcePolicy.rules) {
         rules.push({
           ...rule,
-          condition: ResourcePolicy.parseConditions(rule.condition, { z }),
-          output: ResourcePolicy.parseOutputs(rule.output, { z }),
+          condition: ResourcePolicy.parseConditions(rule.condition, options),
+          output: ResourcePolicy.parseOutputs(rule.output, options),
         });
       }
       this.#shape.resourcePolicy.rules = rules;
@@ -78,7 +90,14 @@ class ResourcePolicy {
     return this.#shape;
   }
 
-  // returns map of actions and effects along with output
+  /**
+   * Evaluates a request and returns action effects, outputs and metadata.
+   *
+   * @param {Record<string, unknown>} req
+   * @param {Set<string>} derivedRoles
+   * @param {boolean} [effectAsBoolean=false]
+   * @returns {{ effects: Map<string, string | boolean>, outputs: Map<string, unknown>, meta: Record<string, unknown> }}
+   */
   check(req, derivedRoles, effectAsBoolean = false) {
     const effects = new Map();
     const outputs = new Map();

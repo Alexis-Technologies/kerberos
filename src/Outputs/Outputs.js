@@ -1,22 +1,42 @@
-const { OutputsZodSchemas } = require('./schemas.js');
+const { parseOutputsShape } = require('./validation');
 
+/**
+ * Evaluates policy outputs for activated rules.
+ */
 class Outputs {
-  static parseShape(shape, { schema, z } = {}) {
-    if (schema) return schema.parse(shape);
-    if (z) return OutputsZodSchemas.buildShape(z).parse(shape);
-    return shape;
+  /**
+   * Parses an outputs shape with the configured validation backend.
+   *
+   * @param {unknown} shape
+   * @param {object} [options]
+   * @returns {unknown}
+   */
+  static parseShape(shape, options = {}) {
+    return parseOutputsShape(shape, options);
   }
 
   #shape = null;
 
-  constructor(shape, { z } = {}) {
-    this.#shape = Outputs.parseShape(shape, { z });
+  /**
+   * @param {unknown} shape
+   * @param {object} [options]
+   */
+  constructor(shape, options = {}) {
+    this.#shape = Outputs.parseShape(shape, options);
   }
 
   get shape() {
     return this.#shape;
   }
 
+  /**
+   * Builds the output payload for the current rule.
+   *
+   * @param {Record<string, unknown>} req
+   * @param {boolean} isConditionFulfilled
+   * @param {string} src
+   * @returns {{ src: string, val: unknown }}
+   */
   build(req, isConditionFulfilled, src) {
     try {
       let outputFunction = null;

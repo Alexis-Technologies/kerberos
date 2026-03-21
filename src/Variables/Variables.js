@@ -1,22 +1,40 @@
-const { VariablesZodSchemas } = require('./schemas.js');
+const { parseVariablesShape } = require('./validation');
 
+/**
+ * Represents a set of lazily evaluated request variables.
+ */
 class Variables {
-  static parseShape(shape, { schema, z } = {}) {
-    if (schema) return schema.parse(shape);
-    if (z) return VariablesZodSchemas.buildShape(z).parse(shape);
-    return shape;
+  /**
+   * Parses a variables shape with the configured validation backend.
+   *
+   * @param {unknown} shape
+   * @param {object} [options]
+   * @returns {unknown}
+   */
+  static parseShape(shape, options = {}) {
+    return parseVariablesShape(shape, options);
   }
 
   #shape = null;
 
-  constructor(shape, { z } = {}) {
-    this.#shape = Variables.parseShape(shape, { z });
+  /**
+   * @param {unknown} shape
+   * @param {object} [options]
+   */
+  constructor(shape, options = {}) {
+    this.#shape = Variables.parseShape(shape, options);
   }
 
   get shape() {
     return this.#shape;
   }
 
+  /**
+   * Evaluates all variable functions for a request.
+   *
+   * @param {Record<string, unknown>} req
+   * @returns {Record<string, unknown>}
+   */
   get(req) {
     const result = {};
     for (const name in this.#shape) {

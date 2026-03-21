@@ -1,33 +1,37 @@
-const { PrincipalMock, PrincipalMockZodSchemas } = require('./PrincipalMock.js');
+const { PrincipalMock } = require('./PrincipalMock.js');
+const { PrincipalsMockZodSchemas } = require('./schemas');
+const { parsePrincipalsMockShape } = require('./validation');
 
-class PrincipalsMockZodSchemas extends PrincipalMockZodSchemas {
-  static buildShape(z) {
-    const PrincipalMockShapeZodSchema = PrincipalMockZodSchemas.buildShape(z);
-    return z.union([
-      z.array(z.instanceof(PrincipalMock)).nonempty(),
-      z.record(PrincipalMockShapeZodSchema.shape.name, PrincipalMockShapeZodSchema.omit({ name: true }))
-    ]);
-  }
-}
-
+/**
+ * Collection of named principal fixtures used in tests.
+ */
 class PrincipalsMock {
-  static parseShape(shape, { schema, z } = {}) {
-    if (schema) return schema.parse(shape);
-    if (z) return PrincipalsMockZodSchemas.buildShape(z).parse(shape);
-    return shape;
+  /**
+   * Parses principals mocks with the configured validation backend.
+   *
+   * @param {unknown} shape
+   * @param {object} [options]
+   * @returns {unknown}
+   */
+  static parseShape(shape, options = {}) {
+    return parsePrincipalsMockShape(shape, PrincipalMock, options);
   }
 
   #principals = new Map();
 
-  constructor(principals, { z } = {}) {
-    const parsedPrincipals = PrincipalsMock.parseShape(principals, { z });
+  /**
+   * @param {unknown} principals
+   * @param {object} [options]
+   */
+  constructor(principals, options = {}) {
+    const parsedPrincipals = PrincipalsMock.parseShape(principals, options);
     if (Array.isArray(parsedPrincipals)) {
       for (const principal of parsedPrincipals) this.#principals.set(principal.name, principal);
     } else {
       for (const name in parsedPrincipals) {
         if (!Object.prototype.hasOwnProperty.call(parsedPrincipals, name)) continue;
         const principal = parsedPrincipals[name];
-        const mock = new PrincipalMock({ ...principal, name });
+        const mock = new PrincipalMock({ ...principal, name }, options);
         this.#principals.set(mock.name, mock);
       }
     }

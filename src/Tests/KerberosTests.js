@@ -1,42 +1,35 @@
-const { ZodSchemas } = require('../schemas.js');
 const { Kerberos } = require('../Kerberos.js');
-const { KerberosTest, KerberosTestZodSchemas } = require('./KerberosTest.js');
-const { ResourcesMock, PrincipalsMock, PrincipalsMockZodSchemas, ResourcesMockZodSchemas } = require('./Mocks');
+const { KerberosTest } = require('./KerberosTest.js');
+const { parseKerberosTestsPolicies } = require('./validation');
+const { ResourcesMock, PrincipalsMock } = require('./Mocks');
 
-class KerberosTestsZodSchemas extends ZodSchemas {
-  static buildTestsPolicyShape(z) {
-    return z.object({
-      name: z.string(),
-      principals: z.union([z.instanceof(PrincipalsMock), PrincipalsMockZodSchemas.buildShape(z)]),
-      resources: z.union([z.instanceof(ResourcesMock), ResourcesMockZodSchemas.buildShape(z)]),
-      tests: z.array(z.union([z.instanceof(KerberosTest), KerberosTestZodSchemas.buildShape(z)])).nonempty(),
-    });
-  }
-
-  static buildShape(z) {
-    return z.array(KerberosTestsZodSchemas.buildTestsPolicyShape(z)).nonempty();
-  }
-}
-
+/**
+ * Runner for grouped KerberosTest policies.
+ */
 class KerberosTests {
-  static parsePolicies(policies, { schema, z } = {}) {
-    if (schema) return schema.parse(policies);
-    if (z) return KerberosTestsZodSchemas.buildShape(z).parse(policies);
-    return policies;
+  /**
+   * Parses tests policy definitions with the configured validation backend.
+   *
+   * @param {unknown} policies
+   * @param {object} [options]
+   * @returns {unknown}
+   */
+  static parsePolicies(policies, options = {}) {
+    return parseKerberosTestsPolicies(policies, KerberosTest, options);
   }
 
-  static parseTests(tests, kerberos, { z } = {}) {
+  static parseTests(tests, kerberos, options = {}) {
     const parsedTests = [];
-    for (const test of tests) parsedTests.push(test instanceof KerberosTest ? test : new KerberosTest(test, kerberos, { z }));
+    for (const test of tests) parsedTests.push(test instanceof KerberosTest ? test : new KerberosTest(test, kerberos, options));
     return parsedTests;
   }
 
-  static parsePrincipals(principals, { z } = {}) {
-    return principals instanceof PrincipalsMock ? principals.mocks : new PrincipalsMock(principals, { z }).mocks;
+  static parsePrincipals(principals, options = {}) {
+    return principals instanceof PrincipalsMock ? principals.mocks : new PrincipalsMock(principals, options).mocks;
   }
 
-  static parseResources(resources, { z } = {}) {
-    return resources instanceof ResourcesMock ? resources.mocks : new ResourcesMock(resources, { z }).mocks;
+  static parseResources(resources, options = {}) {
+    return resources instanceof ResourcesMock ? resources.mocks : new ResourcesMock(resources, options).mocks;
   }
 
   #kerberos = null;
@@ -49,19 +42,31 @@ class KerberosTests {
 
   #resources = null;
 
-  constructor(kerberos, policies, { z } = {}) {
+  /**
+   * @param {Kerberos} kerberos
+   * @param {unknown[]} policies
+   * @param {object} [options]
+   */
+  constructor(kerberos, policies, options = {}) {
     if (!kerberos || !(kerberos instanceof Kerberos)) throw new Error('Kerberos instance is required');
     this.#kerberos = kerberos;
-    this.#policies = KerberosTests.parsePolicies(policies, { z });
-    for (const policy of this.#policies) this.#tests.push(...KerberosTests.parseTests(policy.tests, kerberos, { z }));
+    this.#policies = KerberosTests.parsePolicies(policies, options);
+    for (const policy of this.#policies) this.#tests.push(...KerberosTests.parseTests(policy.tests, kerberos, options));
     const principals = [];
-    for (const policy of policies) principals.push(...KerberosTests.parsePrincipals(policy.principals, { z }));
-    this.#principals = new PrincipalsMock(principals, { z });
+    for (const policy of policies) principals.push(...KerberosTests.parsePrincipals(policy.principals, options));
+    this.#principals = new PrincipalsMock(principals, options);
     const resources = [];
-    for (const policy of policies) resources.push(...KerberosTests.parseResources(policy.resources, { z }));
-    this.#resources = new ResourcesMock(resources, { z });
+    for (const policy of policies) resources.push(...KerberosTests.parseResources(policy.resources, options));
+    this.#resources = new ResourcesMock(resources, options);
   }
 
+  /**
+   * Registers grouped tests in the provided test runtime.
+   *
+   * @param {{ effectAsBoolean?: boolean }} options
+   * @param {{ describe: Function, it: Function, assert: { ok: Function, strictEqual: Function } }} runtime
+   * @returns {void}
+   */
   run({ effectAsBoolean = false }, { describe, it, assert }) {
     for (const policy of this.#policies) {
       describe(policy.name, () => {
@@ -81,4 +86,4 @@ class KerberosTests {
   }
 }
 
-module.exports = { KerberosTests, KerberosTestsZodSchemas };
+module.exports = { KerberosTests };

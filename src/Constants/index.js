@@ -1,4 +1,4 @@
 module.exports = {
-  ...require('./schemas.js'),
+  ...require('./schemas'),
   ...require('./Constants.js'),
 };

@@ -1,6 +1,8 @@
 const { ResourcePolicy } = require('./ResourcePolicy/index.js');
 const { DerivedRoles } = require('./DerivedRoles/index.js');
-const { ALL_ACTIONS, Effect, ZodSchemas } = require('./schemas.js');
+const { ALL_ACTIONS, Effect, JsonSchemas, TypeBoxSchemas, ZodSchemas } = require('./schemas');
+const { KerberosJsonSchemas, KerberosTypeBoxSchemas, KerberosZodSchemas } = require('./schemas/kerberos.js');
+const { createAjvAdapter, parseWithValidation, registerAjvKeywords } = require('./validation');
 
 // Import crypto for Node.js environment
 let nodeCrypto;
@@ -10,41 +12,16 @@ try {
   // Ignore error, will fall back to browser crypto or manual generation
 }
 
-class KerberosZodSchemas extends ZodSchemas {
-  static buildResourcePolicyInstance(z) {
-    return z.instanceof(ResourcePolicy);
-  }
-
-  static buildDerivedRolesInstance(z) {
-    return z.instanceof(DerivedRoles);
-  }
-
-  static buildIsAllowedArgs(z) {
-    return z.object({
-      principal: ZodSchemas.buildRequestPrincipal(z),
-      action: z.string(),
-      resource: ZodSchemas.buildRequestResource(z),
-    });
-  }
-
-  static buildCheckResourcesArgs(z) {
-    return z.object({
-      reqId: z.string().optional(),
-      principal: ZodSchemas.buildRequestPrincipal(z),
-      resources: z
-        .array(
-          z.object({
-            resource: ZodSchemas.buildRequestResource(z),
-            actions: z.array(z.string()).nonempty(),
-          })
-        )
-        .nonempty(),
-      includeMeta: z.boolean().optional(),
-    });
-  }
-}
-
+/**
+ * Main authorization entry point. Supports plain runtime use, Zod validation,
+ * JSON Schema + Ajv validation and TypeBox + Ajv validation.
+ */
 class Kerberos {
+  /**
+   * Generates a request-scoped call identifier used in logs and responses.
+   *
+   * @returns {string}
+   */
   static generateCallId() {
     // Try Node.js crypto.randomUUID first
     if (nodeCrypto?.randomUUID) return nodeCrypto.randomUUID();
@@ -58,11 +35,23 @@ class Kerberos {
     });
   }
 
+  /**
+   * Normalizes request scopes so "." behaves like an empty base scope.
+   *
+   * @param {string | undefined} scope
+   * @returns {string}
+   */
   static normalizeScope(scope) {
     if (scope === '.') return '';
     return scope ?? '';
   }
 
+  /**
+   * Builds the scope traversal chain from the most specific to the base scope.
+   *
+   * @param {string | undefined} scope
+   * @returns {string[]}
+   */
   static getScopeSearchChain(scope) {
     const normalizedScope = Kerberos.normalizeScope(scope);
     if (!normalizedScope) return [''];
@@ -76,34 +65,74 @@ class Kerberos {
     return searchChain;
   }
 
-  static parsePolicy(policy, { schema, z } = {}) {
-    if (schema) return policy instanceof ResourcePolicy ? schema.parse(policy) : new ResourcePolicy(policy, { z });
-    if (z) return policy instanceof ResourcePolicy ? KerberosZodSchemas.buildResourcePolicyInstance(z).parse(policy) : new ResourcePolicy(policy, { z });
-    return policy instanceof ResourcePolicy ? policy : new ResourcePolicy(policy);
+  static parsePolicy(policy, options = {}) {
+    if (policy instanceof ResourcePolicy) {
+      return parseWithValidation(policy, {
+        ...options,
+        buildJson: () => KerberosJsonSchemas.buildResourcePolicyInstance(),
+        buildTypeBox: (t) => KerberosTypeBoxSchemas.buildResourcePolicyInstance(t),
+        buildZod: (z) => KerberosZodSchemas.buildResourcePolicyInstance(z),
+      });
+    }
+    const { schema, ...nestedOptions } = options;
+    return new ResourcePolicy(policy, nestedOptions);
   }
 
-  static parseDerivedRoles(roles, { schema, z } = {}) {
-    if (schema) return roles instanceof DerivedRoles ? schema.parse(roles) : new DerivedRoles(roles, { z });
-    if (z) return roles instanceof DerivedRoles ? KerberosZodSchemas.buildDerivedRolesInstance(z).parse(roles) : new DerivedRoles(roles, { z });
-    return roles instanceof DerivedRoles ? roles : new DerivedRoles(roles);
+  static parseDerivedRoles(roles, options = {}) {
+    if (roles instanceof DerivedRoles) {
+      return parseWithValidation(roles, {
+        ...options,
+        buildJson: () => KerberosJsonSchemas.buildDerivedRolesInstance(),
+        buildTypeBox: (t) => KerberosTypeBoxSchemas.buildDerivedRolesInstance(t),
+        buildZod: (z) => KerberosZodSchemas.buildDerivedRolesInstance(z),
+      });
+    }
+    const { schema, ...nestedOptions } = options;
+    return new DerivedRoles(roles, nestedOptions);
   }
 
-  static parseRequest({ principal, resource, actions, reqId, callId, includeMeta }, { schema, z } = {}) {
-    if (schema) return schema.parse({ principal, resource, P: principal, R: resource, actions, reqId, callId, includeMeta });
-    if (z) return ZodSchemas.buildRequest(z).parse({ principal, resource, P: principal, R: resource, actions, reqId, callId, includeMeta });
-    return { principal, resource, P: principal, R: resource, actions, reqId, callId, includeMeta };
+  static parseRequest({ principal, resource, actions, reqId, callId, includeMeta }, options = {}) {
+    return parseWithValidation(
+      { principal, resource, P: principal, R: resource, actions, reqId, callId, includeMeta },
+      {
+        ...options,
+        buildJson: () => JsonSchemas.buildRequest(),
+        buildTypeBox: (t) => TypeBoxSchemas.buildRequest(t),
+        buildZod: (z) => ZodSchemas.buildRequest(z),
+      }
+    );
   }
 
-  static parseIsAllowedArgs(args, { schema, z } = {}) {
-    if (schema) return schema.parse(args);
-    if (z) return KerberosZodSchemas.buildIsAllowedArgs(z).parse(args);
-    return args;
+  /**
+   * Parses `isAllowed` arguments using the configured validation backend.
+   *
+   * @param {unknown} args
+   * @param {object} [options]
+   * @returns {unknown}
+   */
+  static parseIsAllowedArgs(args, options = {}) {
+    return parseWithValidation(args, {
+      ...options,
+      buildJson: () => KerberosJsonSchemas.buildIsAllowedArgs(),
+      buildTypeBox: (t) => KerberosTypeBoxSchemas.buildIsAllowedArgs(t),
+      buildZod: (z) => KerberosZodSchemas.buildIsAllowedArgs(z),
+    });
   }
 
-  static parseCheckResourcesArgs(args, { schema, z } = {}) {
-    if (schema) return schema.parse(args);
-    if (z) return KerberosZodSchemas.buildCheckResourcesArgs(z).parse(args);
-    return args;
+  /**
+   * Parses `checkResources` arguments using the configured validation backend.
+   *
+   * @param {unknown} args
+   * @param {object} [options]
+   * @returns {unknown}
+   */
+  static parseCheckResourcesArgs(args, options = {}) {
+    return parseWithValidation(args, {
+      ...options,
+      buildJson: () => KerberosJsonSchemas.buildCheckResourcesArgs(),
+      buildTypeBox: (t) => KerberosTypeBoxSchemas.buildCheckResourcesArgs(t),
+      buildZod: (z) => KerberosZodSchemas.buildCheckResourcesArgs(z),
+    });
   }
 
   #policies = new Map();
@@ -116,28 +145,54 @@ class Kerberos {
 
   #z = null;
 
-  #resourcePolicyInstanceZodSchema = null;
+  #ajv = null;
 
-  #derivedRolesInstanceZodSchema = null;
+  #typebox = null;
 
-  #requestZodSchema = null;
+  #resourcePolicyValidator = null;
 
-  #isAllowedArgsZodSchema = null;
+  #derivedRolesValidator = null;
 
-  #checkResourcesArgsZodSchema = null;
+  #requestValidator = null;
+
+  #isAllowedArgsValidator = null;
+
+  #checkResourcesArgsValidator = null;
 
   #getCallId = null;
 
-  constructor(policies, derivedRoles, { logger, z, getCallId } = { logger: false, z: null, getCallId: null }) {
+  /**
+   * @param {unknown[]} policies
+   * @param {unknown[]} derivedRoles
+   * @param {object} [options]
+   */
+  constructor(policies, derivedRoles, { logger, z, ajv, typebox, getCallId } = { logger: false, z: null, ajv: null, typebox: null, getCallId: null }) {
     this.#getCallId = Kerberos.generateCallId;
+
+    this.#ajv = ajv ?? null;
+    this.#typebox = typebox ?? null;
+
+    if (this.#ajv) registerAjvKeywords(this.#ajv);
 
     if (z) {
       this.#z = z;
-      this.#resourcePolicyInstanceZodSchema = KerberosZodSchemas.buildResourcePolicyInstance(z);
-      this.#derivedRolesInstanceZodSchema = KerberosZodSchemas.buildDerivedRolesInstance(z);
-      this.#requestZodSchema = ZodSchemas.buildRequest(z);
-      this.#isAllowedArgsZodSchema = KerberosZodSchemas.buildIsAllowedArgs(z);
-      this.#checkResourcesArgsZodSchema = KerberosZodSchemas.buildCheckResourcesArgs(z);
+      this.#resourcePolicyValidator = KerberosZodSchemas.buildResourcePolicyInstance(z);
+      this.#derivedRolesValidator = KerberosZodSchemas.buildDerivedRolesInstance(z);
+      this.#requestValidator = ZodSchemas.buildRequest(z);
+      this.#isAllowedArgsValidator = KerberosZodSchemas.buildIsAllowedArgs(z);
+      this.#checkResourcesArgsValidator = KerberosZodSchemas.buildCheckResourcesArgs(z);
+    } else if (this.#ajv && this.#typebox) {
+      this.#resourcePolicyValidator = createAjvAdapter(this.#ajv, KerberosTypeBoxSchemas.buildResourcePolicyInstance(this.#typebox));
+      this.#derivedRolesValidator = createAjvAdapter(this.#ajv, KerberosTypeBoxSchemas.buildDerivedRolesInstance(this.#typebox));
+      this.#requestValidator = createAjvAdapter(this.#ajv, TypeBoxSchemas.buildRequest(this.#typebox));
+      this.#isAllowedArgsValidator = createAjvAdapter(this.#ajv, KerberosTypeBoxSchemas.buildIsAllowedArgs(this.#typebox));
+      this.#checkResourcesArgsValidator = createAjvAdapter(this.#ajv, KerberosTypeBoxSchemas.buildCheckResourcesArgs(this.#typebox));
+    } else if (this.#ajv) {
+      this.#resourcePolicyValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildResourcePolicyInstance());
+      this.#derivedRolesValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildDerivedRolesInstance());
+      this.#requestValidator = createAjvAdapter(this.#ajv, JsonSchemas.buildRequest());
+      this.#isAllowedArgsValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildIsAllowedArgs());
+      this.#checkResourcesArgsValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildCheckResourcesArgs());
     }
 
     this.#policies = this.#getPoliciesMap(policies);
@@ -151,7 +206,12 @@ class Kerberos {
   #getPoliciesMap(policies) {
     const policiesMap = new Map();
     for (const policy of policies) {
-      const handledPolicy = Kerberos.parsePolicy(policy, { schema: this.#resourcePolicyInstanceZodSchema, z: this.#z });
+      const handledPolicy = Kerberos.parsePolicy(policy, {
+        schema: this.#resourcePolicyValidator,
+        z: this.#z,
+        ajv: this.#ajv,
+        typebox: this.#typebox,
+      });
       policiesMap.set(`${handledPolicy.kind}.${handledPolicy.version}.${handledPolicy.scope ?? ''}`, handledPolicy);
     }
     return policiesMap;
@@ -161,7 +221,12 @@ class Kerberos {
     const derivedRolesMap = new Map();
     if (!roles) return derivedRolesMap;
     for (const role of roles) {
-      const handledRole = Kerberos.parseDerivedRoles(role, { schema: this.#derivedRolesInstanceZodSchema, z: this.#z });
+      const handledRole = Kerberos.parseDerivedRoles(role, {
+        schema: this.#derivedRolesValidator,
+        z: this.#z,
+        ajv: this.#ajv,
+        typebox: this.#typebox,
+      });
       derivedRolesMap.set(handledRole.name, handledRole);
     }
     return derivedRolesMap;
@@ -288,9 +353,20 @@ class Kerberos {
     return responseResource;
   }
 
+  /**
+   * Evaluates a single action against a resource.
+   *
+   * @param {Record<string, unknown>} args
+   * @returns {Promise<boolean>}
+   */
   async isAllowed(args) {
     const callId = this.#getCallId();
-    const parsedArgs = Kerberos.parseIsAllowedArgs(args, { schema: this.#isAllowedArgsZodSchema, z: this.#z });
+    const parsedArgs = Kerberos.parseIsAllowedArgs(args, {
+      schema: this.#isAllowedArgsValidator,
+      z: this.#z,
+      ajv: this.#ajv,
+      typebox: this.#typebox,
+    });
     const req = Kerberos.parseRequest(
       {
         principal: parsedArgs.principal,
@@ -300,7 +376,12 @@ class Kerberos {
         callId,
         includeMeta: parsedArgs.includeMeta,
       },
-      { schema: this.#requestZodSchema, z: this.#z }
+      {
+        schema: this.#requestValidator,
+        z: this.#z,
+        ajv: this.#ajv,
+        typebox: this.#typebox,
+      }
     );
 
     const policy = this.#getPolicy(req);
@@ -320,11 +401,23 @@ class Kerberos {
     return isAllowed;
   }
 
+  /**
+   * Evaluates a set of resources and actions in a single request.
+   *
+   * @param {Record<string, unknown>} args
+   * @param {boolean} [effectAsBoolean=false]
+   * @returns {Promise<{ results: unknown[], kerberosCallId: string, reqId?: string }>}
+   */
   async checkResources(args, effectAsBoolean = false) {
     const callId = this.#getCallId();
     const results = [];
     const inputForLog = [];
-    const parsedArgs = Kerberos.parseCheckResourcesArgs(args, { schema: this.#checkResourcesArgsZodSchema, z: this.#z });
+    const parsedArgs = Kerberos.parseCheckResourcesArgs(args, {
+      schema: this.#checkResourcesArgsValidator,
+      z: this.#z,
+      ajv: this.#ajv,
+      typebox: this.#typebox,
+    });
 
     for (const { resource, actions } of parsedArgs.resources) {
       const req = Kerberos.parseRequest(
@@ -336,7 +429,12 @@ class Kerberos {
           callId,
           includeMeta: parsedArgs.includeMeta,
         },
-        { schema: this.#requestZodSchema, z: this.#z }
+        {
+          schema: this.#requestValidator,
+          z: this.#z,
+          ajv: this.#ajv,
+          typebox: this.#typebox,
+        }
       );
 
       const policy = this.#getPolicy(req);
@@ -376,4 +474,9 @@ class Kerberos {
   }
 }
 
-module.exports = { Kerberos, KerberosZodSchemas };
+module.exports = {
+  Kerberos,
+  KerberosJsonSchemas,
+  KerberosTypeBoxSchemas,
+  KerberosZodSchemas,
+};

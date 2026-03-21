@@ -129,6 +129,9 @@ The Kerberos constructor accepts an optional third parameter with configuration 
 ```javascript
 const kerberos = new Kerberos(policies, derivedRoles, {
   logger: true, // Enable audit logging (default: false)
+  z, // Optional: validate with Zod
+  ajv, // Optional: validate with Ajv
+  typebox: Type, // Optional: switch Ajv validation to TypeBox builders
   getCallId: () => `custom-${Date.now()}`, // Custom call ID generator (optional)
 });
 ```
@@ -136,9 +139,90 @@ const kerberos = new Kerberos(policies, derivedRoles, {
 ### Options:
 
 - **`logger`** (boolean | Console): Enable audit logging. Can be `true` for default console logging or a custom logger object.
+- **`z`**: Enables validation using the built-in Zod schema builders.
+- **`ajv`**: Enables validation using the built-in JSON Schema builders compiled with Ajv.
+- **`typebox`**: When used together with `ajv`, switches validation to the built-in TypeBox builders.
 - **`getCallId`** (function): Custom function to generate call IDs for audit tracking. 
   - **Default behavior**: Uses `crypto.randomUUID()` in Node.js, `window.crypto.randomUUID()` in browsers, or falls back to a pseudo UUID generator
   - **Custom example**: `() => \`req-\${Date.now()}-\${Math.random()}\``
+
+## Schema Validation
+
+Kerberos.js supports multiple validation backends:
+
+- **Zod** for consumers already using `zod`
+- **JSON Schema + Ajv** for standards-based schema validation
+- **TypeBox + Ajv** for typed schema builders backed by Ajv
+
+Install only the validation stack you need:
+
+```bash
+npm install ajv
+npm install @sinclair/typebox ajv
+npm install zod
+```
+
+### Using Zod
+
+```javascript
+import { z } from 'zod';
+import { Kerberos } from '@alexify/kerberos';
+
+const kerberos = new Kerberos(policies, derivedRoles, { z });
+```
+
+### Using JSON Schema + Ajv
+
+```javascript
+import Ajv from 'ajv';
+import { Kerberos, registerAjvKeywords } from '@alexify/kerberos';
+
+const ajv = registerAjvKeywords(new Ajv({ strict: false }));
+const kerberos = new Kerberos(policies, derivedRoles, { ajv });
+```
+
+### Using TypeBox + Ajv
+
+```javascript
+import Ajv from 'ajv';
+import { Type } from '@sinclair/typebox';
+import { Kerberos, registerAjvKeywords } from '@alexify/kerberos';
+
+const ajv = registerAjvKeywords(new Ajv({ strict: false }));
+const kerberos = new Kerberos(policies, derivedRoles, {
+  ajv,
+  typebox: Type,
+});
+```
+
+### Using Explicit Builders
+
+Kerberos.js also exports first-class schema builders and Ajv adapters if you want to compile validators yourself:
+
+```javascript
+import Ajv from 'ajv';
+import {
+  JsonSchemas,
+  KerberosJsonSchemas,
+  createAjvAdapter,
+  registerAjvKeywords,
+} from '@alexify/kerberos';
+
+const ajv = registerAjvKeywords(new Ajv({ strict: false }));
+
+const requestValidator = createAjvAdapter(ajv, JsonSchemas.buildRequest());
+const argsValidator = createAjvAdapter(ajv, KerberosJsonSchemas.buildCheckResourcesArgs());
+```
+
+### Notes About Function Fields
+
+Kerberos policies can contain JavaScript functions in:
+
+- conditions
+- variables
+- outputs
+
+When using Ajv or TypeBox, Kerberos.js registers custom Ajv keywords so those function-bearing fields can still be validated at runtime. This keeps the DSL usable even though plain JSON Schema doesn't natively understand JavaScript functions.
 
 ### Call ID Generation
 
@@ -272,12 +356,14 @@ Output functions are JavaScript functions that receive the request context and r
 ```
 
 Available context parameters:
+
 - **P**: Principal object with `id`, `roles`, and `attr`
 - **R**: Resource object with `id` and `kind`
 - **V**: Variables (computed values)
 - **C**: Constants (static values)
 
 Output functions are called when:
+
 - **ruleActivated**: The rule matches and its condition is satisfied
 - **conditionNotMet**: The rule matches but its condition is not satisfied
 
@@ -402,6 +488,7 @@ console.log(results);
 ```
 
 The metadata includes:
+
 - **matchedPolicy**: The name of the policy that produced the decision
 - **matchedScope**: The full matched policy scope that produced the decision
 - **effectiveDerivedRoles**: List of derived roles that were activated
