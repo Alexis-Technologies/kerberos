@@ -128,7 +128,7 @@ The Kerberos constructor accepts an optional third parameter with configuration 
 
 ```javascript
 const kerberos = new Kerberos(policies, derivedRoles, {
-  logger: true, // Enable audit logging (default: false)
+  logger: true, // Legacy console audit logging with summary + table + debug(json)
   z, // Optional: validate with Zod
   ajv, // Optional: validate with Ajv
   typebox: Type, // Optional: switch Ajv validation to TypeBox builders
@@ -138,13 +138,34 @@ const kerberos = new Kerberos(policies, derivedRoles, {
 
 ### Options:
 
-- **`logger`** (boolean | Console): Enable audit logging. Can be `true` for default console logging or a custom logger object.
+- **`logger`** (boolean | KerberosLogger): Enable audit logging.
+  - `true` keeps the legacy console behavior with `group + summary + table + debug(json)`
+  - `false` or omitted disables logging
+  - a custom `console`-like logger keeps the legacy table/json flow
+  - a structured logger such as `Pino` receives one structured audit entry per evaluated action
 - **`z`**: Enables validation using the built-in Zod schema builders.
 - **`ajv`**: Enables validation using the built-in JSON Schema builders compiled with Ajv.
 - **`typebox`**: When used together with `ajv`, switches validation to the built-in TypeBox builders.
 - **`getCallId`** (function): Custom function to generate call IDs for audit tracking. 
   - **Default behavior**: Uses `crypto.randomUUID()` in Node.js, `window.crypto.randomUUID()` in browsers, or falls back to a pseudo UUID generator
   - **Custom example**: `() => \`req-\${Date.now()}-\${Math.random()}\``
+
+### Using Pino for Production Logging
+
+If you want machine-readable audit logs in production, pass a `Pino` instance as the `logger` option:
+
+```javascript
+import pino from 'pino';
+import { Kerberos } from '@alexify/kerberos';
+
+const logger = pino({ level: 'info' });
+
+const kerberos = new Kerberos(policies, derivedRoles, {
+  logger,
+});
+```
+
+With `Pino`, Kerberos emits structured audit entries that include `callId`, `reqId`, `reqKind`, `principalId`, `resourceId`, `action`, `effect`, `outputs`, and `meta`. This mode is better suited for production ingestion than the default console table output.
 
 ## Schema Validation
 

@@ -267,8 +267,45 @@ export class ResourcePolicyTypeBoxSchemas {
 
 type KerberosPolicy = ResourcePolicy | ResourcePolicyRootSchema;
 type KerberosDerivedRoles = DerivedRoles | DerivedRolesSchema;
+export type KerberosAuditLogEntry = {
+  callId?: string;
+  reqId?: string;
+  timestamp: string;
+  reqKind: string;
+  principalId: string;
+  principalScope?: string;
+  principalPolicyVersion?: string;
+  resourceKind: string;
+  resourceId: string;
+  resourceScope?: string;
+  resourcePolicyVersion?: string;
+  action: string;
+  effect: Effect | boolean | string;
+  outputs: unknown[];
+  meta?: {
+    actions: Record<string, {
+      matchedPolicy: string;
+      matchedRule?: string;
+      matchedScope?: string;
+    }>;
+    effectiveDerivedRoles: string[];
+  } | Record<string, unknown>;
+};
+export type KerberosConsoleLogger = {
+  group?(label?: string): void;
+  log?(message?: unknown, ...args: unknown[]): void;
+  table?(tabularData?: unknown, properties?: ReadonlyArray<string>): void;
+  debug?(message?: unknown, ...args: unknown[]): void;
+  groupEnd?(): void;
+};
+export type KerberosStructuredLogger = {
+  child?(bindings: Record<string, unknown>): KerberosStructuredLogger;
+  info?(entry: KerberosAuditLogEntry, message?: string, ...args: unknown[]): void;
+  debug?(entry: KerberosAuditLogEntry, message?: string, ...args: unknown[]): void;
+};
+export type KerberosLogger = KerberosConsoleLogger | KerberosStructuredLogger;
 export type KerberosOptions = ValidationOptions & {
-  logger?: Partial<Console> | boolean;
+  logger?: KerberosLogger | boolean;
   getCallId?: () => string;
 };
 

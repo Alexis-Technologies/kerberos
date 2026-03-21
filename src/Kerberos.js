@@ -2,6 +2,7 @@ const { ResourcePolicy } = require('./ResourcePolicy/index.js');
 const { DerivedRoles } = require('./DerivedRoles/index.js');
 const { ALL_ACTIONS, Effect, JsonSchemas, TypeBoxSchemas, ZodSchemas } = require('./schemas');
 const { KerberosJsonSchemas, KerberosTypeBoxSchemas, KerberosZodSchemas } = require('./schemas/kerberos.js');
+const { createLoggerWriter } = require('./logging.js');
 const { createAjvAdapter, parseWithValidation, registerAjvKeywords } = require('./validation');
 
 // Import crypto for Node.js environment
@@ -139,9 +140,7 @@ class Kerberos {
 
   #derivedRoles = new Map();
 
-  #logger = console;
-
-  #loggingEnabled = false;
+  #logger = createLoggerWriter(false);
 
   #z = null;
 
@@ -198,8 +197,7 @@ class Kerberos {
     this.#policies = this.#getPoliciesMap(policies);
     this.#derivedRoles = this.#getDerivedRolesMap(derivedRoles);
 
-    if (typeof logger === 'object') this.#logger = logger;
-    if (logger) this.#loggingEnabled = true;
+    this.#logger = createLoggerWriter(logger);
     if (typeof getCallId === 'function') this.#getCallId = getCallId;
   }
 
@@ -244,92 +242,8 @@ class Kerberos {
     return importedRoles;
   }
 
-  #buildLogData(input, reqKind, callId) {
-    const logData = { table: [], json: [] };
-    for (const { req, result } of input) {
-      for (const action of req.actions) {
-        const logEntry = {
-          callId,
-          reqId: req.reqId,
-          timestamp: new Date().toISOString(),
-          reqKind,
-          principalId: req.P.id,
-          principalScope: req.P.scope,
-          principalPolicyVersion: req.P.policyVersion,
-          resourceKind: req.R.kind,
-          resourceId: req.R.id,
-          resourceScope: req.R.scope,
-          resourcePolicyVersion: req.R.policyVersion,
-          action,
-          effect: result.effects.get(action),
-          outputs: result.outputs ? [...result.outputs.values()] : [],
-          meta: result.meta,
-        };
-
-        if (!logEntry.callId) delete logEntry.callId;
-        if (!logEntry.reqId) delete logEntry.reqId;
-        if (!logEntry.principalScope) delete logEntry.principalScope;
-        if (!logEntry.principalPolicyVersion) delete logEntry.principalPolicyVersion;
-        if (!logEntry.resourceScope) delete logEntry.resourceScope;
-        if (!logEntry.resourcePolicyVersion) delete logEntry.resourcePolicyVersion;
-        if (!logEntry.meta) delete logEntry.meta;
-
-        logData.json.push(logEntry);
-
-        const logEntryForTable = { ...logEntry };
-
-        const exludedForTable = ['reqId', 'principalScope', 'principalPolicyVersion', 'resourceScope', 'resourcePolicyVersion', 'outputs', 'meta'];
-        const readableHeadersMap = {
-          callId: 'Call ID',
-          reqId: 'Request ID',
-          timestamp: 'Timestamp',
-          reqKind: 'Request kind',
-          principalId: 'Principal ID',
-          principalScope: 'Principal Scope',
-          principalPolicyVersion: 'Principal Policy Version',
-          resourceKind: 'Resource kind',
-          resourceId: 'Resource ID',
-          resourceScope: 'Resource Scope',
-          resourcePolicyVersion: 'Resource Policy Version',
-          action: 'Action',
-          effect: 'Effect',
-          outputs: 'Outputs',
-          meta: 'Meta',
-        };
-
-        for (const key of Object.keys(logEntryForTable)) {
-          if (exludedForTable.includes(key)) delete logEntryForTable[key];
-          else {
-            logEntryForTable[readableHeadersMap[key]] = logEntryForTable[key];
-            delete logEntryForTable[key];
-          }
-        }
-
-        logData.table.push(logEntryForTable);
-      }
-    }
-    return logData;
-  }
-
   #log(input, reqKind, callId) {
-    if (!this.#loggingEnabled) return;
-
-    this.#logger.group?.('Kerberos.js');
-
-    if (reqKind === 'IsAllowed') {
-      const [{ req, result }] = input;
-      const [action] = req.actions;
-      const effect = result.effects.get(action);
-      this.#logger.log?.(`Principal ${req.P.id} is ${effect === Effect.Allow || effect === true ? 'ALLOWED' : 'DENIED'} to perform action ${action} on resource ${req.R.id}`);
-    }
-
-    const logData = this.#buildLogData(input, reqKind, callId);
-    this.#logger.table?.(logData.table);
-    if (this.#logger.debug) {
-      for (const logEntry of logData.json) this.#logger.debug?.(logEntry, `Kerberos.js request log`);
-    }
-
-    this.#logger.groupEnd?.();
+    this.#logger.write(input, reqKind, callId);
   }
 
   #getPolicy(req) {
