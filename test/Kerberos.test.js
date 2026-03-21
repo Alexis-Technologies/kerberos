@@ -2,7 +2,7 @@ const { describe, it } = require('node:test');
 const { strict: assert } = require('node:assert');
 const { z } = require('zod');
 
-const { commonRolesPolicy, principalsPolicy, resourcesPolicy, expensePolicy } = require('./mocks/index.js');
+const { commonRolesPolicy, principalsPolicy, resourcesPolicy, expensePolicy, expenseScopedPolicy } = require('./mocks/index.js');
 
 const { Effect, Kerberos } = require('../src/index.js');
 
@@ -246,9 +246,7 @@ describe('Kerberos', () => {
 
     it('should return reqId in response when provided in request', async () => {
       const principal = principalsPolicy.sally;
-      const resources = [
-        { resource: resourcesPolicy.expense1, actions: ['view', 'create'] },
-      ];
+      const resources = [{ resource: resourcesPolicy.expense1, actions: ['view', 'create'] }];
       const reqId = 'test-request-123';
 
       const results = await kerberos.checkResources({ reqId, principal, resources });
@@ -267,9 +265,7 @@ describe('Kerberos', () => {
 
     it('should not include reqId in response when not provided in request', async () => {
       const principal = principalsPolicy.sally;
-      const resources = [
-        { resource: resourcesPolicy.expense1, actions: ['view', 'create'] },
-      ];
+      const resources = [{ resource: resourcesPolicy.expense1, actions: ['view', 'create'] }];
 
       const results = await kerberos.checkResources({ principal, resources });
 
@@ -291,9 +287,7 @@ describe('Kerberos', () => {
 
     it('should always return kerberosCallId in response', async () => {
       const principal = principalsPolicy.sally;
-      const resources = [
-        { resource: resourcesPolicy.expense1, actions: ['view', 'create'] },
-      ];
+      const resources = [{ resource: resourcesPolicy.expense1, actions: ['view', 'create'] }];
 
       const results = await kerberos.checkResources({ principal, resources });
 
@@ -304,9 +298,7 @@ describe('Kerberos', () => {
 
     it('should generate valid UUID format for kerberosCallId', async () => {
       const principal = principalsPolicy.sally;
-      const resources = [
-        { resource: resourcesPolicy.expense1, actions: ['view'] },
-      ];
+      const resources = [{ resource: resourcesPolicy.expense1, actions: ['view'] }];
 
       const results = await kerberos.checkResources({ principal, resources });
       // UUID v4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
@@ -316,9 +308,7 @@ describe('Kerberos', () => {
 
     it('should generate unique kerberosCallId for each request', async () => {
       const principal = principalsPolicy.sally;
-      const resources = [
-        { resource: resourcesPolicy.expense1, actions: ['view'] },
-      ];
+      const resources = [{ resource: resourcesPolicy.expense1, actions: ['view'] }];
 
       const results1 = await kerberos.checkResources({ principal, resources });
       const results2 = await kerberos.checkResources({ principal, resources });
@@ -330,9 +320,7 @@ describe('Kerberos', () => {
 
     it('should work with Boolean mode', async () => {
       const principal = principalsPolicy.sally;
-      const resources = [
-        { resource: resourcesPolicy.expense1, actions: ['view', 'create'] },
-      ];
+      const resources = [{ resource: resourcesPolicy.expense1, actions: ['view', 'create'] }];
 
       const results = await kerberos.checkResources({ principal, resources }, true);
 
@@ -355,9 +343,7 @@ describe('Kerberos', () => {
 
     it('should use custom getCallId function', async () => {
       const principal = principalsPolicy.sally;
-      const resources = [
-        { resource: resourcesPolicy.expense1, actions: ['view'] },
-      ];
+      const resources = [{ resource: resourcesPolicy.expense1, actions: ['view'] }];
 
       const results = await kerberos.checkResources({ principal, resources });
 
@@ -366,9 +352,7 @@ describe('Kerberos', () => {
 
     it('should increment call count with custom getCallId', async () => {
       const principal = principalsPolicy.sally;
-      const resources = [
-        { resource: resourcesPolicy.expense1, actions: ['view'] },
-      ];
+      const resources = [{ resource: resourcesPolicy.expense1, actions: ['view'] }];
 
       const results = await kerberos.checkResources({ principal, resources });
 
@@ -387,12 +371,12 @@ describe('Kerberos', () => {
       const originalGenerateCallId = KerberosModule.Kerberos.generateCallId;
 
       // Create a test version that uses our mock
-      KerberosModule.Kerberos.generateCallId = function() {
+      KerberosModule.Kerberos.generateCallId = function () {
         if (mockNodeCrypto?.randomUUID) return mockNodeCrypto.randomUUID();
         if (globalThis.window?.crypto?.randomUUID) return globalThis.window.crypto.randomUUID();
-        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-          const r = Math.random() * 16 | 0;
-          const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+          const r = (Math.random() * 16) | 0;
+          const v = c === 'x' ? r : (r & 0x3) | 0x8;
           return v.toString(16);
         });
       };
@@ -411,19 +395,19 @@ describe('Kerberos', () => {
       // Mock global window object
       globalThis.window = {
         crypto: {
-          randomUUID: () => mockUUID
-        }
+          randomUUID: () => mockUUID,
+        },
       };
 
       const KerberosModule = require('../src/Kerberos.js');
       const originalGenerateCallId = KerberosModule.Kerberos.generateCallId;
 
       // Create a test version that simulates no Node.js crypto but has window.crypto
-      KerberosModule.Kerberos.generateCallId = function() {
+      KerberosModule.Kerberos.generateCallId = function () {
         if (globalThis.window?.crypto?.randomUUID) return globalThis.window.crypto.randomUUID();
-        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-          const r = Math.random() * 16 | 0;
-          const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+          const r = (Math.random() * 16) | 0;
+          const v = c === 'x' ? r : (r & 0x3) | 0x8;
           return v.toString(16);
         });
       };
@@ -442,10 +426,10 @@ describe('Kerberos', () => {
       const originalGenerateCallId = KerberosModule.Kerberos.generateCallId;
 
       // Create a test version that has no crypto available
-      KerberosModule.Kerberos.generateCallId = function() {
-        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-          const r = Math.random() * 16 | 0;
-          const v = c === 'x' ? r : (r & 0x3 | 0x8);
+      KerberosModule.Kerberos.generateCallId = function () {
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+          const r = (Math.random() * 16) | 0;
+          const v = c === 'x' ? r : (r & 0x3) | 0x8;
           return v.toString(16);
         });
       };
@@ -480,29 +464,67 @@ describe('Kerberos', () => {
     });
   });
 
+  describe('scoped policy lookup', () => {
+    const scopedOverridePolicy = {
+      resourcePolicy: {
+        version: 'default',
+        scope: 'acme.corp',
+        resource: 'expense',
+        rules: [
+          {
+            actions: ['view'],
+            effect: Effect.Deny,
+            roles: ['USER'],
+          },
+        ],
+      },
+    };
+    const kerberos = new Kerberos([expensePolicy, scopedOverridePolicy], [commonRolesPolicy]);
+
+    it('should use the base policy when request scope is not provided', async () => {
+      const principal = principalsPolicy.sally;
+      const resources = [{ resource: resourcesPolicy.expense1, actions: ['view'] }];
+
+      const results = await kerberos.checkResources({ principal, resources });
+
+      assert.strictEqual(results.results[0].actions.view, Effect.Allow);
+    });
+
+    it('should use the scoped policy when request scope matches', async () => {
+      const principal = principalsPolicy.sally;
+      const resource = {
+        ...resourcesPolicy.expense1,
+        scope: 'acme.corp',
+      };
+      const resources = [{ resource, actions: ['view'] }];
+
+      const results = await kerberos.checkResources({ principal, resources });
+
+      assert.strictEqual(results.results[0].actions.view, Effect.Deny);
+    });
+  });
+
   describe('checkResources with metadata support', () => {
-    const kerberos = new Kerberos([expensePolicy], [commonRolesPolicy]);
+    const kerberos = new Kerberos([expensePolicy, expenseScopedPolicy], [commonRolesPolicy]);
 
     it('should include metadata when includeMeta is true', async () => {
       const principal = {
         ...principalsPolicy.sally,
         policyVersion: '20210210',
-        scope: 'acme.corp'
+        scope: 'acme.corp',
       };
       const resource = {
         ...resourcesPolicy.expense1,
         policyVersion: '20210210',
-        scope: 'acme.corp'
+        scope: 'acme.corp',
       };
-      const resources = [
-        { resource, actions: ['view', 'create'] }
-      ];
+      const resources = [{ resource, actions: ['view', 'create'] }];
 
-      const results = await kerberos.checkResources({ 
+      const results = await kerberos.checkResources({
         reqId: 'test-meta-123',
-        principal, 
+        principal,
         resources,
-        includeMeta: true 
+        includeMeta: true,
       });
 
       assert.strictEqual(results.reqId, 'test-meta-123');
@@ -524,9 +546,7 @@ describe('Kerberos', () => {
 
     it('should not include metadata when includeMeta is false or not provided', async () => {
       const principal = principalsPolicy.sally;
-      const resources = [
-        { resource: resourcesPolicy.expense1, actions: ['view'] }
-      ];
+      const resources = [{ resource: resourcesPolicy.expense1, actions: ['view'] }];
 
       const results1 = await kerberos.checkResources({ principal, resources, includeMeta: false });
       const results2 = await kerberos.checkResources({ principal, resources });
@@ -539,16 +559,14 @@ describe('Kerberos', () => {
       const principal = {
         ...principalsPolicy.sally,
         policyVersion: '20210210',
-        scope: 'acme.corp'
+        scope: 'acme.corp',
       };
       const resource = {
         ...resourcesPolicy.expense1,
-        policyVersion: '20210210', 
-        scope: 'acme.corp'
+        policyVersion: '20210210',
+        scope: 'acme.corp',
       };
-      const resources = [
-        { resource, actions: ['view'] }
-      ];
+      const resources = [{ resource, actions: ['view'] }];
 
       const results = await kerberos.checkResources({ principal, resources });
 
@@ -558,9 +576,7 @@ describe('Kerberos', () => {
 
     it('should not include policyVersion and scope in resource response when not provided', async () => {
       const principal = principalsPolicy.sally;
-      const resources = [
-        { resource: resourcesPolicy.expense1, actions: ['view'] }
-      ];
+      const resources = [{ resource: resourcesPolicy.expense1, actions: ['view'] }];
 
       const results = await kerberos.checkResources({ principal, resources });
 
@@ -571,21 +587,19 @@ describe('Kerberos', () => {
     it('should generate correct matchedPolicy format in metadata', async () => {
       const principal = {
         ...principalsPolicy.sally,
-        scope: 'acme.corp'
+        scope: 'acme.corp',
       };
       const resource = {
         ...resourcesPolicy.expense1,
         policyVersion: '20210210',
-        scope: 'acme.corp'
+        scope: 'acme.corp',
       };
-      const resources = [
-        { resource, actions: ['view'] }
-      ];
+      const resources = [{ resource, actions: ['view'] }];
 
-      const results = await kerberos.checkResources({ 
-        principal, 
+      const results = await kerberos.checkResources({
+        principal,
         resources,
-        includeMeta: true 
+        includeMeta: true,
       });
 
       const actionMeta = results.results[0].meta.actions.view;
@@ -596,46 +610,47 @@ describe('Kerberos', () => {
     it('should include matchedScope in metadata when scope is provided', async () => {
       const principal = {
         ...principalsPolicy.sally,
-        scope: 'acme.corp'
+        policyVersion: '20210210',
+        scope: 'acme.corp',
       };
       const resource = {
         ...resourcesPolicy.expense1,
-        scope: 'acme.corp'
+        policyVersion: '20210210',
+        scope: 'acme.corp',
       };
-      const resources = [
-        { resource, actions: ['view'] }
-      ];
+      const resources = [{ resource, actions: ['view'] }];
 
-      const results = await kerberos.checkResources({ 
-        principal, 
+      const results = await kerberos.checkResources({
+        principal,
         resources,
-        includeMeta: true 
+        includeMeta: true,
       });
 
       const actionMeta = results.results[0].meta.actions.view;
-      assert.strictEqual(actionMeta.matchedScope, 'acme');
+      assert.strictEqual(actionMeta.matchedScope, 'acme.corp');
     });
 
     it('should work with boolean mode and metadata', async () => {
       const principal = {
         ...principalsPolicy.sally,
         policyVersion: '20210210',
-        scope: 'acme.corp'
+        scope: 'acme.corp',
       };
       const resource = {
         ...resourcesPolicy.expense1,
         policyVersion: '20210210',
-        scope: 'acme.corp'
+        scope: 'acme.corp',
       };
-      const resources = [
-        { resource, actions: ['view', 'create', 'delete'] }
-      ];
+      const resources = [{ resource, actions: ['view', 'create', 'delete'] }];
 
-      const results = await kerberos.checkResources({ 
-        principal, 
-        resources,
-        includeMeta: true 
-      }, true);
+      const results = await kerberos.checkResources(
+        {
+          principal,
+          resources,
+          includeMeta: true,
+        },
+        true,
+      );
 
       assert.strictEqual(results.results[0].actions.view, true);
       assert.strictEqual(results.results[0].actions.create, true);

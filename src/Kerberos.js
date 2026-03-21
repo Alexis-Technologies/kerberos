@@ -36,7 +36,7 @@ class KerberosZodSchemas extends ZodSchemas {
           z.object({
             resource: ZodSchemas.buildRequestResource(z),
             actions: z.array(z.string()).nonempty(),
-          }),
+          })
         )
         .nonempty(),
       includeMeta: z.boolean().optional(),
@@ -56,6 +56,24 @@ class Kerberos {
       const v = c === 'x' ? r : (r & 0x3) | 0x8;
       return v.toString(16);
     });
+  }
+
+  static normalizeScope(scope) {
+    if (scope === '.') return '';
+    return scope ?? '';
+  }
+
+  static getScopeSearchChain(scope) {
+    const normalizedScope = Kerberos.normalizeScope(scope);
+    if (!normalizedScope) return [''];
+
+    const segments = normalizedScope.split('.');
+    const searchChain = [];
+
+    for (let i = segments.length; i > 0; i--) searchChain.push(segments.slice(0, i).join('.'));
+    searchChain.push('');
+
+    return searchChain;
   }
 
   static parsePolicy(policy, { schema, z } = {}) {
@@ -250,13 +268,24 @@ class Kerberos {
   }
 
   #getPolicy(req) {
-    const scopes = [''];
-    if (req.R.scope) scopes.push(...req.R.scope.split('.'));
-    for (let i = scopes.length; i >= 0; i--) {
-      const policy = this.#policies.get(`${req.R.kind}.${req.R.policyVersion ?? 'default'}.${scopes.slice(0, i).join('.')}`);
+    const scopeSearchChain = Kerberos.getScopeSearchChain(req.R.scope);
+    const version = req.R.policyVersion ?? 'default';
+
+    for (const scope of scopeSearchChain) {
+      const policy = this.#policies.get(`${req.R.kind}.${version}.${scope}`);
       if (policy) return policy;
     }
     return null;
+  }
+
+  #buildResponseResource(resource) {
+    const responseResource = { id: resource.id, kind: resource.kind };
+    if (resource.policyVersion) responseResource.policyVersion = resource.policyVersion;
+
+    const normalizedScope = Kerberos.normalizeScope(resource.scope);
+    if (normalizedScope) responseResource.scope = normalizedScope;
+
+    return responseResource;
   }
 
   async isAllowed(args) {
@@ -271,7 +300,7 @@ class Kerberos {
         callId,
         includeMeta: parsedArgs.includeMeta,
       },
-      { schema: this.#requestZodSchema, z: this.#z },
+      { schema: this.#requestZodSchema, z: this.#z }
     );
 
     const policy = this.#getPolicy(req);
@@ -307,7 +336,7 @@ class Kerberos {
           callId,
           includeMeta: parsedArgs.includeMeta,
         },
-        { schema: this.#requestZodSchema, z: this.#z },
+        { schema: this.#requestZodSchema, z: this.#z }
       );
 
       const policy = this.#getPolicy(req);
@@ -317,7 +346,7 @@ class Kerberos {
         const meta = { actions: {}, effectiveDerivedRoles: [] };
         for (const action of actions) effects.set(action, !effectAsBoolean ? Effect.Deny : false);
         const result = {
-          resource: { id: resource.id, kind: resource.kind },
+          resource: this.#buildResponseResource(resource),
           actions: Object.fromEntries([...effects.entries()]),
           outputs: [...outputs.values()],
         };
@@ -330,7 +359,7 @@ class Kerberos {
       const { effects, outputs, meta } = policy.check(req, this.#getImportedDerivedRoles(policy, req), effectAsBoolean);
 
       const result = {
-        resource: { id: resource.id, kind: resource.kind },
+        resource: this.#buildResponseResource(resource),
         actions: Object.fromEntries([...effects.entries()]),
         outputs: [...outputs.values()],
       };
