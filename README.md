@@ -283,15 +283,31 @@ Output functions are called when:
 
 ### Using Scopes and Policy Versions
 
-Kerberos.js supports scoped policies and policy versions, allowing you to organize policies for different environments or versions:
+Kerberos.js supports scoped policies and policy versions, allowing you to organize policies for different environments or versions.
+
+Policy selection is based on the **resource** in the request:
+
+- `resource.kind`
+- `resource.policyVersion` (defaults to `'default'` when omitted)
+- `resource.scope`
+
+Current scope behavior matches the Cerbos-style model used by the library:
+
+- If `resource.scope` is **not** provided, Kerberos.js evaluates only the base policy without a scope.
+- If `resource.scope` **is** provided, Kerberos.js searches from the most specific scope to the least specific scope, and finally falls back to the base policy.
+- Example search chain for `scope: 'acme.corp'`: `acme.corp -> acme -> ''`
+
+`principal.scope` and `principal.policyVersion` are still available in conditions, outputs, and logs, but they do not select the resource policy directly.
+
+Example:
 
 ```javascript
 const results = await kerberos.checkResources({
   reqId: 'test-request',
   principal: {
     id: 'alice',
-    policyVersion: '20210210',  // Optional: specify principal policy version
-    scope: 'acme.corp',         // Optional: specify principal scope
+    policyVersion: '20210210',  // Optional: available in request context and logs
+    scope: 'acme.corp',         // Optional: available in request context and logs
     roles: ['employee'],
     attr: {
       department: 'accounting',
@@ -368,11 +384,11 @@ console.log(results);
 //         actions: {
 //           'view:public': {
 //             matchedPolicy: 'resource.leave_request.v20210210/acme.corp',
-//             matchedScope: 'acme'
+//             matchedScope: 'acme.corp'
 //           },
 //           'approve': {
 //             matchedPolicy: 'resource.leave_request.v20210210/acme.corp',
-//             matchedScope: 'acme'
+//             matchedScope: 'acme.corp'
 //           }
 //         },
 //         effectiveDerivedRoles: [
@@ -387,7 +403,7 @@ console.log(results);
 
 The metadata includes:
 - **matchedPolicy**: The name of the policy that produced the decision
-- **matchedScope**: The scope that was active when the decision was made  
+- **matchedScope**: The full matched policy scope that produced the decision
 - **effectiveDerivedRoles**: List of derived roles that were activated
 
 ## Testing
