@@ -3,14 +3,16 @@ const { strict: assert } = require('node:assert');
 const { Writable } = require('node:stream');
 
 const pino = require('pino');
+const { z } = require('zod');
 
 const { commonRolesPolicy, principalsPolicy, resourcesPolicy, expensePolicy } = require('./mocks/index.js');
 const { Effect, Kerberos } = require('../src/index.js');
 
-function createKerberosWithLogger(logger) {
+function createKerberosWithLogger(logger, options = {}) {
   return new Kerberos([expensePolicy], [commonRolesPolicy], {
     logger,
     getCallId: () => 'call-123',
+    ...options,
   });
 }
 
@@ -62,6 +64,13 @@ function createPinoCollector(level = 'info') {
   };
 }
 
+function splitLifecycleAndAuditEntries(entries) {
+  return {
+    lifecycleEntries: entries.filter((entry) => typeof entry.event === 'string'),
+    auditEntries: entries.filter((entry) => typeof entry.event !== 'string'),
+  };
+}
+
 describe('Kerberos logger support', () => {
   it('should preserve legacy table and json logging for logger: true', async () => {
     const events = {
@@ -93,7 +102,7 @@ describe('Kerberos logger support', () => {
     assert.deepStrictEqual(events.group, [['Kerberos.js']]);
     assert.deepStrictEqual(events.log, [['Principal sally is ALLOWED to perform action view on resource expense1']]);
     assert.strictEqual(events.table.length, 1);
-    assert.strictEqual(events.debug.length, 1);
+    assert.strictEqual(events.debug.length, 3);
     assert.strictEqual(events.groupEnd, 1);
 
     const [tableRows] = events.table[0];
@@ -107,7 +116,13 @@ describe('Kerberos logger support', () => {
     assert.strictEqual(tableRows[0].Action, 'view');
     assert.strictEqual(tableRows[0].Effect, Effect.Allow);
 
-    const [debugEntry, debugMessage] = events.debug[0];
+    const [startEntry, startMessage] = events.debug[0];
+    assert.strictEqual(startEntry.event, 'IsAllowed.start');
+    assert.strictEqual(startEntry.callId, 'call-123');
+    assert.strictEqual(startEntry.reqKind, 'IsAllowed');
+    assert.strictEqual(startMessage, 'Kerberos.js IsAllowed start!');
+
+    const [debugEntry, debugMessage] = events.debug[1];
     assert.strictEqual(debugMessage, 'Kerberos.js request log');
     assert.strictEqual(debugEntry.callId, 'call-123');
     assert.strictEqual(debugEntry.reqKind, 'IsAllowed');
@@ -118,6 +133,13 @@ describe('Kerberos logger support', () => {
     assert.strictEqual(debugEntry.effect, Effect.Allow);
     assert.strictEqual(Array.isArray(debugEntry.outputs), true);
     assert.ok(typeof debugEntry.timestamp === 'string');
+
+    const [finishEntry, finishMessage] = events.debug[2];
+    assert.strictEqual(finishEntry.event, 'IsAllowed.finish');
+    assert.strictEqual(finishEntry.callId, 'call-123');
+    assert.strictEqual(finishEntry.reqKind, 'IsAllowed');
+    assert.ok(typeof finishEntry.duration === 'number');
+    assert.strictEqual(finishMessage, 'Kerberos.js IsAllowed finish!');
   });
 
   it('should support legacy custom console-like loggers', async () => {
@@ -126,6 +148,7 @@ describe('Kerberos logger support', () => {
       log: [],
       table: [],
       debug: [],
+      error: [],
       groupEnd: 0,
     };
 
@@ -134,6 +157,7 @@ describe('Kerberos logger support', () => {
       log: (...args) => events.log.push(args),
       table: (...args) => events.table.push(args),
       debug: (...args) => events.debug.push(args),
+      error: (...args) => events.error.push(args),
       groupEnd: () => { events.groupEnd++; },
     };
 
@@ -155,19 +179,22 @@ describe('Kerberos logger support', () => {
     assert.strictEqual(events.group.length, 1);
     assert.strictEqual(events.log.length, 0);
     assert.strictEqual(events.table.length, 1);
-    assert.strictEqual(events.debug.length, 2);
+    assert.strictEqual(events.debug.length, 4);
+    assert.strictEqual(events.error.length, 0);
     assert.strictEqual(events.groupEnd, 1);
 
-    const [firstDebugEntry] = events.debug[0];
-    const [secondDebugEntry] = events.debug[1];
+    const [firstDebugEntry] = events.debug[1];
+    const [secondDebugEntry] = events.debug[2];
     assert.strictEqual(firstDebugEntry.reqId, 'req-42');
     assert.strictEqual(secondDebugEntry.reqId, 'req-42');
     assert.strictEqual(firstDebugEntry.action, 'view');
     assert.strictEqual(secondDebugEntry.action, 'delete');
+    assert.strictEqual(events.debug[0][0].event, 'CheckResources.start');
+    assert.strictEqual(events.debug[3][0].event, 'CheckResources.finish');
   });
 
   it('should emit structured audit entries with pino', async () => {
-    const collector = createPinoCollector();
+    const collector = createPinoCollector('debug');
     const kerberos = createKerberosWithLogger(collector.logger);
 
     const results = await kerberos.checkResources({
@@ -187,9 +214,21 @@ describe('Kerberos logger support', () => {
     await collector.flush();
 
     const entries = collector.entries();
-    assert.strictEqual(entries.length, 2);
+    const { lifecycleEntries, auditEntries } = splitLifecycleAndAuditEntries(entries);
+    assert.strictEqual(lifecycleEntries.length, 2);
+    assert.strictEqual(auditEntries.length, 2);
 
-    for (const entry of entries) {
+    assert.strictEqual(lifecycleEntries[0].level, 20);
+    assert.strictEqual(lifecycleEntries[0].event, 'CheckResources.start');
+    assert.strictEqual(lifecycleEntries[0].reqKind, 'CheckResources');
+    assert.strictEqual(lifecycleEntries[0].msg, 'Kerberos.js CheckResources start!');
+    assert.strictEqual(lifecycleEntries[1].level, 20);
+    assert.strictEqual(lifecycleEntries[1].event, 'CheckResources.finish');
+    assert.strictEqual(lifecycleEntries[1].reqKind, 'CheckResources');
+    assert.ok(typeof lifecycleEntries[1].duration === 'number');
+    assert.strictEqual(lifecycleEntries[1].msg, 'Kerberos.js CheckResources finish!');
+
+    for (const entry of auditEntries) {
       assert.strictEqual(entry.level, 30);
       assert.strictEqual(entry.component, 'Kerberos.js');
       assert.strictEqual(entry.callId, 'call-123');
@@ -203,14 +242,14 @@ describe('Kerberos logger support', () => {
       assert.strictEqual(entry.msg, 'Kerberos.js CheckResources audit log');
     }
 
-    assert.strictEqual(entries[0].action, 'view');
-    assert.strictEqual(entries[0].effect, Effect.Allow);
-    assert.strictEqual(entries[1].action, 'delete');
-    assert.strictEqual(entries[1].effect, Effect.Deny);
+    assert.strictEqual(auditEntries[0].action, 'view');
+    assert.strictEqual(auditEntries[0].effect, Effect.Allow);
+    assert.strictEqual(auditEntries[1].action, 'delete');
+    assert.strictEqual(auditEntries[1].effect, Effect.Deny);
   });
 
   it('should use structured summaries for pino isAllowed logs', async () => {
-    const collector = createPinoCollector();
+    const collector = createPinoCollector('debug');
     const kerberos = createKerberosWithLogger(collector.logger);
 
     const isAllowed = await kerberos.isAllowed({
@@ -224,12 +263,57 @@ describe('Kerberos logger support', () => {
     await collector.flush();
 
     const entries = collector.entries();
-    assert.strictEqual(entries.length, 1);
-    assert.strictEqual(entries[0].component, 'Kerberos.js');
-    assert.strictEqual(entries[0].callId, 'call-123');
-    assert.strictEqual(entries[0].reqKind, 'IsAllowed');
-    assert.strictEqual(entries[0].action, 'view');
-    assert.strictEqual(entries[0].effect, Effect.Allow);
-    assert.strictEqual(entries[0].msg, 'Kerberos.js authorization decision for sally on expense1');
+    const { lifecycleEntries, auditEntries } = splitLifecycleAndAuditEntries(entries);
+    assert.strictEqual(lifecycleEntries.length, 2);
+    assert.strictEqual(auditEntries.length, 1);
+    assert.strictEqual(lifecycleEntries[0].event, 'IsAllowed.start');
+    assert.strictEqual(lifecycleEntries[0].reqKind, 'IsAllowed');
+    assert.strictEqual(lifecycleEntries[0].msg, 'Kerberos.js IsAllowed start!');
+    assert.strictEqual(lifecycleEntries[1].event, 'IsAllowed.finish');
+    assert.strictEqual(lifecycleEntries[1].reqKind, 'IsAllowed');
+    assert.ok(typeof lifecycleEntries[1].duration === 'number');
+    assert.strictEqual(lifecycleEntries[1].msg, 'Kerberos.js IsAllowed finish!');
+    assert.strictEqual(auditEntries[0].component, 'Kerberos.js');
+    assert.strictEqual(auditEntries[0].callId, 'call-123');
+    assert.strictEqual(auditEntries[0].reqKind, 'IsAllowed');
+    assert.strictEqual(auditEntries[0].action, 'view');
+    assert.strictEqual(auditEntries[0].effect, Effect.Allow);
+    assert.strictEqual(auditEntries[0].msg, 'Kerberos.js authorization decision for sally on expense1');
+  });
+
+  it('should log structured method errors with pino and rethrow them', async () => {
+    const collector = createPinoCollector('debug');
+    const kerberos = createKerberosWithLogger(collector.logger, { z });
+
+    await assert.rejects(async () => {
+      await kerberos.isAllowed({
+        principal: principalsPolicy.sally,
+        resource: resourcesPolicy.expense1,
+      });
+    });
+
+    await collector.flush();
+
+    const entries = collector.entries();
+    const { lifecycleEntries, auditEntries } = splitLifecycleAndAuditEntries(entries);
+    assert.strictEqual(auditEntries.length, 0);
+    assert.strictEqual(lifecycleEntries.length, 3);
+
+    assert.strictEqual(lifecycleEntries[0].event, 'IsAllowed.start');
+    assert.strictEqual(lifecycleEntries[0].reqKind, 'IsAllowed');
+    assert.strictEqual(lifecycleEntries[0].msg, 'Kerberos.js IsAllowed start!');
+
+    assert.strictEqual(lifecycleEntries[1].level, 50);
+    assert.strictEqual(lifecycleEntries[1].event, 'IsAllowed.error');
+    assert.strictEqual(lifecycleEntries[1].reqKind, 'IsAllowed');
+    assert.strictEqual(lifecycleEntries[1].callId, 'call-123');
+    assert.ok(typeof lifecycleEntries[1].errorMessage === 'string');
+    assert.ok(typeof lifecycleEntries[1].stack === 'string');
+    assert.strictEqual(lifecycleEntries[1].msg, 'Kerberos.js IsAllowed error!');
+
+    assert.strictEqual(lifecycleEntries[2].event, 'IsAllowed.finish');
+    assert.strictEqual(lifecycleEntries[2].reqKind, 'IsAllowed');
+    assert.ok(typeof lifecycleEntries[2].duration === 'number');
+    assert.strictEqual(lifecycleEntries[2].msg, 'Kerberos.js IsAllowed finish!');
   });
 });

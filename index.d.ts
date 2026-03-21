@@ -291,17 +291,29 @@ export type KerberosAuditLogEntry = {
     effectiveDerivedRoles: string[];
   } | Record<string, unknown>;
 };
+export type KerberosMethodLogEntry = {
+  event: string;
+  reqKind: string;
+  callId?: string;
+  reqId?: string;
+  duration?: number;
+  errorName?: string;
+  errorMessage?: string;
+  stack?: string;
+};
 export type KerberosConsoleLogger = {
   group?(label?: string): void;
   log?(message?: unknown, ...args: unknown[]): void;
   table?(tabularData?: unknown, properties?: ReadonlyArray<string>): void;
   debug?(message?: unknown, ...args: unknown[]): void;
+  error?(message?: unknown, ...args: unknown[]): void;
   groupEnd?(): void;
 };
 export type KerberosStructuredLogger = {
   child?(bindings: Record<string, unknown>): KerberosStructuredLogger;
-  info?(entry: KerberosAuditLogEntry, message?: string, ...args: unknown[]): void;
-  debug?(entry: KerberosAuditLogEntry, message?: string, ...args: unknown[]): void;
+  info?(entry: KerberosAuditLogEntry | KerberosMethodLogEntry, message?: string, ...args: unknown[]): void;
+  debug?(entry: KerberosAuditLogEntry | KerberosMethodLogEntry, message?: string, ...args: unknown[]): void;
+  error?(entry: KerberosAuditLogEntry | KerberosMethodLogEntry, message?: string, ...args: unknown[]): void;
 };
 export type KerberosLogger = KerberosConsoleLogger | KerberosStructuredLogger;
 export type KerberosOptions = ValidationOptions & {

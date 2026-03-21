@@ -108,6 +108,8 @@ function createDisabledLoggerWriter() {
   return {
     enabled: false,
     write() {},
+    debug() {},
+    error() {},
   };
 }
 
@@ -131,12 +133,29 @@ function createLegacyLoggerWriter(logger) {
 
       logger.groupEnd?.();
     },
+    debug(entry, message) {
+      logger.debug?.(entry, message);
+    },
+    error(entry, message) {
+      if (hasMethod(logger, 'error')) {
+        logger.error(entry, message);
+        return;
+      }
+
+      logger.debug?.(entry, message);
+    },
   };
 }
 
 function createStructuredLoggerWriter(logger) {
   const sink = hasMethod(logger, 'child') ? logger.child({ component: 'Kerberos.js' }) : logger;
   const writeMethod = hasMethod(sink, 'info') ? sink.info.bind(sink) : sink.debug.bind(sink);
+  const debugMethod = hasMethod(sink, 'debug')
+    ? sink.debug.bind(sink)
+    : writeMethod;
+  const errorMethod = hasMethod(sink, 'error')
+    ? sink.error.bind(sink)
+    : writeMethod;
 
   return {
     enabled: true,
@@ -146,6 +165,12 @@ function createStructuredLoggerWriter(logger) {
       for (const auditEntry of auditEntries) {
         writeMethod(auditEntry, buildStructuredMessage(auditEntry));
       }
+    },
+    debug(entry, message) {
+      debugMethod(entry, message);
+    },
+    error(entry, message) {
+      errorMethod(entry, message);
     },
   };
 }

@@ -13,6 +13,19 @@ try {
   // Ignore error, will fall back to browser crypto or manual generation
 }
 
+let nodePerformance;
+try {
+  ({ performance: nodePerformance } = require('node:perf_hooks'));
+} catch (error) {
+  // Ignore error, will fall back to global performance or Date.now
+}
+
+function getNow() {
+  if (nodePerformance?.now) return nodePerformance.now();
+  if (globalThis?.performance?.now) return globalThis.performance.now();
+  return Date.now();
+}
+
 /**
  * Main authorization entry point. Supports plain runtime use, Zod validation,
  * JSON Schema + Ajv validation and TypeBox + Ajv validation.
@@ -246,6 +259,40 @@ class Kerberos {
     this.#logger.write(input, reqKind, callId);
   }
 
+  #logMethodStart(reqKind, callId, reqId) {
+    this.#logger.debug({
+      callId,
+      reqId,
+      timestamp: new Date().toISOString(),
+      reqKind,
+      event: `${reqKind}.start`,
+    }, `Kerberos.js ${reqKind} start!`);
+  }
+
+  #logMethodError(reqKind, callId, reqId, error) {
+    this.#logger.error({
+      callId,
+      reqId,
+      timestamp: new Date().toISOString(),
+      reqKind,
+      event: `${reqKind}.error`,
+      errorName: error?.name,
+      errorMessage: error?.message,
+      stack: error?.stack,
+    }, `Kerberos.js ${reqKind} error!`);
+  }
+
+  #logMethodFinish(reqKind, callId, reqId, duration) {
+    this.#logger.debug({
+      callId,
+      reqId,
+      timestamp: new Date().toISOString(),
+      reqKind,
+      event: `${reqKind}.finish`,
+      duration,
+    }, `Kerberos.js ${reqKind} finish!`);
+  }
+
   #getPolicy(req) {
     const scopeSearchChain = Kerberos.getScopeSearchChain(req.R.scope);
     const version = req.R.policyVersion ?? 'default';
@@ -274,71 +321,26 @@ class Kerberos {
    * @returns {Promise<boolean>}
    */
   async isAllowed(args) {
+    const reqKind = 'IsAllowed';
+    const startedAt = getNow();
     const callId = this.#getCallId();
-    const parsedArgs = Kerberos.parseIsAllowedArgs(args, {
-      schema: this.#isAllowedArgsValidator,
-      z: this.#z,
-      ajv: this.#ajv,
-      typebox: this.#typebox,
-    });
-    const req = Kerberos.parseRequest(
-      {
-        principal: parsedArgs.principal,
-        resource: parsedArgs.resource,
-        actions: [parsedArgs.action],
-        reqId: parsedArgs.reqId,
-        callId,
-        includeMeta: parsedArgs.includeMeta,
-      },
-      {
-        schema: this.#requestValidator,
+    const reqId = args?.reqId;
+
+    try {
+      this.#logMethodStart(reqKind, callId, reqId);
+
+      const parsedArgs = Kerberos.parseIsAllowedArgs(args, {
+        schema: this.#isAllowedArgsValidator,
         z: this.#z,
         ajv: this.#ajv,
         typebox: this.#typebox,
-      }
-    );
+      });
 
-    const policy = this.#getPolicy(req);
-    if (!policy) {
-      const effects = new Map([[parsedArgs.action, Effect.Deny]]);
-      const outputs = new Map();
-      const meta = { actions: {}, effectiveDerivedRoles: [] };
-      this.#log([{ req, result: { effects, outputs, meta } }], 'IsAllowed', callId);
-      return false;
-    }
-
-    const { effects, outputs, meta } = policy.check(req, this.#getImportedDerivedRoles(policy, req));
-    const isAllowed = effects.get(parsedArgs.action) === Effect.Allow || effects.get(ALL_ACTIONS) === Effect.Allow;
-
-    this.#log([{ req, result: { effects, outputs, meta } }], 'IsAllowed', callId);
-
-    return isAllowed;
-  }
-
-  /**
-   * Evaluates a set of resources and actions in a single request.
-   *
-   * @param {Record<string, unknown>} args
-   * @param {boolean} [effectAsBoolean=false]
-   * @returns {Promise<{ results: unknown[], kerberosCallId: string, reqId?: string }>}
-   */
-  async checkResources(args, effectAsBoolean = false) {
-    const callId = this.#getCallId();
-    const results = [];
-    const inputForLog = [];
-    const parsedArgs = Kerberos.parseCheckResourcesArgs(args, {
-      schema: this.#checkResourcesArgsValidator,
-      z: this.#z,
-      ajv: this.#ajv,
-      typebox: this.#typebox,
-    });
-
-    for (const { resource, actions } of parsedArgs.resources) {
       const req = Kerberos.parseRequest(
         {
           principal: parsedArgs.principal,
-          resource,
-          actions,
+          resource: parsedArgs.resource,
+          actions: [parsedArgs.action],
           reqId: parsedArgs.reqId,
           callId,
           includeMeta: parsedArgs.includeMeta,
@@ -353,10 +355,89 @@ class Kerberos {
 
       const policy = this.#getPolicy(req);
       if (!policy) {
-        const effects = new Map();
+        const effects = new Map([[parsedArgs.action, Effect.Deny]]);
         const outputs = new Map();
         const meta = { actions: {}, effectiveDerivedRoles: [] };
-        for (const action of actions) effects.set(action, !effectAsBoolean ? Effect.Deny : false);
+        this.#log([{ req, result: { effects, outputs, meta } }], reqKind, callId);
+        return false;
+      }
+
+      const { effects, outputs, meta } = policy.check(req, this.#getImportedDerivedRoles(policy, req));
+      const isAllowed = effects.get(parsedArgs.action) === Effect.Allow || effects.get(ALL_ACTIONS) === Effect.Allow;
+
+      this.#log([{ req, result: { effects, outputs, meta } }], reqKind, callId);
+
+      return isAllowed;
+    } catch (error) {
+      this.#logMethodError(reqKind, callId, reqId, error);
+      throw error;
+    } finally {
+      this.#logMethodFinish(reqKind, callId, reqId, getNow() - startedAt);
+    }
+  }
+
+  /**
+   * Evaluates a set of resources and actions in a single request.
+   *
+   * @param {Record<string, unknown>} args
+   * @param {boolean} [effectAsBoolean=false]
+   * @returns {Promise<{ results: unknown[], kerberosCallId: string, reqId?: string }>}
+   */
+  async checkResources(args, effectAsBoolean = false) {
+    const reqKind = 'CheckResources';
+    const startedAt = getNow();
+    const callId = this.#getCallId();
+    const reqId = args?.reqId;
+
+    try {
+      this.#logMethodStart(reqKind, callId, reqId);
+
+      const results = [];
+      const inputForLog = [];
+      const parsedArgs = Kerberos.parseCheckResourcesArgs(args, {
+        schema: this.#checkResourcesArgsValidator,
+        z: this.#z,
+        ajv: this.#ajv,
+        typebox: this.#typebox,
+      });
+
+      for (const { resource, actions } of parsedArgs.resources) {
+        const req = Kerberos.parseRequest(
+          {
+            principal: parsedArgs.principal,
+            resource,
+            actions,
+            reqId: parsedArgs.reqId,
+            callId,
+            includeMeta: parsedArgs.includeMeta,
+          },
+          {
+            schema: this.#requestValidator,
+            z: this.#z,
+            ajv: this.#ajv,
+            typebox: this.#typebox,
+          }
+        );
+
+        const policy = this.#getPolicy(req);
+        if (!policy) {
+          const effects = new Map();
+          const outputs = new Map();
+          const meta = { actions: {}, effectiveDerivedRoles: [] };
+          for (const action of actions) effects.set(action, !effectAsBoolean ? Effect.Deny : false);
+          const result = {
+            resource: this.#buildResponseResource(resource),
+            actions: Object.fromEntries([...effects.entries()]),
+            outputs: [...outputs.values()],
+          };
+          if (req.includeMeta) result.meta = meta;
+          results.push(result);
+          inputForLog.push({ req, result: { effects, outputs, meta } });
+          continue;
+        }
+
+        const { effects, outputs, meta } = policy.check(req, this.#getImportedDerivedRoles(policy, req), effectAsBoolean);
+
         const result = {
           resource: this.#buildResponseResource(resource),
           actions: Object.fromEntries([...effects.entries()]),
@@ -365,26 +446,19 @@ class Kerberos {
         if (req.includeMeta) result.meta = meta;
         results.push(result);
         inputForLog.push({ req, result: { effects, outputs, meta } });
-        continue;
       }
 
-      const { effects, outputs, meta } = policy.check(req, this.#getImportedDerivedRoles(policy, req), effectAsBoolean);
+      this.#log(inputForLog, reqKind, callId);
 
-      const result = {
-        resource: this.#buildResponseResource(resource),
-        actions: Object.fromEntries([...effects.entries()]),
-        outputs: [...outputs.values()],
-      };
-      if (req.includeMeta) result.meta = meta;
-      results.push(result);
-      inputForLog.push({ req, result: { effects, outputs, meta } });
+      const response = { results, kerberosCallId: callId };
+      if (parsedArgs.reqId) response.reqId = parsedArgs.reqId;
+      return response;
+    } catch (error) {
+      this.#logMethodError(reqKind, callId, reqId, error);
+      throw error;
+    } finally {
+      this.#logMethodFinish(reqKind, callId, reqId, getNow() - startedAt);
     }
-
-    this.#log(inputForLog, 'CheckResources', callId);
-
-    const response = { results, kerberosCallId: callId };
-    if (parsedArgs.reqId) response.reqId = parsedArgs.reqId;
-    return response;
   }
 }
 
