@@ -159,10 +159,11 @@ console.log(isAllowed); // true
 
 ## Policy Types
 
-Kerberos.js supports two policy types:
+Kerberos.js supports three policy types:
 
 - **`resourcePolicy`**: selected by `resource.kind`, `resource.policyVersion`, and `resource.scope`
 - **`principalPolicy`**: selected by `principal.id`, `principal.policyVersion`, and `principal.scope`
+- **`rolePolicy`**: selected by each `principal.roles[]`, `principal.policyVersion`, and `principal.scope`
 
 You can pass either type on its own or mix them in the same constructor call:
 
@@ -171,6 +172,7 @@ const kerberos = new Kerberos(
   [
     expenseResourcePolicy,
     sallyPrincipalPolicy,
+    userRolePolicy,
   ],
   [commonRoles]
 );
@@ -220,16 +222,53 @@ const sallyPrincipalPolicy = {
 };
 ```
 
+### RolePolicy
+
+`RolePolicy` follows the Cerbos-style role-centric model. It is bound to a single role, targets `resource + allowActions`, and behaves as an allowlist for matching resources. If a matching role policy exists for the current resource and the action is not listed in `allowActions`, Kerberos returns `EFFECT_DENY` for that role layer.
+
+```javascript
+const userRolePolicy = {
+  rolePolicy: {
+    role: 'USER',
+    version: 'default',
+    scope: 'acme.corp',
+    constants: {
+      restrictedVendor: 'Flux Water Gear',
+    },
+    variables: {
+      isRestrictedVendor: ({ R, C }) => R.attr.vendor === C.restrictedVendor,
+    },
+    rules: [
+      {
+        resource: 'expense',
+        allowActions: ['create'],
+      },
+      {
+        resource: 'expense',
+        allowActions: ['view'],
+        condition: {
+          match: ({ V }) => V.isRestrictedVendor === false,
+        },
+      },
+    ],
+  },
+};
+```
+
+`RolePolicy` also supports `parentRoles`. When present, the child role can only keep actions that are also allowed by each locally defined parent role policy. Missing parent role policies are treated as external IdP roles and do not impose extra constraints inside Kerberos.
+
 ### Mixed Policy Evaluation
 
-When both policy types are present, Kerberos resolves each action in this order:
+When mixed policy types are present, Kerberos resolves each action in this order:
 
 1. Find the matching `PrincipalPolicy` for the request principal.
 2. If it returns an explicit `EFFECT_ALLOW` or `EFFECT_DENY`, use that result.
-3. If it is not applicable for that action, fall back to the matching `ResourcePolicy`.
-4. If nothing matches, return `EFFECT_DENY`.
+3. Otherwise, evaluate all matching `RolePolicy` entries for the principal roles.
+4. If multiple role policies apply to the same action, `EFFECT_DENY` wins over `EFFECT_ALLOW`.
+5. If the role layer is not applicable for that action, fall back to the matching `ResourcePolicy`.
+6. If nothing matches, return `EFFECT_DENY`.
 
-This keeps Kerberos.js aligned with the Cerbos-style principal override model described in the [Cerbos principal policies documentation](https://docs.cerbos.dev/cerbos/latest/policies/principal_policies).
+This keeps Kerberos.js aligned with the Cerbos-style principal override model described in the [Cerbos principal policies documentation](https://docs.cerbos.dev/cerbos/latest/policies/principal_policies) while extending the runtime with role-centric policy evaluation similar to [Cerbos role policies](https://docs.cerbos.dev/cerbos/latest/policies/role_policies).
 
 ## Configuration Options
 

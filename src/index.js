@@ -5,6 +5,7 @@ module.exports = {
   ...require('./Variables/index.js'),
   ...require('./ResourcePolicy/index.js'),
   ...require('./PrincipalPolicy/index.js'),
+  ...require('./RolePolicy/index.js'),
   ...require('./DerivedRoles/index.js'),
   ...require('./Kerberos.js'),
   ...require('./schemas'),

@@ -308,7 +308,46 @@ export class PrincipalPolicyTypeBoxSchemas {
   static buildShape(typebox: TypeBoxLike): unknown;
 }
 
-type KerberosPolicy = ResourcePolicy | ResourcePolicyRootSchema | PrincipalPolicy | PrincipalPolicyRootSchema;
+type RolePolicyRuleSchema = {
+  name?: string;
+  resource: string;
+  allowActions: [string, ...string[]];
+  condition?: ConditionsSchema | Conditions;
+  output?: OutputsSchema | Outputs;
+};
+export type RolePolicySchema = {
+  role: string;
+  version: string;
+  scope?: string;
+  parentRoles?: [string, ...string[]] | string[];
+  rules: [RolePolicyRuleSchema, ...RolePolicyRuleSchema[]];
+  variables?: VariablesSchema | Variables;
+  constants?: ConstantsSchema | Constants;
+};
+export type RolePolicyRootSchema = {
+  rolePolicy: RolePolicySchema;
+};
+export class RolePolicy {
+  constructor(schema: RolePolicyRootSchema, options?: ValidationOptions);
+  check(req: BaseRequest, effectAsBoolean?: boolean): {
+    effects: Map<string, Effect | boolean>;
+    outputs: Map<string, unknown>;
+    meta: {
+      actions: Record<string, { matchedPolicy: string; matchedRule?: string; matchedScope?: string }>;
+    };
+  };
+}
+export class RolePolicyZodSchemas {
+  static buildShape(z: unknown): unknown;
+}
+export class RolePolicyJsonSchemas {
+  static buildShape(): Record<string, unknown>;
+}
+export class RolePolicyTypeBoxSchemas {
+  static buildShape(typebox: TypeBoxLike): unknown;
+}
+
+type KerberosPolicy = ResourcePolicy | ResourcePolicyRootSchema | PrincipalPolicy | PrincipalPolicyRootSchema | RolePolicy | RolePolicyRootSchema;
 type KerberosDerivedRoles = DerivedRoles | DerivedRolesSchema;
 export type KerberosAuditLogEntry = {
   callId?: string;
@@ -399,6 +438,7 @@ export class Kerberos {
 export class KerberosZodSchemas {
   static buildResourcePolicyInstance(z: unknown): unknown;
   static buildPrincipalPolicyInstance(z: unknown): unknown;
+  static buildRolePolicyInstance(z: unknown): unknown;
   static buildDerivedRolesInstance(z: unknown): unknown;
   static buildIsAllowedArgs(z: unknown): unknown;
   static buildCheckResourcesArgs(z: unknown): unknown;
@@ -406,6 +446,7 @@ export class KerberosZodSchemas {
 export class KerberosJsonSchemas {
   static buildResourcePolicyInstance(): Record<string, unknown>;
   static buildPrincipalPolicyInstance(): Record<string, unknown>;
+  static buildRolePolicyInstance(): Record<string, unknown>;
   static buildDerivedRolesInstance(): Record<string, unknown>;
   static buildIsAllowedArgs(): Record<string, unknown>;
   static buildCheckResourcesArgs(): Record<string, unknown>;
@@ -413,6 +454,7 @@ export class KerberosJsonSchemas {
 export class KerberosTypeBoxSchemas {
   static buildResourcePolicyInstance(typebox: TypeBoxLike): unknown;
   static buildPrincipalPolicyInstance(typebox: TypeBoxLike): unknown;
+  static buildRolePolicyInstance(typebox: TypeBoxLike): unknown;
   static buildDerivedRolesInstance(typebox: TypeBoxLike): unknown;
   static buildIsAllowedArgs(typebox: TypeBoxLike): unknown;
   static buildCheckResourcesArgs(typebox: TypeBoxLike): unknown;

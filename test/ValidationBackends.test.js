@@ -12,13 +12,22 @@ const {
   KerberosTypeBoxSchemas,
   PrincipalPolicyJsonSchemas,
   PrincipalPolicyTypeBoxSchemas,
+  RolePolicyJsonSchemas,
+  RolePolicyTypeBoxSchemas,
   ResourcePolicyJsonSchemas,
   ResourcePolicyTypeBoxSchemas,
   TypeBoxSchemas,
   createAjvAdapter,
   registerAjvKeywords,
 } = require('../src/index.js');
-const { commonRolesPolicy, expensePolicy, principalsPolicy, resourcesPolicy, sallyPrincipalPolicy } = require('./mocks/index.js');
+const {
+  commonRolesPolicy,
+  expensePolicy,
+  principalsPolicy,
+  resourcesPolicy,
+  sallyPrincipalPolicy,
+  userRolePolicy,
+} = require('./mocks/index.js');
 
 function createAjv() {
   return registerAjvKeywords(new Ajv({ allErrors: true, strict: false }));
@@ -96,6 +105,15 @@ describe('Validation backends', () => {
     assert.doesNotThrow(() => typeBoxValidator.parse(sallyPrincipalPolicy));
   });
 
+  it('should expose RolePolicy builders for JSON Schema and TypeBox', () => {
+    const ajv = createAjv();
+    const jsonValidator = createAjvAdapter(ajv, RolePolicyJsonSchemas.buildShape());
+    const typeBoxValidator = createAjvAdapter(ajv, RolePolicyTypeBoxSchemas.buildShape(Type));
+
+    assert.doesNotThrow(() => jsonValidator.parse(userRolePolicy));
+    assert.doesNotThrow(() => typeBoxValidator.parse(userRolePolicy));
+  });
+
   it('should authorize requests with Ajv JSON Schema support', async () => {
     const kerberos = new Kerberos([expensePolicy], [commonRolesPolicy], { ajv: createAjv() });
 
@@ -121,6 +139,20 @@ describe('Validation backends', () => {
     assert.deepStrictEqual(result.results[0].actions, {
       view: 'EFFECT_DENY',
       delete: 'EFFECT_ALLOW',
+      create: 'EFFECT_ALLOW',
+    });
+  });
+
+  it('should authorize mixed role and resource policies with Ajv JSON Schema support', async () => {
+    const kerberos = new Kerberos([expensePolicy, userRolePolicy], [commonRolesPolicy], { ajv: createAjv() });
+
+    const result = await kerberos.checkResources({
+      principal: principalsPolicy.sally,
+      resources: [{ resource: resourcesPolicy.expense1, actions: ['view', 'create'] }],
+    });
+
+    assert.deepStrictEqual(result.results[0].actions, {
+      view: 'EFFECT_DENY',
       create: 'EFFECT_ALLOW',
     });
   });

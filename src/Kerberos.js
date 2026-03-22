@@ -1,5 +1,6 @@
 const { ResourcePolicy } = require('./ResourcePolicy/index.js');
 const { PrincipalPolicy } = require('./PrincipalPolicy/index.js');
+const { RolePolicy } = require('./RolePolicy/index.js');
 const { DerivedRoles } = require('./DerivedRoles/index.js');
 const { ALL_ACTIONS, Effect, JsonSchemas, TypeBoxSchemas, ZodSchemas } = require('./schemas');
 const { KerberosJsonSchemas, KerberosTypeBoxSchemas, KerberosZodSchemas } = require('./schemas/kerberos.js');
@@ -25,6 +26,10 @@ function getNow() {
   if (nodePerformance?.now) return nodePerformance.now();
   if (globalThis?.performance?.now) return globalThis.performance.now();
   return Date.now();
+}
+
+function createEmptyPolicyResult() {
+  return { effects: new Map(), outputs: new Map(), meta: { actions: {}, effectiveDerivedRoles: [] } };
 }
 
 /**
@@ -99,7 +104,19 @@ class Kerberos {
         buildZod: (z) => KerberosZodSchemas.buildPrincipalPolicyInstance(z),
       });
     }
-    const { schema, resourceSchema, principalSchema, ...nestedOptions } = options;
+    if (policy instanceof RolePolicy) {
+      return parseWithValidation(policy, {
+        ...options,
+        schema: options.roleSchema ?? options.schema,
+        buildJson: () => KerberosJsonSchemas.buildRolePolicyInstance(),
+        buildTypeBox: (t) => KerberosTypeBoxSchemas.buildRolePolicyInstance(t),
+        buildZod: (z) => KerberosZodSchemas.buildRolePolicyInstance(z),
+      });
+    }
+    const { schema, resourceSchema, principalSchema, roleSchema, ...nestedOptions } = options;
+    if (policy && typeof policy === 'object' && 'rolePolicy' in policy) {
+      return new RolePolicy(policy, nestedOptions);
+    }
     if (policy && typeof policy === 'object' && 'principalPolicy' in policy) {
       return new PrincipalPolicy(policy, nestedOptions);
     }
@@ -167,6 +184,8 @@ class Kerberos {
 
   #principalPolicies = new Map();
 
+  #rolePolicies = new Map();
+
   #derivedRoles = new Map();
 
   #logger = createLoggerWriter(false);
@@ -180,6 +199,8 @@ class Kerberos {
   #resourcePolicyValidator = null;
 
   #principalPolicyValidator = null;
+
+  #rolePolicyValidator = null;
 
   #derivedRolesValidator = null;
 
@@ -208,6 +229,7 @@ class Kerberos {
       this.#z = z;
       this.#resourcePolicyValidator = KerberosZodSchemas.buildResourcePolicyInstance(z);
       this.#principalPolicyValidator = KerberosZodSchemas.buildPrincipalPolicyInstance(z);
+      this.#rolePolicyValidator = KerberosZodSchemas.buildRolePolicyInstance(z);
       this.#derivedRolesValidator = KerberosZodSchemas.buildDerivedRolesInstance(z);
       this.#requestValidator = ZodSchemas.buildRequest(z);
       this.#isAllowedArgsValidator = KerberosZodSchemas.buildIsAllowedArgs(z);
@@ -215,6 +237,7 @@ class Kerberos {
     } else if (this.#ajv && this.#typebox) {
       this.#resourcePolicyValidator = createAjvAdapter(this.#ajv, KerberosTypeBoxSchemas.buildResourcePolicyInstance(this.#typebox));
       this.#principalPolicyValidator = createAjvAdapter(this.#ajv, KerberosTypeBoxSchemas.buildPrincipalPolicyInstance(this.#typebox));
+      this.#rolePolicyValidator = createAjvAdapter(this.#ajv, KerberosTypeBoxSchemas.buildRolePolicyInstance(this.#typebox));
       this.#derivedRolesValidator = createAjvAdapter(this.#ajv, KerberosTypeBoxSchemas.buildDerivedRolesInstance(this.#typebox));
       this.#requestValidator = createAjvAdapter(this.#ajv, TypeBoxSchemas.buildRequest(this.#typebox));
       this.#isAllowedArgsValidator = createAjvAdapter(this.#ajv, KerberosTypeBoxSchemas.buildIsAllowedArgs(this.#typebox));
@@ -222,15 +245,17 @@ class Kerberos {
     } else if (this.#ajv) {
       this.#resourcePolicyValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildResourcePolicyInstance());
       this.#principalPolicyValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildPrincipalPolicyInstance());
+      this.#rolePolicyValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildRolePolicyInstance());
       this.#derivedRolesValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildDerivedRolesInstance());
       this.#requestValidator = createAjvAdapter(this.#ajv, JsonSchemas.buildRequest());
       this.#isAllowedArgsValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildIsAllowedArgs());
       this.#checkResourcesArgsValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildCheckResourcesArgs());
     }
 
-    const { resourcePolicies, principalPolicies } = this.#getPoliciesMaps(policies);
+    const { resourcePolicies, principalPolicies, rolePolicies } = this.#getPoliciesMaps(policies);
     this.#resourcePolicies = resourcePolicies;
     this.#principalPolicies = principalPolicies;
+    this.#rolePolicies = rolePolicies;
     this.#derivedRoles = this.#getDerivedRolesMap(derivedRoles);
 
     this.#logger = createLoggerWriter(logger);
@@ -240,10 +265,12 @@ class Kerberos {
   #getPoliciesMaps(policies) {
     const resourcePolicies = new Map();
     const principalPolicies = new Map();
+    const rolePolicies = new Map();
     for (const policy of policies) {
       const handledPolicy = Kerberos.parsePolicy(policy, {
         resourceSchema: this.#resourcePolicyValidator,
         principalSchema: this.#principalPolicyValidator,
+        roleSchema: this.#rolePolicyValidator,
         z: this.#z,
         ajv: this.#ajv,
         typebox: this.#typebox,
@@ -254,9 +281,14 @@ class Kerberos {
         continue;
       }
 
+      if (handledPolicy instanceof RolePolicy) {
+        rolePolicies.set(`${handledPolicy.role}.${handledPolicy.version}.${handledPolicy.scope ?? ''}`, handledPolicy);
+        continue;
+      }
+
       resourcePolicies.set(`${handledPolicy.kind}.${handledPolicy.version}.${handledPolicy.scope ?? ''}`, handledPolicy);
     }
-    return { resourcePolicies, principalPolicies };
+    return { resourcePolicies, principalPolicies, rolePolicies };
   }
 
   #getDerivedRolesMap(roles) {
@@ -346,22 +378,133 @@ class Kerberos {
     return null;
   }
 
+  #getRolePolicyByName(role, req) {
+    const scopeSearchChain = Kerberos.getScopeSearchChain(req.P.scope);
+    const version = req.P.policyVersion ?? 'default';
+
+    for (const scope of scopeSearchChain) {
+      const policy = this.#rolePolicies.get(`${role}.${version}.${scope}`);
+      if (policy) return policy;
+    }
+    return null;
+  }
+
+  #getRolePolicies(req) {
+    const policies = [];
+    const seenRoles = new Set();
+
+    for (const role of req.P.roles) {
+      if (seenRoles.has(role)) continue;
+      seenRoles.add(role);
+      const policy = this.#getRolePolicyByName(role, req);
+      if (policy) policies.push(policy);
+    }
+
+    return policies;
+  }
+
+  #evaluateRolePolicy(policy, req, effectAsBoolean = false, memo = new Map(), stack = new Set()) {
+    const policyKey = `${policy.role}.${policy.version}.${policy.scope ?? ''}|${req.actions.join(',')}`;
+    if (memo.has(policyKey)) return memo.get(policyKey);
+    if (stack.has(policyKey)) throw new Error(`Circular role policy inheritance detected for role "${policy.role}"`);
+
+    stack.add(policyKey);
+
+    const allowValue = !effectAsBoolean ? Effect.Allow : true;
+    const denyValue = !effectAsBoolean ? Effect.Deny : false;
+    const result = policy.check(req, effectAsBoolean);
+
+    for (const parentRole of policy.parentRoles) {
+      const parentPolicy = this.#getRolePolicyByName(parentRole, req);
+      if (!parentPolicy) continue;
+
+      const parentResult = this.#evaluateRolePolicy(parentPolicy, req, effectAsBoolean, memo, stack);
+      for (const [src, output] of parentResult.outputs.entries()) result.outputs.set(src, output);
+
+      for (const action of req.actions) {
+        if (!result.effects.has(action)) continue;
+        if (result.effects.get(action) === denyValue) continue;
+
+        if (!parentResult.effects.has(action) || parentResult.effects.get(action) !== allowValue) {
+          result.effects.set(action, denyValue);
+          if (parentResult.meta.actions[action]) result.meta.actions[action] = parentResult.meta.actions[action];
+        }
+      }
+    }
+
+    stack.delete(policyKey);
+    memo.set(policyKey, result);
+    return result;
+  }
+
+  #evaluateRolePolicies(req, effectAsBoolean = false) {
+    const rolePolicies = this.#getRolePolicies(req);
+    if (!rolePolicies.length) return createEmptyPolicyResult();
+
+    const allowValue = !effectAsBoolean ? Effect.Allow : true;
+    const denyValue = !effectAsBoolean ? Effect.Deny : false;
+    const effects = new Map();
+    const outputs = new Map();
+    const actionsMeta = {};
+    const memo = new Map();
+
+    for (const policy of rolePolicies) {
+      const result = this.#evaluateRolePolicy(policy, req, effectAsBoolean, memo);
+      for (const [src, output] of result.outputs.entries()) outputs.set(src, output);
+
+      for (const action of req.actions) {
+        if (!result.effects.has(action)) continue;
+
+        if (result.effects.get(action) === denyValue) {
+          effects.set(action, denyValue);
+          if (result.meta.actions[action]) actionsMeta[action] = result.meta.actions[action];
+          continue;
+        }
+
+        if (!effects.has(action)) {
+          effects.set(action, allowValue);
+          if (result.meta.actions[action]) actionsMeta[action] = result.meta.actions[action];
+        }
+      }
+    }
+
+    return {
+      effects,
+      outputs,
+      meta: {
+        actions: actionsMeta,
+        effectiveDerivedRoles: [],
+      },
+    };
+  }
+
   #evaluatePolicySources(req, effectAsBoolean = false) {
     const principalPolicy = this.#getPrincipalPolicy(req);
     const principalResult = principalPolicy
       ? principalPolicy.check(req, effectAsBoolean)
-      : { effects: new Map(), outputs: new Map(), meta: { actions: {}, effectiveDerivedRoles: [] } };
+      : createEmptyPolicyResult();
 
     const unresolvedActions = [];
     for (const action of req.actions) {
       if (!principalResult.effects.has(action)) unresolvedActions.push(action);
     }
-    let resourceResult = { effects: new Map(), outputs: new Map(), meta: { actions: {}, effectiveDerivedRoles: [] } };
+    let roleResult = createEmptyPolicyResult();
+    let resourceResult = createEmptyPolicyResult();
 
+    const roleUnresolvedActions = [];
     if (unresolvedActions.length) {
+      const roleReq = unresolvedActions.length === req.actions.length ? req : { ...req, actions: unresolvedActions };
+      roleResult = this.#evaluateRolePolicies(roleReq, effectAsBoolean);
+
+      for (const action of unresolvedActions) {
+        if (!roleResult.effects.has(action)) roleUnresolvedActions.push(action);
+      }
+    }
+
+    if (roleUnresolvedActions.length) {
       const resourcePolicy = this.#getResourcePolicy(req);
       if (resourcePolicy) {
-        const resourceReq = unresolvedActions.length === req.actions.length ? req : { ...req, actions: unresolvedActions };
+        const resourceReq = roleUnresolvedActions.length === req.actions.length ? req : { ...req, actions: roleUnresolvedActions };
         resourceResult = resourcePolicy.check(resourceReq, this.#getImportedDerivedRoles(resourcePolicy, req), effectAsBoolean);
       }
     }
@@ -372,6 +515,12 @@ class Kerberos {
       if (principalResult.effects.has(action)) {
         effects.set(action, principalResult.effects.get(action));
         if (principalResult.meta.actions[action]) actionsMeta[action] = principalResult.meta.actions[action];
+        continue;
+      }
+
+      if (roleResult.effects.has(action)) {
+        effects.set(action, roleResult.effects.get(action));
+        if (roleResult.meta.actions[action]) actionsMeta[action] = roleResult.meta.actions[action];
         continue;
       }
 
@@ -388,6 +537,7 @@ class Kerberos {
       effects,
       outputs: new Map([
         ...principalResult.outputs.entries(),
+        ...roleResult.outputs.entries(),
         ...resourceResult.outputs.entries(),
       ]),
       meta: {

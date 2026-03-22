@@ -4,5 +4,6 @@ module.exports = {
   ...require('./testdata/resources.js'),
   ...require('./expense_policy.js'),
   ...require('./principal_policy.js'),
+  ...require('./role_policy.js'),
   ...require('./expense_test.js'),
 };

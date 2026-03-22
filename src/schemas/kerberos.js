@@ -1,5 +1,6 @@
 const { ResourcePolicy } = require('../ResourcePolicy/index.js');
 const { PrincipalPolicy } = require('../PrincipalPolicy/index.js');
+const { RolePolicy } = require('../RolePolicy/index.js');
 const { DerivedRoles } = require('../DerivedRoles/index.js');
 const { JsonSchemas, TypeBoxSchemas, ZodSchemas } = require('./index.js');
 
@@ -10,6 +11,10 @@ class KerberosZodSchemas extends ZodSchemas {
 
   static buildPrincipalPolicyInstance(z) {
     return z.instanceof(PrincipalPolicy);
+  }
+
+  static buildRolePolicyInstance(z) {
+    return z.instanceof(RolePolicy);
   }
 
   static buildDerivedRolesInstance(z) {
@@ -48,6 +53,10 @@ class KerberosJsonSchemas extends JsonSchemas {
 
   static buildPrincipalPolicyInstance() {
     return JsonSchemas.buildInstanceOfShape(PrincipalPolicy);
+  }
+
+  static buildRolePolicyInstance() {
+    return JsonSchemas.buildInstanceOfShape(RolePolicy);
   }
 
   static buildDerivedRolesInstance() {
@@ -93,6 +102,10 @@ class KerberosTypeBoxSchemas extends TypeBoxSchemas {
 
   static buildPrincipalPolicyInstance(t) {
     return TypeBoxSchemas.buildInstanceOfShape(t, PrincipalPolicy);
+  }
+
+  static buildRolePolicyInstance(t) {
+    return TypeBoxSchemas.buildInstanceOfShape(t, RolePolicy);
   }
 
   static buildDerivedRolesInstance(t) {

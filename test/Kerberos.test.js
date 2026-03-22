@@ -11,6 +11,10 @@ const {
   sallyPrincipalPolicy,
   derekPrincipalPolicy,
   sallyScopedViewOverridePolicy,
+  userRolePolicy,
+  scopedUserRolePolicy,
+  managerRolePolicy,
+  limitedManagerRolePolicy,
 } = require('./mocks/index.js');
 
 const { Effect, Kerberos } = require('../src/index.js');
@@ -748,6 +752,134 @@ describe('Kerberos', () => {
         },
         action: 'view',
         resource: resourcesPolicy.expense1,
+      });
+
+      assert.strictEqual(isAllowed, true);
+    });
+  });
+
+  describe('mixed role and resource policies', () => {
+    const kerberos = new Kerberos([expensePolicy, userRolePolicy], [commonRolesPolicy]);
+
+    it('should let role policies override resource allows', async () => {
+      const results = await kerberos.checkResources({
+        principal: principalsPolicy.sally,
+        resources: [{ resource: resourcesPolicy.expense1, actions: ['view', 'create'] }],
+        includeMeta: true,
+      });
+
+      assert.deepStrictEqual(results.results, [
+        {
+          resource: { id: 'expense1', kind: 'expense' },
+          actions: { view: Effect.Deny, create: Effect.Allow },
+          outputs: [
+            {
+              src: 'role.USER.vdefault#allow_view_when_not_restricted',
+              val: {
+                principal: 'sally',
+                resource: 'expense1',
+                message: 'Role policy blocked restricted vendor view',
+              },
+            },
+          ],
+          meta: {
+            actions: {
+              view: {
+                matchedPolicy: 'role.USER.vdefault',
+              },
+              create: {
+                matchedPolicy: 'role.USER.vdefault',
+                matchedRule: 'role.USER.vdefault#allow_create',
+              },
+            },
+            effectiveDerivedRoles: [],
+          },
+        },
+      ]);
+    });
+
+    it('should fall back to resource policies when no matching role policy exists', async () => {
+      const kerberosWithManagerRole = new Kerberos([expensePolicy, managerRolePolicy], [commonRolesPolicy]);
+
+      const isAllowed = await kerberosWithManagerRole.isAllowed({
+        principal: principalsPolicy.sally,
+        action: 'view',
+        resource: resourcesPolicy.expense1,
+      });
+
+      assert.strictEqual(isAllowed, true);
+    });
+  });
+
+  describe('mixed principal, role and resource policies', () => {
+    const kerberos = new Kerberos([expensePolicy, sallyPrincipalPolicy, userRolePolicy, managerRolePolicy], [commonRolesPolicy]);
+
+    it('should let principal policies override role denies and resource fallback', async () => {
+      const isAllowed = await kerberos.isAllowed({
+        principal: principalsPolicy.sally,
+        action: 'delete',
+        resource: resourcesPolicy.expense1,
+      });
+
+      assert.strictEqual(isAllowed, true);
+    });
+
+    it('should combine multiple role policies with deny precedence', async () => {
+      const results = await kerberos.checkResources({
+        principal: principalsPolicy.derek,
+        resources: [{ resource: resourcesPolicy.expense2, actions: ['delete'] }],
+        includeMeta: true,
+      });
+
+      assert.strictEqual(results.results[0].actions.delete, Effect.Deny);
+      assert.strictEqual(results.results[0].meta.actions.delete.matchedPolicy, 'role.USER.vdefault');
+    });
+  });
+
+  describe('role policy inheritance', () => {
+    const kerberos = new Kerberos([expensePolicy, userRolePolicy, limitedManagerRolePolicy], [commonRolesPolicy]);
+
+    it('should require parent role policies to allow child actions', async () => {
+      const principal = {
+        id: 'mila',
+        roles: ['LIMITED_MANAGER'],
+        attr: {
+          department: 'OPERATIONS',
+        },
+      };
+
+      const results = await kerberos.checkResources({
+        principal,
+        resources: [{ resource: resourcesPolicy.expense2, actions: ['delete'] }],
+        includeMeta: true,
+      });
+
+      assert.strictEqual(results.results[0].actions.delete, Effect.Deny);
+      assert.strictEqual(results.results[0].meta.actions.delete.matchedPolicy, 'role.USER.vdefault');
+    });
+  });
+
+  describe('scoped role policy lookup', () => {
+    const kerberos = new Kerberos([expensePolicy, userRolePolicy, scopedUserRolePolicy], [commonRolesPolicy]);
+
+    it('should use the base role policy when principal scope is not provided', async () => {
+      const isAllowed = await kerberos.isAllowed({
+        principal: principalsPolicy.sally,
+        action: 'delete',
+        resource: resourcesPolicy.expense2,
+      });
+
+      assert.strictEqual(isAllowed, false);
+    });
+
+    it('should use the scoped role policy when principal scope matches', async () => {
+      const isAllowed = await kerberos.isAllowed({
+        principal: {
+          ...principalsPolicy.sally,
+          scope: 'acme.corp',
+        },
+        action: 'delete',
+        resource: resourcesPolicy.expense2,
       });
 
       assert.strictEqual(isAllowed, true);
