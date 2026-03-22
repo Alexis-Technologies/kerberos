@@ -185,6 +185,13 @@ describe('Kerberos logger support', () => {
 
     const [firstDebugEntry] = events.debug[1];
     const [secondDebugEntry] = events.debug[2];
+    const [tableRows] = events.table[0];
+    assert.strictEqual(Array.isArray(tableRows), true);
+    assert.strictEqual(tableRows.length, 2);
+    assert.strictEqual(tableRows[0]['Request ID'], 'req-42');
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(tableRows[0], 'Call ID'), false);
+    assert.strictEqual(tableRows[1]['Request ID'], 'req-42');
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(tableRows[1], 'Call ID'), false);
     assert.strictEqual(firstDebugEntry.reqId, 'req-42');
     assert.strictEqual(secondDebugEntry.reqId, 'req-42');
     assert.strictEqual(firstDebugEntry.action, 'view');
@@ -281,16 +288,16 @@ describe('Kerberos logger support', () => {
     assert.strictEqual(auditEntries[0].msg, 'Kerberos.js authorization decision for sally on expense1');
   });
 
-  it('should log structured method errors with pino and rethrow them', async () => {
+  it('should log structured method errors with pino and return fallback result', async () => {
     const collector = createPinoCollector('debug');
     const kerberos = createKerberosWithLogger(collector.logger, { z });
 
-    await assert.rejects(async () => {
-      await kerberos.isAllowed({
-        principal: principalsPolicy.sally,
-        resource: resourcesPolicy.expense1,
-      });
+    const result = await kerberos.isAllowed({
+      principal: principalsPolicy.sally,
+      resource: resourcesPolicy.expense1,
     });
+
+    assert.strictEqual(result, false);
 
     await collector.flush();
 
@@ -315,5 +322,16 @@ describe('Kerberos logger support', () => {
     assert.strictEqual(lifecycleEntries[2].reqKind, 'IsAllowed');
     assert.ok(typeof lifecycleEntries[2].duration === 'number');
     assert.strictEqual(lifecycleEntries[2].msg, 'Kerberos.js IsAllowed finish!');
+  });
+
+  it('should rethrow method errors when logging is disabled', async () => {
+    const kerberos = createKerberosWithLogger(false, { z });
+
+    await assert.rejects(async () => {
+      await kerberos.isAllowed({
+        principal: principalsPolicy.sally,
+        resource: resourcesPolicy.expense1,
+      });
+    });
   });
 });

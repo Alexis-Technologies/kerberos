@@ -143,6 +143,10 @@ const kerberos = new Kerberos(policies, derivedRoles, {
   - `false` or omitted disables logging
   - a custom `console`-like logger keeps the legacy table/json flow
   - a structured logger such as `Pino` receives one structured audit entry per evaluated action
+  - when logging is enabled, validation/runtime errors are logged and converted to fallback results instead of being rethrown:
+    - `isAllowed(...)` returns `false`
+    - `checkResources(...)` returns `{ results: [], kerberosCallId, reqId? }`
+  - when logging is disabled, those errors continue to be thrown to the caller
 - **`z`**: Enables validation using the built-in Zod schema builders.
 - **`ajv`**: Enables validation using the built-in JSON Schema builders compiled with Ajv.
 - **`typebox`**: When used together with `ajv`, switches validation to the built-in TypeBox builders.
@@ -166,6 +170,8 @@ const kerberos = new Kerberos(policies, derivedRoles, {
 ```
 
 With `Pino`, Kerberos emits structured audit entries that include `callId`, `reqId`, `reqKind`, `principalId`, `resourceId`, `action`, `effect`, `outputs`, and `meta`. This mode is better suited for production ingestion than the default console table output.
+
+It also emits lifecycle logs such as `IsAllowed.start`, `IsAllowed.error`, `IsAllowed.finish`, `CheckResources.start`, and `CheckResources.finish`. When an error happens with logging enabled, Kerberos logs that error and returns a fallback response instead of throwing.
 
 ## Schema Validation
 

@@ -1,4 +1,4 @@
-const LEGACY_EXCLUDED_FOR_TABLE = ['reqId', 'principalScope', 'principalPolicyVersion', 'resourceScope', 'resourcePolicyVersion', 'outputs', 'meta'];
+const LEGACY_EXCLUDED_FOR_TABLE = ['principalScope', 'principalPolicyVersion', 'resourceScope', 'resourcePolicyVersion', 'outputs', 'meta'];
 
 const LEGACY_READABLE_HEADERS_MAP = {
   callId: 'Call ID',
@@ -71,9 +71,10 @@ function buildAuditEntries(input, reqKind, callId) {
 function buildLegacyTableEntries(auditEntries) {
   return auditEntries.map((auditEntry) => {
     const tableEntry = { ...auditEntry };
+    const excludedForTable = [...LEGACY_EXCLUDED_FOR_TABLE, tableEntry.reqId ? 'callId' : 'reqId'];
 
     for (const key of Object.keys(tableEntry)) {
-      if (LEGACY_EXCLUDED_FOR_TABLE.includes(key)) {
+      if (excludedForTable.includes(key)) {
         delete tableEntry[key];
         continue;
       }

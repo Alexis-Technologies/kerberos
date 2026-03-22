@@ -370,6 +370,7 @@ class Kerberos {
       return isAllowed;
     } catch (error) {
       this.#logMethodError(reqKind, callId, reqId, error);
+      if (this.#logger.enabled) return false;
       throw error;
     } finally {
       this.#logMethodFinish(reqKind, callId, reqId, getNow() - startedAt);
@@ -455,6 +456,7 @@ class Kerberos {
       return response;
     } catch (error) {
       this.#logMethodError(reqKind, callId, reqId, error);
+      if (this.#logger.enabled) return { results: [], kerberosCallId: callId, reqId };
       throw error;
     } finally {
       this.#logMethodFinish(reqKind, callId, reqId, getNow() - startedAt);
