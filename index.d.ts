@@ -265,7 +265,50 @@ export class ResourcePolicyTypeBoxSchemas {
   static buildShape(typebox: TypeBoxLike): unknown;
 }
 
-type KerberosPolicy = ResourcePolicy | ResourcePolicyRootSchema;
+type PrincipalPolicyActionRuleSchema = {
+  name?: string;
+  action: string;
+  effect: Effect;
+  condition?: ConditionsSchema | Conditions;
+  output?: OutputsSchema | Outputs;
+};
+type PrincipalPolicyRuleSchema = {
+  resource: string;
+  actions: [PrincipalPolicyActionRuleSchema, ...PrincipalPolicyActionRuleSchema[]];
+};
+export type PrincipalPolicySchema = {
+  principal: string;
+  version: string;
+  scope?: string;
+  rules: [PrincipalPolicyRuleSchema, ...PrincipalPolicyRuleSchema[]];
+  variables?: VariablesSchema | Variables;
+  constants?: ConstantsSchema | Constants;
+};
+export type PrincipalPolicyRootSchema = {
+  principalPolicy: PrincipalPolicySchema;
+};
+export class PrincipalPolicy {
+  constructor(schema: PrincipalPolicyRootSchema, options?: ValidationOptions);
+  check(req: BaseRequest, effectAsBoolean?: boolean): {
+    effects: Map<string, Effect | boolean>;
+    outputs: Map<string, unknown>;
+    meta: {
+      actions: Record<string, { matchedPolicy: string; matchedRule?: string; matchedScope?: string }>;
+      effectiveDerivedRoles: string[];
+    };
+  };
+}
+export class PrincipalPolicyZodSchemas {
+  static buildShape(z: unknown): unknown;
+}
+export class PrincipalPolicyJsonSchemas {
+  static buildShape(): Record<string, unknown>;
+}
+export class PrincipalPolicyTypeBoxSchemas {
+  static buildShape(typebox: TypeBoxLike): unknown;
+}
+
+type KerberosPolicy = ResourcePolicy | ResourcePolicyRootSchema | PrincipalPolicy | PrincipalPolicyRootSchema;
 type KerberosDerivedRoles = DerivedRoles | DerivedRolesSchema;
 export type KerberosAuditLogEntry = {
   callId?: string;
@@ -354,14 +397,23 @@ export class Kerberos {
   }>;
 }
 export class KerberosZodSchemas {
+  static buildResourcePolicyInstance(z: unknown): unknown;
+  static buildPrincipalPolicyInstance(z: unknown): unknown;
+  static buildDerivedRolesInstance(z: unknown): unknown;
   static buildIsAllowedArgs(z: unknown): unknown;
   static buildCheckResourcesArgs(z: unknown): unknown;
 }
 export class KerberosJsonSchemas {
+  static buildResourcePolicyInstance(): Record<string, unknown>;
+  static buildPrincipalPolicyInstance(): Record<string, unknown>;
+  static buildDerivedRolesInstance(): Record<string, unknown>;
   static buildIsAllowedArgs(): Record<string, unknown>;
   static buildCheckResourcesArgs(): Record<string, unknown>;
 }
 export class KerberosTypeBoxSchemas {
+  static buildResourcePolicyInstance(typebox: TypeBoxLike): unknown;
+  static buildPrincipalPolicyInstance(typebox: TypeBoxLike): unknown;
+  static buildDerivedRolesInstance(typebox: TypeBoxLike): unknown;
   static buildIsAllowedArgs(typebox: TypeBoxLike): unknown;
   static buildCheckResourcesArgs(typebox: TypeBoxLike): unknown;
 }

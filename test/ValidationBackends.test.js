@@ -10,13 +10,15 @@ const {
   Kerberos,
   KerberosJsonSchemas,
   KerberosTypeBoxSchemas,
+  PrincipalPolicyJsonSchemas,
+  PrincipalPolicyTypeBoxSchemas,
   ResourcePolicyJsonSchemas,
   ResourcePolicyTypeBoxSchemas,
   TypeBoxSchemas,
   createAjvAdapter,
   registerAjvKeywords,
 } = require('../src/index.js');
-const { commonRolesPolicy, expensePolicy, principalsPolicy, resourcesPolicy } = require('./mocks/index.js');
+const { commonRolesPolicy, expensePolicy, principalsPolicy, resourcesPolicy, sallyPrincipalPolicy } = require('./mocks/index.js');
 
 function createAjv() {
   return registerAjvKeywords(new Ajv({ allErrors: true, strict: false }));
@@ -85,6 +87,15 @@ describe('Validation backends', () => {
     assert.doesNotThrow(() => typeBoxValidator.parse(expensePolicy));
   });
 
+  it('should expose PrincipalPolicy builders for JSON Schema and TypeBox', () => {
+    const ajv = createAjv();
+    const jsonValidator = createAjvAdapter(ajv, PrincipalPolicyJsonSchemas.buildShape());
+    const typeBoxValidator = createAjvAdapter(ajv, PrincipalPolicyTypeBoxSchemas.buildShape(Type));
+
+    assert.doesNotThrow(() => jsonValidator.parse(sallyPrincipalPolicy));
+    assert.doesNotThrow(() => typeBoxValidator.parse(sallyPrincipalPolicy));
+  });
+
   it('should authorize requests with Ajv JSON Schema support', async () => {
     const kerberos = new Kerberos([expensePolicy], [commonRolesPolicy], { ajv: createAjv() });
 
@@ -96,6 +107,21 @@ describe('Validation backends', () => {
     assert.deepStrictEqual(result.results[0].actions, {
       view: 'EFFECT_ALLOW',
       approve: 'EFFECT_DENY',
+    });
+  });
+
+  it('should authorize mixed principal and resource policies with Ajv JSON Schema support', async () => {
+    const kerberos = new Kerberos([expensePolicy, sallyPrincipalPolicy], [commonRolesPolicy], { ajv: createAjv() });
+
+    const result = await kerberos.checkResources({
+      principal: principalsPolicy.sally,
+      resources: [{ resource: resourcesPolicy.expense1, actions: ['view', 'delete', 'create'] }],
+    });
+
+    assert.deepStrictEqual(result.results[0].actions, {
+      view: 'EFFECT_DENY',
+      delete: 'EFFECT_ALLOW',
+      create: 'EFFECT_ALLOW',
     });
   });
 

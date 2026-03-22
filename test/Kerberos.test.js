@@ -2,7 +2,16 @@ const { describe, it } = require('node:test');
 const { strict: assert } = require('node:assert');
 const { z } = require('zod');
 
-const { commonRolesPolicy, principalsPolicy, resourcesPolicy, expensePolicy, expenseScopedPolicy } = require('./mocks/index.js');
+const {
+  commonRolesPolicy,
+  principalsPolicy,
+  resourcesPolicy,
+  expensePolicy,
+  expenseScopedPolicy,
+  sallyPrincipalPolicy,
+  derekPrincipalPolicy,
+  sallyScopedViewOverridePolicy,
+} = require('./mocks/index.js');
 
 const { Effect, Kerberos } = require('../src/index.js');
 
@@ -659,6 +668,89 @@ describe('Kerberos', () => {
       assert.ok(results.results[0].meta.actions.view);
       assert.ok(results.results[0].meta.actions.create);
       assert.ok(results.results[0].meta.actions.delete);
+    });
+  });
+
+  describe('mixed principal and resource policies', () => {
+    const kerberos = new Kerberos([expensePolicy, sallyPrincipalPolicy, derekPrincipalPolicy], [commonRolesPolicy]);
+
+    it('should merge principal overrides with resource fallback per action', async () => {
+      const results = await kerberos.checkResources({
+        principal: principalsPolicy.sally,
+        resources: [{ resource: resourcesPolicy.expense1, actions: ['view', 'delete', 'create'] }],
+        includeMeta: true,
+      });
+
+      assert.deepStrictEqual(results.results, [
+        {
+          resource: { id: 'expense1', kind: 'expense' },
+          actions: { view: Effect.Deny, delete: Effect.Allow, create: Effect.Allow },
+          outputs: [
+            {
+              src: 'principal.sally.vdefault#allow_open_expense_delete',
+              val: {
+                principal: 'sally',
+                resource: 'expense1',
+                message: 'Principal override allowed delete',
+              },
+            },
+          ],
+          meta: {
+            actions: {
+              view: {
+                matchedPolicy: 'principal.sally.vdefault',
+                matchedRule: 'principal.sally.vdefault#deny_restricted_vendor_view',
+              },
+              delete: {
+                matchedPolicy: 'principal.sally.vdefault',
+                matchedRule: 'principal.sally.vdefault#allow_open_expense_delete',
+              },
+              create: {
+                matchedPolicy: 'resource.expense.vdefault',
+                matchedRule: 'resource.expense.vdefault#UNNAMED_RULE_5',
+              },
+            },
+            effectiveDerivedRoles: ['OWNER'],
+          },
+        },
+      ]);
+    });
+
+    it('should let principal wildcard rules override resource allows', async () => {
+      const isAllowed = await kerberos.isAllowed({
+        principal: principalsPolicy.derek,
+        action: 'approve',
+        resource: resourcesPolicy.expense1,
+      });
+
+      assert.strictEqual(isAllowed, false);
+    });
+  });
+
+  describe('scoped principal policy lookup', () => {
+    const kerberos = new Kerberos([expensePolicy, sallyPrincipalPolicy, sallyScopedViewOverridePolicy], [commonRolesPolicy]);
+
+    it('should use the base principal policy when request scope is not provided', async () => {
+      const isAllowed = await kerberos.isAllowed({
+        principal: principalsPolicy.sally,
+        action: 'view',
+        resource: resourcesPolicy.expense1,
+      });
+
+      assert.strictEqual(isAllowed, false);
+    });
+
+    it('should use the scoped principal policy when principal scope matches', async () => {
+      const isAllowed = await kerberos.isAllowed({
+        principal: {
+          ...principalsPolicy.sally,
+          scope: 'acme.corp',
+        },
+        action: 'view',
+        resource: resourcesPolicy.expense1,
+      });
+
+      assert.strictEqual(isAllowed, true);
     });
   });
 });
