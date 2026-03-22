@@ -18,6 +18,7 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
 
 - [x] Derived roles;
 - [x] Resource policies;
+- [x] Principal policies;
 - [x] Conditions;
 - [x] Variables and constants;
 - [x] Outputs;
@@ -65,6 +66,38 @@ const policies = [
       ],
     },
   },
+  {
+    principalPolicy: {
+      principal: 'user1',
+      version: 'default',
+      variables: {
+        isOpenExpense: ({ R }) => R.kind === 'expense' && R.attr.status === 'OPEN',
+      },
+      rules: [
+        {
+          resource: 'expense',
+          actions: [
+            {
+              name: 'deny-sensitive-view',
+              action: 'view',
+              effect: Effect.Deny,
+              condition: {
+                match: ({ R }) => R.attr.amount > 10_000,
+              },
+            },
+            {
+              name: 'allow-own-delete-override',
+              action: 'delete',
+              effect: Effect.Allow,
+              condition: {
+                match: ({ V }) => V.isOpenExpense,
+              },
+            },
+          ],
+        },
+      ],
+    },
+  },
 ];
 
 const derivedRoles = {
@@ -82,17 +115,19 @@ const derivedRoles = {
   ],
 };
 
-const kerberos = new Kerberos(policies, derivedRoles, { logger: true });
+const kerberos = new Kerberos(policies, [derivedRoles], { logger: true });
 
 const isAllowed = await kerberos.isAllowed({
   principal: {
     id: 'user1',
     roles: ['USER'],
+    policyVersion: 'default',
   },
   action: 'view',
   resource: {
     id: 'expense1',
     kind: 'expense',
+    attr: { amount: 5000, status: 'OPEN' },
   },
 });
 
@@ -121,6 +156,80 @@ console.log(results);
 
 console.log(isAllowed); // true
 ```
+
+## Policy Types
+
+Kerberos.js supports two policy types:
+
+- **`resourcePolicy`**: selected by `resource.kind`, `resource.policyVersion`, and `resource.scope`
+- **`principalPolicy`**: selected by `principal.id`, `principal.policyVersion`, and `principal.scope`
+
+You can pass either type on its own or mix them in the same constructor call:
+
+```javascript
+const kerberos = new Kerberos(
+  [
+    expenseResourcePolicy,
+    sallyPrincipalPolicy,
+  ],
+  [commonRoles]
+);
+```
+
+### ResourcePolicy
+
+`ResourcePolicy` keeps the existing Kerberos.js behavior. Rules are matched by action, then by `roles` or `derivedRoles`, and may also use `conditions`, `variables`, `constants`, `outputs`, versions, and scopes.
+
+### PrincipalPolicy
+
+`PrincipalPolicy` follows the Cerbos-style model for principal-specific overrides. It is bound to a single principal and targets `resource + action` directly instead of `roles` / `derivedRoles`.
+
+```javascript
+const sallyPrincipalPolicy = {
+  principalPolicy: {
+    principal: 'sally',
+    version: 'default',
+    scope: 'acme.corp',
+    constants: {
+      restrictedVendor: 'Flux Water Gear',
+    },
+    variables: {
+      isRestrictedVendor: ({ R, C }) => R.attr.vendor === C.restrictedVendor,
+    },
+    rules: [
+      {
+        resource: 'expense',
+        actions: [
+          {
+            name: 'deny-restricted-vendor-view',
+            action: 'view',
+            effect: Effect.Deny,
+            condition: {
+              match: ({ V }) => V.isRestrictedVendor,
+            },
+          },
+          {
+            name: 'allow-delete-override',
+            action: 'delete',
+            effect: Effect.Allow,
+          },
+        ],
+      },
+    ],
+  },
+};
+```
+
+### Mixed Policy Evaluation
+
+When both policy types are present, Kerberos resolves each action in this order:
+
+1. Find the matching `PrincipalPolicy` for the request principal.
+2. If it returns an explicit `EFFECT_ALLOW` or `EFFECT_DENY`, use that result.
+3. If it is not applicable for that action, fall back to the matching `ResourcePolicy`.
+4. If nothing matches, return `EFFECT_DENY`.
+
+This keeps Kerberos.js aligned with the Cerbos-style principal override model described in the [Cerbos principal policies documentation](https://docs.cerbos.dev/cerbos/latest/policies/principal_policies).
 
 ## Configuration Options
 
@@ -231,6 +340,8 @@ import Ajv from 'ajv';
 import {
   JsonSchemas,
   KerberosJsonSchemas,
+  PrincipalPolicyJsonSchemas,
+  ResourcePolicyJsonSchemas,
   createAjvAdapter,
   registerAjvKeywords,
 } from '@alexify/kerberos';
@@ -239,6 +350,8 @@ const ajv = registerAjvKeywords(new Ajv({ strict: false }));
 
 const requestValidator = createAjvAdapter(ajv, JsonSchemas.buildRequest());
 const argsValidator = createAjvAdapter(ajv, KerberosJsonSchemas.buildCheckResourcesArgs());
+const resourcePolicyValidator = createAjvAdapter(ajv, ResourcePolicyJsonSchemas.buildShape());
+const principalPolicyValidator = createAjvAdapter(ajv, PrincipalPolicyJsonSchemas.buildShape());
 ```
 
 ### Notes About Function Fields
@@ -394,23 +507,33 @@ Output functions are called when:
 - **ruleActivated**: The rule matches and its condition is satisfied
 - **conditionNotMet**: The rule matches but its condition is not satisfied
 
+The output `src` field reflects the policy type that produced it:
+
+- Resource policy example: `resource.expense.vdefault#rule-name`
+- Principal policy example: `principal.sally.vdefault#rule-name`
+
 ### Using Scopes and Policy Versions
 
 Kerberos.js supports scoped policies and policy versions, allowing you to organize policies for different environments or versions.
 
-Policy selection is based on the **resource** in the request:
+Policy selection now depends on the policy type:
 
-- `resource.kind`
-- `resource.policyVersion` (defaults to `'default'` when omitted)
-- `resource.scope`
+- **`ResourcePolicy`**
+  - `resource.kind`
+  - `resource.policyVersion` (defaults to `'default'` when omitted)
+  - `resource.scope`
+- **`PrincipalPolicy`**
+  - `principal.id`
+  - `principal.policyVersion` (defaults to `'default'` when omitted)
+  - `principal.scope`
 
 Current scope behavior matches the Cerbos-style model used by the library:
 
-- If `resource.scope` is **not** provided, Kerberos.js evaluates only the base policy without a scope.
-- If `resource.scope` **is** provided, Kerberos.js searches from the most specific scope to the least specific scope, and finally falls back to the base policy.
+- If `scope` is **not** provided for the relevant side of the lookup, Kerberos.js evaluates only the base policy without a scope.
+- If `scope` **is** provided, Kerberos.js searches from the most specific scope to the least specific scope, and finally falls back to the base policy.
 - Example search chain for `scope: 'acme.corp'`: `acme.corp -> acme -> ''`
 
-`principal.scope` and `principal.policyVersion` are still available in conditions, outputs, and logs, but they do not select the resource policy directly.
+When both policy types are loaded, Kerberos first resolves principal overrides using the principal scope/version chain and then falls back to resource policy lookup when the principal policy is not applicable for a given action.
 
 Example:
 
@@ -517,8 +640,11 @@ console.log(results);
 The metadata includes:
 
 - **matchedPolicy**: The name of the policy that produced the decision
+- **matchedRule**: The exact rule that produced the decision for that action
 - **matchedScope**: The full matched policy scope that produced the decision
 - **effectiveDerivedRoles**: List of derived roles that were activated
+
+`matchedPolicy` can now refer to either a resource policy source such as `resource.expense.vdefault/acme.corp` or a principal policy source such as `principal.sally.vdefault/acme.corp`.
 
 ## Testing
 
