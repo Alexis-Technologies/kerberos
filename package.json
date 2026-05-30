@@ -63,6 +63,7 @@
   ],
   "packageManager": "pnpm@10.10.0",
   "dependencies": {
+    "@jsep-plugin/new": "^1.0.4",
     "@jsep-plugin/object": "^1.2.2",
     "@jsep-plugin/ternary": "^1.1.4",
     "jsep": "^1.4.0"

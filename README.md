@@ -761,7 +761,32 @@ A full stored resource policy document looks like:
 }
 ```
 
-Expressions are evaluated against the same request context as functions: `P` (principal), `R` (resource), `V` (variables), `C` (constants), plus a safe `Math` global.
+Expressions are evaluated against the same request context as functions: `P` (principal), `R` (resource), `V` (variables), `C` (constants), plus a curated set of **safe language builtins** (see below).
+
+### Allowed safe builtins
+
+The default codec exposes a small, allowlisted subset of JavaScript that is useful in policy conditions without opening an `eval` trust boundary:
+
+| Category | Supported constructs |
+| -------- | -------------------- |
+| **Math** | `Math.abs`, `Math.min`, `Math.max`, `Math.floor`, `Math.ceil`, `Math.round`, `Math.pow`, ... |
+| **Date** | `new Date()`, `new Date(value)`, `Date.now()`, `Date.parse(...)`, `Date.UTC(...)`, and read-only instance methods such as `.getTime()`, `.getHours()`, `.toISOString()` |
+| **Coercion / parsing** | `parseInt(...)`, `parseFloat(...)`, `Number(...)`, `String(...)`, `Boolean(...)`, `isNaN(...)`, `isFinite(...)` |
+| **Value helpers** | Safe string/array methods such as `.includes()`, `.startsWith()`, `.slice()`, ... |
+
+Anything outside this list — arbitrary constructors (`new Function`, `new Object`, ...), global roots like `process` / `require` / `globalThis`, or member keys such as `constructor` / `__proto__` — is rejected by the AST allowlist interpreter.
+
+Example: a time-window condition (equivalent to the in-memory expense delete rule) in `{ $expr }` form:
+
+```json
+{
+  "condition": {
+    "match": {
+      "$expr": "(Date.now() - new Date(R.attr.createdAt).getTime()) < 3600000 && R.attr.status == 'OPEN'"
+    }
+  }
+}
+```
 
 ### Example 1: a simple Keyv cache
 
@@ -855,9 +880,8 @@ Instead, the default codec (`createSafeExprCodec`) uses an **AST allowlist inter
 
 1. Each `{ $expr }` string is parsed **once** into an AST, which is cached by expression string (`parse-once`).
 2. Evaluation walks the AST per request with a strict allowlist — no `eval`, no `new Function`, no recompilation.
-3. Identifiers resolve **only** against the `{ P, R, V, C }` context and a safe `Math` global (so `constructor`, `process`, `require`, `globalThis` simply do not exist as roots). Member keys `__proto__` / `prototype` / `constructor` are blocked at the interpreter level regardless of how they are written, and method calls are limited to a whitelist of safe string/array/number/`Math` helpers.
-
-This keeps remote policies expressive (comparisons, logic, ternaries, member access, object/array literals, common helpers) while remaining non-Turing-complete and safe to load from a shared store.
+3. Identifiers resolve **only** against the `{ P, R, V, C }` context and curated safe builtins (`Math`, `Date`, `parseInt`, `parseFloat`, ... — so `constructor`, `process`, `require`, `globalThis` simply do not exist as roots). Member keys `__proto__` / `prototype` / `constructor` are blocked at the interpreter level regardless of how they are written. Method calls are limited to a whitelist of safe helpers on string/array/number/`Date` values, plus `Math.*` / `Date.*` static methods. Only `new Date(...)` is permitted as a constructor.
+4. This keeps remote policies expressive (comparisons, logic, ternaries, member access, object/array literals, time windows via `Date`, numeric helpers via `Math`, parsing via `parseInt`/`parseFloat`) while remaining non-Turing-complete and safe to load from a shared store.
 
 ### Using a custom codec
 

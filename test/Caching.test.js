@@ -127,6 +127,87 @@ describe('Caching / Storing policies', () => {
     });
   });
 
+  describe('safe language builtins (Date, Math, parseInt, ...)', () => {
+    const codec = createSafeExprCodec();
+
+    it('supports new Date() and Date.now()', () => {
+      const before = Date.now();
+      const now = codec.compileExpr('Date.now()')({});
+      const after = Date.now();
+      assert.ok(now >= before && now <= after);
+      assert.ok(codec.compileExpr('new Date()')({}) instanceof Date);
+    });
+
+    it('supports new Date(value) and Date instance methods', () => {
+      const iso = '2024-06-01T12:00:00.000Z';
+      const ctx = { R: { attr: { createdAt: iso } }, P: {}, V: {}, C: {} };
+      const getTime = codec.compileExpr('new Date(R.attr.createdAt).getTime()')(ctx);
+      assert.strictEqual(getTime, new Date(iso).getTime());
+      assert.strictEqual(codec.compileExpr('new Date(R.attr.createdAt).toISOString()')(ctx), iso);
+    });
+
+    it('supports Date.parse and Date.UTC', () => {
+      assert.strictEqual(codec.compileExpr('Date.parse("2024-01-01")')({}), Date.parse('2024-01-01'));
+      assert.strictEqual(codec.compileExpr('Date.UTC(2024, 0, 1)')({}), Date.UTC(2024, 0, 1));
+    });
+
+    it('supports parseInt, parseFloat, Number, String and Boolean', () => {
+      assert.strictEqual(codec.compileExpr('parseInt("42", 10)')({}), 42);
+      assert.strictEqual(codec.compileExpr('parseFloat("3.14")')({}), 3.14);
+      assert.strictEqual(codec.compileExpr('Number("7")')({}), 7);
+      assert.strictEqual(codec.compileExpr('String(123)')({}), '123');
+      assert.strictEqual(codec.compileExpr('Boolean(0)')({}), false);
+      assert.strictEqual(codec.compileExpr('isNaN("x")')({}), true);
+      assert.strictEqual(codec.compileExpr('isFinite(100)')({}), true);
+    });
+
+    it('evaluates a time-window condition equivalent to the expense delete rule', () => {
+      const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+      const expr = '(Date.now() - new Date(R.attr.createdAt).getTime()) < 3600000';
+      const evaluate = codec.compileExpr(expr);
+
+      assert.strictEqual(evaluate({ R: { attr: { createdAt: thirtyMinutesAgo } } }), true);
+      assert.strictEqual(evaluate({ R: { attr: { createdAt: twoHoursAgo } } }), false);
+    });
+
+    it('resolves a cached policy that uses Date expressions', async () => {
+      const recentCreatedAt = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+      const policy = {
+        resourcePolicy: {
+          version: 'default',
+          resource: 'expense',
+          rules: [
+            {
+              name: 'delete-within-hour',
+              actions: ['delete'],
+              effect: Effect.Allow,
+              roles: ['USER'],
+              condition: {
+                match: { $expr: "(Date.now() - new Date(R.attr.createdAt).getTime()) < 3600000 && R.attr.status == 'OPEN'" },
+              },
+            },
+          ],
+        },
+      };
+
+      const keyv = new Keyv();
+      await keyv.set('resource:expense:default:', serializePolicy(policy));
+      const kerberos = new Kerberos([], [], { cache: keyv });
+
+      const resource = { id: 'e1', kind: 'expense', attr: { createdAt: recentCreatedAt, status: 'OPEN' } };
+      assert.strictEqual(await kerberos.isAllowed({ principal: owner, action: 'delete', resource }), true);
+    });
+
+    it('rejects disallowed constructors and functions', () => {
+      const ctx = { P: {}, R: { attr: {} }, V: {}, C: {} };
+      assert.throws(() => codec.compileExpr('new Function("return process")()')(ctx), KerberosExprError);
+      assert.throws(() => codec.compileExpr('new Object()')(ctx), KerberosExprError);
+      assert.throws(() => codec.compileExpr('eval("1")')(ctx), KerberosExprError);
+      assert.throws(() => codec.compileExpr('Date.constructor("return 1")()')(ctx), KerberosExprError);
+    });
+  });
+
   describe('security: AST allowlist rejects dangerous expressions', () => {
     const codec = createSafeExprCodec();
     const ctx = { P: { id: 'u1', roles: ['USER'] }, R: { attr: {} }, V: {}, C: {} };
@@ -142,6 +223,9 @@ describe('Caching / Storing policies', () => {
       'process.exit(1)',
       'globalThis.process',
       'require("fs")',
+      'new Function("return process")()',
+      'new Object()',
+      'eval("1")',
     ];
 
     for (const expr of vectors) {

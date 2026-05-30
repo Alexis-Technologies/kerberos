@@ -1,6 +1,7 @@
 const jsepModule = require('jsep');
 const objectPlugin = require('@jsep-plugin/object');
 const ternaryPlugin = require('@jsep-plugin/ternary');
+const newPlugin = require('@jsep-plugin/new');
 
 const jsep = jsepModule.default || jsepModule;
 
@@ -45,7 +46,33 @@ const MATH_METHODS = new Set([
   'min', 'max', 'pow', 'sqrt', 'cbrt', 'log', 'log2', 'log10', 'exp', 'hypot',
 ]);
 
-const ALLOWED_GLOBALS = { Math };
+// Whitelisted `new` targets. Only simple Identifier callees are accepted.
+const ALLOWED_CONSTRUCTORS = {
+  Date,
+};
+
+const DATE_STATIC_METHODS = new Set(['now', 'parse', 'UTC']);
+
+const DATE_METHODS = new Set([
+  'getTime', 'valueOf', 'toISOString', 'toJSON', 'toString',
+  'getFullYear', 'getMonth', 'getDate', 'getDay',
+  'getHours', 'getMinutes', 'getSeconds', 'getMilliseconds',
+  'getUTCFullYear', 'getUTCMonth', 'getUTCDate', 'getUTCDay',
+  'getUTCHours', 'getUTCMinutes', 'getUTCSeconds', 'getUTCMilliseconds',
+]);
+
+// Top-level function calls with an Identifier callee (no member access).
+const GLOBAL_FUNCTIONS = {
+  parseInt,
+  parseFloat,
+  Number,
+  String,
+  Boolean,
+  isNaN,
+  isFinite,
+};
+
+const ALLOWED_GLOBALS = { Math, Date };
 
 const DEFAULT_ROOTS = ['P', 'R', 'V', 'C'];
 
@@ -53,7 +80,11 @@ let jsepConfigured = false;
 
 function configureJsep() {
   if (jsepConfigured) return;
-  jsep.plugins.register(objectPlugin.default || objectPlugin, ternaryPlugin.default || ternaryPlugin);
+  jsep.plugins.register(
+    objectPlugin.default || objectPlugin,
+    ternaryPlugin.default || ternaryPlugin,
+    newPlugin.default || newPlugin
+  );
   // `typeof` is not a default jsep unary operator.
   jsep.addUnaryOp('typeof');
   jsepConfigured = true;
@@ -102,8 +133,21 @@ function validateNode(node) {
       }
       return;
     case 'CallExpression':
-      if (node.callee.type !== 'MemberExpression') throw new KerberosExprError('Only whitelisted method calls are allowed');
-      validateNode(node.callee);
+      if (node.callee.type === 'Identifier') {
+        if (!Object.prototype.hasOwnProperty.call(GLOBAL_FUNCTIONS, node.callee.name)) {
+          throw new KerberosExprError(`Function "${node.callee.name}" is not allowed`);
+        }
+      } else if (node.callee.type === 'MemberExpression') {
+        validateNode(node.callee);
+      } else {
+        throw new KerberosExprError('Only whitelisted function or method calls are allowed');
+      }
+      for (const argument of node.arguments) validateNode(argument);
+      return;
+    case 'NewExpression':
+      if (node.callee.type !== 'Identifier' || !Object.prototype.hasOwnProperty.call(ALLOWED_CONSTRUCTORS, node.callee.name)) {
+        throw new KerberosExprError('Only whitelisted constructors are allowed (Date)');
+      }
       for (const argument of node.arguments) validateNode(argument);
       return;
     case 'Compound':
@@ -227,25 +271,56 @@ function evalObject(node, ctx, config) {
 
 function evalCall(node, ctx, config) {
   const { callee } = node;
-  if (callee.type !== 'MemberExpression') throw new KerberosExprError('Only whitelisted method calls are allowed');
+  const args = node.arguments.map((argument) => evalNode(argument, ctx, config));
+
+  if (callee.type === 'Identifier') {
+    if (!Object.prototype.hasOwnProperty.call(GLOBAL_FUNCTIONS, callee.name)) {
+      throw new KerberosExprError(`Function "${callee.name}" is not allowed`);
+    }
+    return GLOBAL_FUNCTIONS[callee.name](...args);
+  }
+
+  if (callee.type !== 'MemberExpression') throw new KerberosExprError('Only whitelisted function or method calls are allowed');
 
   const method = callee.computed ? evalNode(callee.property, ctx, config) : callee.property.name;
   const methodStr = safeKey(method);
-  const args = node.arguments.map((argument) => evalNode(argument, ctx, config));
 
   if (callee.object.type === 'Identifier' && callee.object.name === 'Math') {
     if (!MATH_METHODS.has(methodStr)) throw new KerberosExprError(`Math.${methodStr} is not allowed`);
     return Math[methodStr](...args);
   }
 
+  if (callee.object.type === 'Identifier' && callee.object.name === 'Date') {
+    if (!DATE_STATIC_METHODS.has(methodStr)) throw new KerberosExprError(`Date.${methodStr} is not allowed`);
+    return Date[methodStr](...args);
+  }
+
   const receiver = evalNode(callee.object, ctx, config);
+
+  if (receiver instanceof Date) {
+    if (!DATE_METHODS.has(methodStr)) throw new KerberosExprError(`Date instance method "${methodStr}" is not allowed`);
+    const fn = receiver[methodStr];
+    if (typeof fn !== 'function') throw new KerberosExprError(`"${methodStr}" is not a callable method`);
+    return fn.apply(receiver, args);
+  }
+
   const isAllowedReceiver = typeof receiver === 'string' || typeof receiver === 'number' || Array.isArray(receiver);
-  if (!isAllowedReceiver) throw new KerberosExprError('Method calls are only allowed on string, number or array values');
+  if (!isAllowedReceiver) throw new KerberosExprError('Method calls are only allowed on string, number, array or Date values');
   if (!VALUE_METHODS.has(methodStr)) throw new KerberosExprError(`Method "${methodStr}" is not allowed`);
 
   const fn = receiver[methodStr];
   if (typeof fn !== 'function') throw new KerberosExprError(`"${methodStr}" is not a callable method`);
   return fn.apply(receiver, args);
+}
+
+function evalNew(node, ctx, config) {
+  if (node.callee.type !== 'Identifier') throw new KerberosExprError('Only whitelisted constructors are allowed (Date)');
+
+  const Constructor = ALLOWED_CONSTRUCTORS[node.callee.name];
+  if (!Constructor) throw new KerberosExprError(`Constructor "${node.callee.name}" is not allowed`);
+
+  const args = node.arguments.map((argument) => evalNode(argument, ctx, config));
+  return new Constructor(...args);
 }
 
 function evalNode(node, ctx, config) {
@@ -255,7 +330,9 @@ function evalNode(node, ctx, config) {
     case 'Identifier':
       if (Object.prototype.hasOwnProperty.call(ALLOWED_GLOBALS, node.name)) return ALLOWED_GLOBALS[node.name];
       if (config.roots.has(node.name)) return ctx == null ? undefined : ctx[node.name];
-      throw new KerberosExprError(`Unknown identifier "${node.name}" (allowed roots: ${[...config.roots].join(', ')}, Math)`);
+      throw new KerberosExprError(
+        `Unknown identifier "${node.name}" (allowed roots: ${[...config.roots].join(', ')}, Math, Date, ${Object.keys(GLOBAL_FUNCTIONS).join(', ')})`
+      );
     case 'MemberExpression':
       return evalMember(node, ctx, config);
     case 'BinaryExpression':
@@ -270,6 +347,8 @@ function evalNode(node, ctx, config) {
       return evalObject(node, ctx, config);
     case 'CallExpression':
       return evalCall(node, ctx, config);
+    case 'NewExpression':
+      return evalNew(node, ctx, config);
     case 'Compound':
       throw new KerberosExprError('Compound expressions are not allowed');
     default:
