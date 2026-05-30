@@ -398,8 +398,46 @@ export type KerberosStructuredLogger = {
   error?(entry: KerberosAuditLogEntry | KerberosMethodLogEntry, message?: string, ...args: unknown[]): void;
 };
 export type KerberosLogger = KerberosConsoleLogger | KerberosStructuredLogger;
+
+/**
+ * Minimal cache contract. Any caching solution that exposes a `get(key)` method
+ * (keyv, cacheable, cache-manager, ...) is accepted. Storage, TTL and multi-host
+ * invalidation (CacheSync via qified) are delegated entirely to the cache;
+ * Kerberos only ever reads dynamic policies via `get`.
+ */
+export type CacheLike = {
+  get(key: string): unknown | Promise<unknown>;
+};
+
+/**
+ * Pluggable codec used to (de)serialize dynamic policy documents stored in a
+ * remote cache. The default codec (`createSafeExprCodec`) keeps conditions,
+ * variables and outputs as `{ $expr: string }` descriptors and evaluates them
+ * with an AST allowlist interpreter (no `eval` / `new Function`).
+ */
+export type PolicyExprDescriptor = { $expr: string };
+export type PolicyCodec = {
+  serialize(policyShape: unknown): unknown;
+  deserialize(jsonSafe: unknown): unknown;
+  compileExpr?(expr: string): (ctx: Record<string, unknown>) => unknown;
+  isExprDescriptor?(value: unknown): boolean;
+};
+
+export class KerberosExprError extends Error {
+  name: 'KerberosExprError';
+}
+
+export function createSafeExprCodec(options?: { roots?: string[] }): PolicyCodec & {
+  isExprDescriptor(value: unknown): boolean;
+  compileExpr(expr: string): (ctx: Record<string, unknown>) => unknown;
+};
+export function serializePolicy(shape: unknown): unknown;
+export function deserializePolicy(json: unknown, codec?: PolicyCodec): unknown;
+
 export type KerberosOptions = ValidationOptions & {
   logger?: KerberosLogger | boolean;
+  cache?: CacheLike;
+  codec?: PolicyCodec;
   getCallId?: () => string;
 };
 

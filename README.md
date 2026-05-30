@@ -31,6 +31,7 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
 - [x] In-browser/serverless authorization;
 - [x] Scopes;
 - [x] Metadata;
+- [x] Caching / storing dynamic policies (cache-agnostic, with a safe AST-based serialization codec);
 
 ---
 **_P.S. We are tying to keep the API as close as possible to Cerbos. If you are familiar with Cerbos, you will feel at home with Kerberos.js._**
@@ -277,6 +278,8 @@ The Kerberos constructor accepts an optional third parameter with configuration 
 ```javascript
 const kerberos = new Kerberos(policies, derivedRoles, {
   logger: true, // Legacy console audit logging with summary + table + debug(json)
+  cache, // Optional: any cache solution exposing get(key) (keyv, cacheable, ...)
+  codec, // Optional: custom (de)serialization codec for dynamic policies
   z, // Optional: validate with Zod
   ajv, // Optional: validate with Ajv
   typebox: Type, // Optional: switch Ajv validation to TypeBox builders
@@ -295,6 +298,8 @@ const kerberos = new Kerberos(policies, derivedRoles, {
     - `isAllowed(...)` returns `false`
     - `checkResources(...)` returns `{ results: [], kerberosCallId, reqId? }`
   - when logging is disabled, those errors continue to be thrown to the caller
+- **`cache`** (CacheLike): An optional cache used as a fallback source for dynamic/stored policies. Any object exposing a `get(key)` method is accepted (keyv, cacheable, cache-manager, ...). See [Caching / Storing policies](#caching--storing-policies).
+- **`codec`** (PolicyCodec): An optional `{ serialize, deserialize }` codec used to (de)serialize dynamic policy documents read from `cache`. Defaults to the built-in safe AST codec (`createSafeExprCodec`).
 - **`z`**: Enables validation using the built-in Zod schema builders.
 - **`ajv`**: Enables validation using the built-in JSON Schema builders compiled with Ajv.
 - **`typebox`**: When used together with `ajv`, switches validation to the built-in TypeBox builders.
@@ -684,6 +689,185 @@ The metadata includes:
 - **effectiveDerivedRoles**: List of derived roles that were activated
 
 `matchedPolicy` can now refer to either a resource policy source such as `resource.expense.vdefault/acme.corp` or a principal policy source such as `principal.sally.vdefault/acme.corp`.
+
+## Caching / Storing policies
+
+Kerberos.js can resolve policies dynamically from a remote store (Redis, MongoDB, PostgreSQL, in-memory, ...) instead of loading every policy up front. Following the same delegating philosophy as the `logger` option, Kerberos stays **agnostic**: it does not implement caching, TTL or invalidation logic itself. You pass a `cache`, and Kerberos simply calls `cache.get(key)` when it needs a policy. Everything else — storage, layering, expiry, and multi-host invalidation — is delegated to dedicated solutions such as [`keyv`](https://keyv.org), [`cacheable`](https://cacheable.org) (`CacheSync`) and [`qified`](https://qified.org).
+
+### How it works (fallback layer)
+
+Static policies passed to the constructor stay in memory and are always checked first. The `cache` is only consulted on a **miss**:
+
+1. Resolve the policy by `kind` / `id` / `role` + `policyVersion` + scope chain in memory.
+2. On a miss, and only if a `cache` is configured, call `await cache.get(key)` for each scope in the chain.
+3. On a hit, the JSON document is passed through `codec.deserialize(...)` and rebuilt into a policy instance.
+4. If nothing matches, the action falls back to `EFFECT_DENY` (unchanged behavior).
+
+Cache keys follow this layout:
+
+| Policy type     | Key format                                |
+| --------------- | ----------------------------------------- |
+| Resource policy | `resource:<kind>:<version>:<scope>`       |
+| Principal policy| `principal:<id>:<version>:<scope>`        |
+| Role policy     | `role:<role>:<version>:<scope>`           |
+| Derived roles   | `derivedRoles:<name>`                     |
+
+`<version>` defaults to `default`, and `<scope>` is empty for unscoped policies (e.g. `resource:expense:default:`).
+
+### `CacheLike`
+
+The only requirement is a single `get` method, so any cache backend works:
+
+```typescript
+type CacheLike = {
+  get(key: string): unknown | Promise<unknown>;
+};
+```
+
+### Dynamic policy format
+
+Because a remote store can be Redis/Mongo/Postgres/etc., dynamic policies must be **JSON documents**. JSON has no concept of a JavaScript function, so `conditions`, `variables` and `outputs` are authored as **expression descriptors** `{ "$expr": "..." }` instead of JS functions:
+
+```javascript
+// In-memory policy (function form):
+condition: { match: ({ R, P }) => R.attr.ownerId === P.id }
+
+// Dynamic/stored policy (JSON, $expr form):
+"condition": { "match": { "$expr": "R.attr.ownerId == P.id" } }
+```
+
+A full stored resource policy document looks like:
+
+```json
+{
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "document",
+    "importDerivedRoles": ["doc_roles"],
+    "variables": { "isOpen": { "$expr": "R.attr.status == 'OPEN'" } },
+    "rules": [
+      { "actions": ["*"], "effect": "EFFECT_ALLOW", "roles": ["ADMIN"] },
+      { "actions": ["view"], "effect": "EFFECT_ALLOW", "derivedRoles": ["OWNER"] },
+      {
+        "name": "edit-when-open",
+        "actions": ["edit"],
+        "effect": "EFFECT_ALLOW",
+        "derivedRoles": ["OWNER"],
+        "condition": { "match": { "$expr": "V.isOpen" } },
+        "output": { "when": { "ruleActivated": { "$expr": "({ owner: R.attr.ownerId, by: P.id })" } } }
+      }
+    ]
+  }
+}
+```
+
+Expressions are evaluated against the same request context as functions: `P` (principal), `R` (resource), `V` (variables), `C` (constants), plus a safe `Math` global.
+
+### Example 1: a simple Keyv cache
+
+```javascript
+import { Keyv } from 'keyv';
+import { Kerberos, serializePolicy } from '@alexify/kerberos';
+
+const keyv = new Keyv();
+
+// Store dynamic policies as JSON documents.
+await keyv.set('derivedRoles:doc_roles', serializePolicy({
+  name: 'doc_roles',
+  definitions: [
+    { name: 'OWNER', parentRoles: ['USER'], condition: { match: { $expr: 'R.attr.ownerId == P.id' } } },
+  ],
+}));
+
+await keyv.set('resource:document:default:', serializePolicy({
+  resourcePolicy: {
+    version: 'default',
+    resource: 'document',
+    importDerivedRoles: ['doc_roles'],
+    rules: [
+      { actions: ['view'], effect: 'EFFECT_ALLOW', derivedRoles: ['OWNER'] },
+    ],
+  },
+}));
+
+// No static policies: everything is resolved from the cache on demand.
+const kerberos = new Kerberos([], [], { cache: keyv });
+
+const allowed = await kerberos.isAllowed({
+  principal: { id: 'u1', roles: ['USER'] },
+  action: 'view',
+  resource: { id: 'doc1', kind: 'document', attr: { ownerId: 'u1' } },
+});
+// -> true
+```
+
+`serializePolicy(...)` validates every `{ $expr }` and returns a JSON-safe document. You can also store hand-written JSON directly.
+
+### Example 2: Keyv + Cacheable + Qified (recommended for multi-host invalidation)
+
+For production deployments running multiple Kerberos instances, the recommended setup combines:
+
+- **`keyv`** — the storage engine (Redis, Mongo, Postgres, ...);
+- **`cacheable`** — high-performance layer 1 / layer 2 caching with `CacheSync`;
+- **`qified`** — the pub/sub transport that propagates `CacheSync` invalidation messages across hosts.
+
+> **This is the recommended way to invalidate your policies across multiple hosts.** When a policy changes, update the store; `cacheable`'s `CacheSync` broadcasts the invalidation over `qified` pub/sub so every Kerberos instance drops its stale layer-1 copy. Kerberos itself only ever calls `cache.get` — it never has to know about invalidation.
+
+```javascript
+import { Cacheable } from 'cacheable';
+import { createKeyv } from '@keyv/redis';
+import { Qified } from 'qified';
+import { createQified } from '@qified/redis';
+import { Kerberos } from '@alexify/kerberos';
+
+// Layer 2 (distributed) storage + layer 1 (in-process) cache.
+const secondary = createKeyv('redis://localhost:6379');
+
+// CacheSync over qified pub/sub keeps every host's layer-1 cache coherent.
+const cacheSync = createQified({ uri: 'redis://localhost:6379' });
+
+const cacheable = new Cacheable({
+  secondary,
+  cacheId: 'kerberos-policies',
+  cacheSync, // distributed invalidation via qified pub/sub
+});
+
+const kerberos = new Kerberos([], [], { cache: cacheable });
+
+// Reads transparently use layer 1 -> layer 2; writes/invalidations are handled
+// by cacheable + qified, not by Kerberos.
+const allowed = await kerberos.isAllowed({
+  principal: { id: 'u1', roles: ['USER'] },
+  action: 'view',
+  resource: { id: 'doc1', kind: 'document', attr: { ownerId: 'u1' } },
+});
+```
+
+### Serialization mechanism (security & performance)
+
+Kerberos deliberately does **not** serialize raw JavaScript function bodies and **never uses `eval` / `new Function` / `fn.toString()`**. That classic "stringify a function, then eval it back" approach is unsafe and brittle:
+
+- `new Function(body)` is equivalent to `eval(body)`. A denylist of dangerous tokens is weaker than an allowlist by design — it can be bypassed via bracket notation (`P['cons' + 'tructor']`), unicode escapes, `with`, `Reflect`, `Proxy` traps, and so on, with no end to the patches (see the `node-serialize` RCE, CVE-2017-5941).
+- `fn.toString()` produces engine/bundler-specific output (V8 vs SpiderMonkey, Babel/esbuild/SWC, `[native code]`), which silently breaks serialization across environments.
+- Re-`eval`ing on every cache hit pays a JIT-compilation cost exactly when load is highest.
+
+Instead, the default codec (`createSafeExprCodec`) uses an **AST allowlist interpreter** built on the tiny, eval-free [`jsep`](https://ericsmekens.github.io/jsep/) parser:
+
+1. Each `{ $expr }` string is parsed **once** into an AST, which is cached by expression string (`parse-once`).
+2. Evaluation walks the AST per request with a strict allowlist — no `eval`, no `new Function`, no recompilation.
+3. Identifiers resolve **only** against the `{ P, R, V, C }` context and a safe `Math` global (so `constructor`, `process`, `require`, `globalThis` simply do not exist as roots). Member keys `__proto__` / `prototype` / `constructor` are blocked at the interpreter level regardless of how they are written, and method calls are limited to a whitelist of safe string/array/number/`Math` helpers.
+
+This keeps remote policies expressive (comparisons, logic, ternaries, member access, object/array literals, common helpers) while remaining non-Turing-complete and safe to load from a shared store.
+
+### Using a custom codec
+
+The codec is pluggable. If you need different semantics you can supply your own `{ serialize, deserialize }`:
+
+```javascript
+const kerberos = new Kerberos([], [], { cache, codec: myCodec });
+```
+
+Other eval-free options such as [`jexl`](https://github.com/TomFrost/jexl) or [`cel-js`](https://www.npmjs.com/package/cel-js) (CEL, the same expression language Cerbos uses) are good fits. Function-serializing libraries like `serialize-javascript` can also be wrapped, but only if you fully trust the store and accept the `eval`-based trust boundary they require.
 
 ## Testing
 

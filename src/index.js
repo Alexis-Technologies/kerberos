@@ -8,6 +8,8 @@ module.exports = {
   ...require('./RolePolicy/index.js'),
   ...require('./DerivedRoles/index.js'),
   ...require('./Kerberos.js'),
+  ...require('./caching/cache.js'),
+  ...require('./caching/codec.js'),
   ...require('./schemas'),
   ...require('./validation'),
   Tests: require('./Tests/index.js'),
