@@ -57,6 +57,11 @@ class Conditions {
     if (typeof cond !== 'object') throw new TypeError(`Invalid condition: ${cond}`);
 
     const strategyKeys = Object.keys(cond);
+    // Fail closed when no strategy is present (e.g. `{ match: {} }` without a
+    // validation backend). An empty results set would otherwise vacuously
+    // evaluate to `true` and turn a broken conditional rule into an unconditional match.
+    if (strategyKeys.length === 0) return false;
+
     const results = new Set();
     for (const strategyKey of strategyKeys) {
       const strategy = this.#strategies[strategyKey];

@@ -193,6 +193,22 @@ export class OutputsTypeBoxSchemas {
   static buildShape(typebox: TypeBoxLike): unknown;
 }
 
+export class MetadataZodSchemas {
+  static buildActionMetadata(z: unknown): unknown;
+  static buildActionsMetadata(z: unknown): unknown;
+  static buildShape(z: unknown): unknown;
+}
+export class MetadataJsonSchemas {
+  static buildActionMetadata(): Record<string, unknown>;
+  static buildActionsMetadata(): Record<string, unknown>;
+  static buildShape(): Record<string, unknown>;
+}
+export class MetadataTypeBoxSchemas {
+  static buildActionMetadata(typebox: TypeBoxLike): unknown;
+  static buildActionsMetadata(typebox: TypeBoxLike): unknown;
+  static buildShape(typebox: TypeBoxLike): unknown;
+}
+
 type DerivedRolesDefinition = {
   name: string;
   parentRoles: [string, ...string[]];

@@ -121,6 +121,12 @@ describe('Conditions', () => {
     });
   });
 
+  it('should not match an empty strategy object when validation is disabled', () => {
+    const condition = new Conditions({ match: {} });
+
+    assert.strictEqual(condition.isFulfilled(reqMock), false);
+  });
+
   it('should match with nested conditions - true case', () => {
     const condition = new Conditions({
       match: {

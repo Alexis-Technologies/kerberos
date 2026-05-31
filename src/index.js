@@ -7,6 +7,7 @@ module.exports = {
   ...require('./PrincipalPolicy/index.js'),
   ...require('./RolePolicy/index.js'),
   ...require('./DerivedRoles/index.js'),
+  ...require('./Metadata/schemas/index.js'),
   ...require('./Kerberos.js'),
   ...require('./caching/cache.js'),
   ...require('./caching/codec.js'),
