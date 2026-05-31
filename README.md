@@ -19,6 +19,7 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
 - [x] Derived roles;
 - [x] Resource policies;
 - [x] Principal policies;
+- [x] Role policies (with `parentRoles` inheritance);
 - [x] Conditions;
 - [x] Variables and constants;
 - [x] Outputs;
@@ -27,14 +28,37 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
   - [x] isAllowed API;
   - [x] CheckResourceSet API;
 - [x] Audit logs;
-- [x] Logger;
+- [x] Logger (legacy console + structured / Pino);
 - [x] In-browser/serverless authorization;
 - [x] Scopes;
 - [x] Metadata;
+- [x] Pluggable schema validation (Zod, JSON Schema + Ajv, TypeBox + Ajv);
 - [x] Caching / storing dynamic policies (cache-agnostic, with a safe AST-based serialization codec);
 
 ---
 **_P.S. We are tying to keep the API as close as possible to Cerbos. If you are familiar with Cerbos, you will feel at home with Kerberos.js._**
+
+> **Version 2.0** — see the [CHANGELOG](./CHANGELOG.md) for everything that changed since `1.0.0` (principal & role policies, outputs, scopes, metadata, pluggable validation & logging, and cache-agnostic dynamic policies).
+
+## Table of Contents
+
+- [Installation](#installation)
+- [Quick Start](#usage)
+- [API Reference](#api-reference)
+- [Policy Types](#policy-types)
+  - [ResourcePolicy](#resourcepolicy)
+  - [PrincipalPolicy](#principalpolicy)
+  - [RolePolicy](#rolepolicy)
+  - [Mixed Policy Evaluation](#mixed-policy-evaluation)
+- [Configuration Options](#configuration-options)
+  - [Using Pino for Production Logging](#using-pino-for-production-logging)
+- [Schema Validation](#schema-validation)
+  - [Zod](#using-zod) · [JSON Schema + Ajv](#using-json-schema--ajv) · [TypeBox + Ajv](#using-typebox--ajv) · [Explicit Builders](#using-explicit-builders)
+- [Outputs](#outputs)
+- [Scopes and Policy Versions](#scopes-and-policy-versions)
+- [Metadata](#metadata)
+- [Caching / Storing Policies](#caching--storing-policies)
+- [Testing](#testing)
 
 ## Installation
 
@@ -157,6 +181,64 @@ console.log(results);
 
 console.log(isAllowed); // true
 ```
+
+## API Reference
+
+### `new Kerberos(policies, derivedRoles?, options?)`
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `policies` | `Array<ResourcePolicy \| PrincipalPolicy \| RolePolicy \| object>` | Static policies loaded into memory. Plain objects are auto-detected by their `resourcePolicy` / `principalPolicy` / `rolePolicy` key. May be empty when policies are resolved from a `cache`. |
+| `derivedRoles` | `Array<DerivedRoles \| object>` | Optional derived-role definition sets. |
+| `options` | `object` | Optional configuration — see [Configuration Options](#configuration-options). |
+
+### `kerberos.isAllowed(args) => Promise<boolean>`
+
+Evaluates a **single** action against a single resource and returns a boolean.
+
+```javascript
+const allowed = await kerberos.isAllowed({
+  principal: { id: 'user1', roles: ['USER'], policyVersion: 'default', scope: 'acme.corp' },
+  action: 'view',
+  resource: { id: 'expense1', kind: 'expense', attr: { amount: 5000, status: 'OPEN' } },
+  reqId: 'optional-correlation-id', // optional
+});
+```
+
+### `kerberos.checkResources(args, effectAsBoolean = false) => Promise<CheckResourcesResponse>`
+
+Evaluates **multiple resources and actions** in a single request.
+
+- `args.principal` — the principal (`id`, `roles`, optional `policyVersion`, `scope`, `attr`).
+- `args.resources` — array of `{ resource, actions }` entries.
+- `args.reqId` — optional correlation id echoed in the response and logs.
+- `args.includeMeta` — when `true`, includes evaluation [metadata](#metadata).
+- `effectAsBoolean` — when `true`, action results are `true`/`false` instead of `EFFECT_ALLOW`/`EFFECT_DENY`.
+
+```javascript
+const response = await kerberos.checkResources({
+  principal: { id: 'user1', roles: ['USER'] },
+  resources: [{ resource: { id: 'expense1', kind: 'expense' }, actions: ['view', 'create'] }],
+});
+// {
+//   kerberosCallId: 'b9c4362d-…',          // always present, for audit correlation
+//   reqId: '…',                            // present only if provided in the request
+//   results: [{ resource, actions, outputs, meta? }],
+// }
+```
+
+### Exports
+
+| Export | Purpose |
+| ------ | ------- |
+| `Kerberos` | Main authorization engine. |
+| `Effect` | `{ Allow: 'EFFECT_ALLOW', Deny: 'EFFECT_DENY' }`. |
+| `ResourcePolicy`, `PrincipalPolicy`, `RolePolicy`, `DerivedRoles` | Policy classes (rarely constructed directly). |
+| `Conditions`, `Variables`, `Constants`, `Outputs` | DSL building blocks. |
+| `createSafeExprCodec`, `serializePolicy`, `deserializePolicy` | Safe AST codec for [dynamic/stored policies](#caching--storing-policies). |
+| `registerAjvKeywords`, `createAjvAdapter` | [Validation](#schema-validation) helpers. |
+| `JsonSchemas`, `TypeBoxSchemas`, `ZodSchemas`, `KerberosJsonSchemas`, `ResourcePolicyJsonSchemas`, `PrincipalPolicyJsonSchemas`, `RolePolicyJsonSchemas`, … | Schema builders for the three backends. |
+| `Tests` | Built-in [test harness](#testing). |
 
 ## Policy Types
 
@@ -556,7 +638,7 @@ The output `src` field reflects the policy type that produced it:
 - Resource policy example: `resource.expense.vdefault#rule-name`
 - Principal policy example: `principal.sally.vdefault#rule-name`
 
-### Using Scopes and Policy Versions
+## Scopes and Policy Versions
 
 Kerberos.js supports scoped policies and policy versions, allowing you to organize policies for different environments or versions.
 
@@ -613,7 +695,7 @@ const results = await kerberos.checkResources({
 });
 ```
 
-### Using Metadata
+## Metadata
 
 When `includeMeta: true` is set, the response includes additional metadata about policy evaluation:
 
@@ -1072,7 +1154,15 @@ describe('Outputs functionality', () => {
 });
 ```
 
-### Used by
+## Changelog
+
+See [CHANGELOG.md](./CHANGELOG.md) for the full history of changes, including the `1.0.0 → 2.0.0` upgrade notes.
+
+## License
+
+[MIT](./LICENSE)
+
+## Used by
 
 <table style="text-align:center;">
 <tr>
