@@ -24,23 +24,17 @@ class KerberosTests {
     return parsedTests;
   }
 
-  static parsePrincipals(principals, options = {}) {
-    return principals instanceof PrincipalsMock ? principals.mocks : new PrincipalsMock(principals, options).mocks;
+  static buildPrincipalsMock(principals, options = {}) {
+    return principals instanceof PrincipalsMock ? principals : new PrincipalsMock(principals, options);
   }
 
-  static parseResources(resources, options = {}) {
-    return resources instanceof ResourcesMock ? resources.mocks : new ResourcesMock(resources, options).mocks;
+  static buildResourcesMock(resources, options = {}) {
+    return resources instanceof ResourcesMock ? resources : new ResourcesMock(resources, options);
   }
 
   #kerberos = null;
 
-  #policies = [];
-
   #policyGroups = [];
-
-  #principals = null;
-
-  #resources = null;
 
   /**
    * @param {Kerberos} kerberos
@@ -50,16 +44,15 @@ class KerberosTests {
   constructor(kerberos, policies, options = {}) {
     if (!kerberos || !(kerberos instanceof Kerberos)) throw new Error('Kerberos instance is required');
     this.#kerberos = kerberos;
-    this.#policies = KerberosTests.parsePolicies(policies, options);
-    for (const policy of this.#policies) {
-      this.#policyGroups.push({ policy, tests: KerberosTests.parseTests(policy.tests, kerberos, options) });
+    const parsedPolicies = KerberosTests.parsePolicies(policies, options);
+    for (const policy of parsedPolicies) {
+      this.#policyGroups.push({
+        policy,
+        tests: KerberosTests.parseTests(policy.tests, kerberos, options),
+        principals: KerberosTests.buildPrincipalsMock(policy.principals, options),
+        resources: KerberosTests.buildResourcesMock(policy.resources, options),
+      });
     }
-    const principals = [];
-    for (const policy of this.#policies) principals.push(...KerberosTests.parsePrincipals(policy.principals, options));
-    this.#principals = new PrincipalsMock(principals, options);
-    const resources = [];
-    for (const policy of this.#policies) resources.push(...KerberosTests.parseResources(policy.resources, options));
-    this.#resources = new ResourcesMock(resources, options);
   }
 
   /**
@@ -70,14 +63,14 @@ class KerberosTests {
    * @returns {void}
    */
   run({ effectAsBoolean = false }, { describe, it, assert }) {
-    for (const { policy, tests } of this.#policyGroups) {
+    for (const { policy, tests, principals, resources } of this.#policyGroups) {
       describe(policy.name, () => {
         for (const test of tests) {
           test.run(
             {
               kerberos: this.#kerberos,
-              principals: [this.#principals],
-              resources: [this.#resources],
+              principals: [principals],
+              resources: [resources],
               effectAsBoolean,
             },
             { describe, it, assert }
