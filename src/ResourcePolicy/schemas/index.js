@@ -169,9 +169,18 @@ class ResourcePolicyTypeBoxSchemas extends TypeBoxSchemas {
           ])
         ),
       }),
+      // `roles` and `derivedRoles` are mutually exclusive: each branch requires
+      // one and forbids the other (`Never` rejects the property if present), so
+      // this matches the Zod/JSON Schema invariant instead of a loose `anyOf`.
       t.Union([
-        t.Object({ roles: TypeBoxSchemas.buildNonEmptyArrayShape(t, t.Union([t.String(), t.Literal(ALL_ACTIONS)])) }),
-        t.Object({ derivedRoles: TypeBoxSchemas.buildNonEmptyArrayShape(t, t.String()) }),
+        t.Object({
+          roles: TypeBoxSchemas.buildNonEmptyArrayShape(t, t.Union([t.String(), t.Literal(ALL_ACTIONS)])),
+          derivedRoles: t.Optional(t.Never()),
+        }),
+        t.Object({
+          derivedRoles: TypeBoxSchemas.buildNonEmptyArrayShape(t, t.String()),
+          roles: t.Optional(t.Never()),
+        }),
       ]),
     ]);
   }

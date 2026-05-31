@@ -97,7 +97,10 @@ class PrincipalPolicy {
 
     for (const action of reqWithVariables.actions) {
       // Replace the per-action effects array + double `includes` with flags.
+      // A Deny rule pins the matched rule (Deny wins), otherwise the latest
+      // fulfilled Allow rule is recorded.
       let matchedRule = null;
+      let matchedRuleIsDeny = false;
       let matched = false;
       let hasDeny = false;
       let hasAllow = false;
@@ -116,15 +119,20 @@ class PrincipalPolicy {
 
           if (actionRule.output) {
             const output = actionRule.output.build(reqWithVariables, isConditionFulfilled, metaSrc);
-            outputs.set(output.src, output);
+            if (output) outputs.set(output.src, output);
           }
 
           if (!isConditionFulfilled) continue;
 
           matched = true;
-          if (actionRule.effect === Effect.Deny) hasDeny = true;
-          else if (actionRule.effect === Effect.Allow) hasAllow = true;
-          matchedRule = metaSrc;
+          if (actionRule.effect === Effect.Deny) {
+            hasDeny = true;
+            matchedRule = metaSrc;
+            matchedRuleIsDeny = true;
+          } else if (actionRule.effect === Effect.Allow) {
+            hasAllow = true;
+            if (!matchedRuleIsDeny) matchedRule = metaSrc;
+          }
         }
       }
 

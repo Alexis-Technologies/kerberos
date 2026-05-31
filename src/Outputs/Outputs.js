@@ -35,7 +35,7 @@ class Outputs {
    * @param {Record<string, unknown>} req
    * @param {boolean} isConditionFulfilled
    * @param {string} src
-   * @returns {{ src: string, val: unknown }}
+   * @returns {{ src: string, val: unknown } | null}
    */
   build(req, isConditionFulfilled, src) {
     try {
@@ -49,7 +49,11 @@ class Outputs {
         outputFunction = this.#shape.when.conditionNotMet;
       }
 
-      return { src, val: outputFunction?.(req) ?? null };
+      // No output branch configured for this activation state: emit nothing so
+      // callers don't surface spurious `{ val: null }` outputs.
+      if (!outputFunction) return null;
+
+      return { src, val: outputFunction(req) ?? null };
     } catch (error) {
       // If output function fails, add error information
       return { src, val: { error: 'Output function evaluation failed', message: error.message } };

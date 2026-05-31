@@ -87,19 +87,19 @@ describe('Outputs functionality', () => {
       assert.ok(results.results[0].outputs);
       assert.ok(Array.isArray(results.results[0].outputs));
 
-      // Since the working-hours rule should trigger (assuming we're in working hours),
-      // we should get an output
-      if (results.results[0].outputs.length > 0) {
-        const output = results.results[0].outputs[0];
-        assert.ok(output.src);
-        assert.ok(output.val);
-        assert.strictEqual(output.src, 'resource.system_access.vdefault#working-hours-only');
-        assert.ok(output.val.principal);
-        assert.strictEqual(output.val.principal, 'john');
-        assert.strictEqual(output.val.resource, 'bastion_002');
-        assert.ok(output.val.timestamp);
-        assert.ok(output.val.message);
-      }
+      // The working-hours rule applies to every principal (roles: ['*']) and
+      // defines both `ruleActivated` and `conditionNotMet` branches, so it
+      // always emits an output regardless of the current time. Both branches
+      // share the same principal/resource/timestamp/message shape.
+      const output = results.results[0].outputs.find(
+        (o) => o.src === 'resource.system_access.vdefault#working-hours-only'
+      );
+      assert.ok(output, 'expected the working-hours output to be present');
+      assert.ok(output.val);
+      assert.strictEqual(output.val.principal, 'john');
+      assert.strictEqual(output.val.resource, 'bastion_002');
+      assert.ok(output.val.timestamp);
+      assert.ok(output.val.message);
     });
 
     it('should return outputs for admin access', async () => {
@@ -120,11 +120,12 @@ describe('Outputs functionality', () => {
         output.src === 'resource.system_access.vdefault#admin-access'
       );
 
-      if (adminOutput) {
-        assert.ok(adminOutput.val.message);
-        assert.strictEqual(adminOutput.val.message, 'Admin access granted');
-        assert.strictEqual(adminOutput.val.admin, 'alice');
-      }
+      // The admin-access rule matches the admin principal and has no condition,
+      // so its `ruleActivated` output must always be emitted.
+      assert.ok(adminOutput, 'expected the admin-access output to be present');
+      assert.ok(adminOutput.val.message);
+      assert.strictEqual(adminOutput.val.message, 'Admin access granted');
+      assert.strictEqual(adminOutput.val.admin, 'alice');
     });
 
     it('should handle empty outputs when no rules have output expressions', async () => {

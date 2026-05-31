@@ -47,8 +47,9 @@ class Kerberos {
   static generateCallId() {
     // Try Node.js crypto.randomUUID first
     if (nodeCrypto?.randomUUID) return nodeCrypto.randomUUID();
-    // Try Browser crypto.randomUUID
-    if (window?.crypto?.randomUUID) return window.crypto.randomUUID();
+    // Try the global Web Crypto (browser / modern Node). `globalThis` is always
+    // declared, so this never throws ReferenceError when `window` is undefined.
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
     // Fall back to pseudo UUID v4-like generator
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
       const r = (Math.random() * 16) | 0;

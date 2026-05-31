@@ -59,21 +59,31 @@ class ConditionsJsonSchemas extends JsonSchemas {
     return JsonSchemas.buildFunctionShape();
   }
 
-  static buildConditionMatchShape() {
+  static buildConditionStrategyObject(itemSchema) {
     return {
-      anyOf: [
-        ConditionsJsonSchemas.buildConditionSingleMatchExpr(),
-        {
-          type: 'object',
-          properties: {
-            any: JsonSchemas.buildNonEmptyArrayShape(true),
-            all: JsonSchemas.buildNonEmptyArrayShape(true),
-            none: JsonSchemas.buildNonEmptyArrayShape(true),
-          },
-          additionalProperties: false,
-          minProperties: 1,
-        },
-      ],
+      type: 'object',
+      properties: {
+        any: JsonSchemas.buildNonEmptyArrayShape(itemSchema),
+        all: JsonSchemas.buildNonEmptyArrayShape(itemSchema),
+        none: JsonSchemas.buildNonEmptyArrayShape(itemSchema),
+      },
+      additionalProperties: false,
+      minProperties: 1,
+    };
+  }
+
+  static buildConditionMatchShape() {
+    // Plain JSON Schema can't safely self-reference here (a shared `$id` would
+    // collide when this builder is embedded in multiple policy schemas on the
+    // same Ajv instance), so nested condition entries are validated to a
+    // bounded depth. This still rejects non-condition primitives such as
+    // `{ all: [42] }`, which `items: true` previously let through only to fail
+    // later inside `Conditions.isFulfilled`.
+    const matchExpr = ConditionsJsonSchemas.buildConditionSingleMatchExpr();
+    const leaf = { anyOf: [matchExpr, { type: 'object', minProperties: 1 }] };
+    const nested = { anyOf: [matchExpr, ConditionsJsonSchemas.buildConditionStrategyObject(leaf)] };
+    return {
+      anyOf: [matchExpr, ConditionsJsonSchemas.buildConditionStrategyObject(nested)],
     };
   }
 

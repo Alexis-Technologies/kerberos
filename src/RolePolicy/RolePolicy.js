@@ -110,7 +110,7 @@ class RolePolicy {
 
         if (rule.output) {
           const output = rule.output.build(reqWithVariables, isConditionFulfilled, metaSrc);
-          outputs.set(output.src, output);
+          if (output) outputs.set(output.src, output);
         }
 
         if (!isConditionFulfilled) continue;

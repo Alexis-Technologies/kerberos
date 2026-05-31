@@ -126,6 +126,10 @@ class ResourcePolicy {
       // `includes` twice; Deny still wins over Allow.
       let hasDeny = false;
       let hasAllow = false;
+      // Record the rule that determines the final effect: a Deny rule pins the
+      // matched rule (Deny wins), otherwise the latest fulfilled Allow rule.
+      let matchedRuleSrc = null;
+      let matchedRuleIsDeny = false;
       meta.actions[action] = { matchedPolicy: metaSrcBase };
 
       for (let i = 0; i < rules.length; i++) {
@@ -133,11 +137,11 @@ class ResourcePolicy {
         // Checking if the rule applies to the action
         if (!rule.actions.includes(ALL_ACTIONS) && !rule.actions.includes(action)) continue;
 
-        // Checking if the roles match
+        // Checking if the roles match (`*` is the wildcard role and matches any principal)
         let rolesMatch = false;
         if (Array.isArray(rule.roles)) {
           for (const role of rule.roles) {
-            if (principalRoles.has(role)) {
+            if (role === ALL_ACTIONS || principalRoles.has(role)) {
               rolesMatch = true;
               break;
             }
@@ -160,18 +164,29 @@ class ResourcePolicy {
         const isConditionFulfilled = rule.condition ? rule.condition.isFulfilled(reqWithVariables) : true;
         const metaSrc = `${metaSrcBase}#${rule.name || 'UNNAMED_RULE' + `_${i + 1}`}`;
 
-        // Build outputs based on rule activation and condition fulfillment
+        // Build outputs based on rule activation and condition fulfillment.
+        // `build` returns null when the rule has no output branch for the
+        // current activation state, so we don't emit spurious null outputs.
         if (rule.output) {
           const output = rule.output.build(reqWithVariables, isConditionFulfilled, metaSrc);
-          outputs.set(output.src, output);
+          if (output) outputs.set(output.src, output);
         }
 
         if (isConditionFulfilled) {
-          if (rule.effect === Effect.Deny) hasDeny = true;
-          else if (rule.effect === Effect.Allow) hasAllow = true;
-          meta.actions[action].matchedRule = metaSrc;
-          if (this.scope) meta.actions[action].matchedScope = this.scope;
+          if (rule.effect === Effect.Deny) {
+            hasDeny = true;
+            matchedRuleSrc = metaSrc;
+            matchedRuleIsDeny = true;
+          } else if (rule.effect === Effect.Allow) {
+            hasAllow = true;
+            if (!matchedRuleIsDeny) matchedRuleSrc = metaSrc;
+          }
         }
+      }
+
+      if (matchedRuleSrc !== null) {
+        meta.actions[action].matchedRule = matchedRuleSrc;
+        if (this.scope) meta.actions[action].matchedScope = this.scope;
       }
 
       // Deny wins; otherwise Allow; otherwise default Deny.
