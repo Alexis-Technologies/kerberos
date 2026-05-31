@@ -75,7 +75,7 @@
     "lint",
     "test"
   ],
-  "packageManager": "pnpm@10.10.0",
+  "packageManager": "pnpm@11.5.0",
   "files": [
     "index.js",
     "index.d.ts",
