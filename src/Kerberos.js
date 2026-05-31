@@ -194,7 +194,8 @@ class Kerberos {
 
   #cache = createCacheReader(null);
 
-  #codec = createSafeExprCodec();
+  /** @type {((json: unknown) => unknown) | null} */
+  #codecDeserialize = null;
 
   #z = null;
 
@@ -266,7 +267,14 @@ class Kerberos {
 
     this.#logger = createLoggerWriter(logger);
     this.#cache = createCacheReader(cache);
-    this.#codec = codec ?? createSafeExprCodec();
+
+    if (codec?.deserialize) {
+      this.#codecDeserialize = (value) => codec.deserialize(value);
+    } else if (codec?.jsep) {
+      const builtinCodec = createSafeExprCodec({ jsep: codec.jsep });
+      this.#codecDeserialize = (value) => builtinCodec.deserialize(value);
+    }
+
     if (typeof getCallId === 'function') this.#getCallId = getCallId;
   }
 
@@ -286,7 +294,7 @@ class Kerberos {
     if (!this.#cache.enabled) return null;
     const value = await this.#cache.get(key);
     if (value === undefined || value === null) return null;
-    const shape = this.#codec.deserialize(value);
+    const shape = this.#codecDeserialize ? this.#codecDeserialize(value) : value;
     return build(shape);
   }
 

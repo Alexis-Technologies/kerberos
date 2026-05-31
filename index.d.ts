@@ -411,14 +411,22 @@ export type CacheLike = {
 
 /**
  * Pluggable codec used to (de)serialize dynamic policy documents stored in a
- * remote cache. The default codec (`createSafeExprCodec`) keeps conditions,
- * variables and outputs as `{ $expr: string }` descriptors and evaluates them
- * with an AST allowlist interpreter (no `eval` / `new Function`).
+ * remote cache.
+ *
+ * Three usage modes (controlled by which fields you supply):
+ *
+ * 1. `{ jsep }` — pass a pre-configured jsep instance; Kerberos uses the
+ *    built-in AST allowlist interpreter (no `eval` / `new Function`).
+ * 2. `{ deserialize }` — fully custom deserialization function.
+ * 3. Omit `codec` entirely — cached values are passed to policy constructors
+ *    as-is (no `{ $expr }` transformation; assume plain JSON).
  */
 export type PolicyExprDescriptor = { $expr: string };
 export type PolicyCodec = {
-  serialize(policyShape: unknown): unknown;
-  deserialize(jsonSafe: unknown): unknown;
+  /** Pre-configured jsep callable (with plugins already registered). */
+  jsep?: (expr: string) => unknown;
+  serialize?(policyShape: unknown): unknown;
+  deserialize?(jsonSafe: unknown): unknown;
   compileExpr?(expr: string): (ctx: Record<string, unknown>) => unknown;
   isExprDescriptor?(value: unknown): boolean;
 };
@@ -427,12 +435,45 @@ export class KerberosExprError extends Error {
   name: 'KerberosExprError';
 }
 
-export function createSafeExprCodec(options?: { roots?: string[] }): PolicyCodec & {
+/**
+ * Creates the built-in security-first policy codec.
+ *
+ * Requires a pre-configured `jsep` instance (analogous to how `ajv` is
+ * passed to `new Kerberos(...)`). The caller is responsible for registering
+ * any jsep plugins before passing the instance.
+ *
+ * ```ts
+ * import jsep from 'jsep';
+ * import jsepObject from '@jsep-plugin/object';
+ * import jsepTernary from '@jsep-plugin/ternary';
+ * import jsepNew from '@jsep-plugin/new';
+ *
+ * jsep.plugins.register(jsepObject, jsepTernary, jsepNew);
+ * jsep.addUnaryOp('typeof');
+ *
+ * const codec = createSafeExprCodec({ jsep });
+ * const kerberos = new Kerberos([], [], { cache, codec: { jsep } });
+ * ```
+ */
+export function createSafeExprCodec(options: { jsep: (expr: string) => unknown; roots?: string[] }): PolicyCodec & {
   isExprDescriptor(value: unknown): boolean;
   compileExpr(expr: string): (ctx: Record<string, unknown>) => unknown;
+  serialize(policyShape: unknown): unknown;
+  deserialize(jsonSafe: unknown): unknown;
 };
-export function serializePolicy(shape: unknown): unknown;
-export function deserializePolicy(json: unknown, codec?: PolicyCodec): unknown;
+
+/**
+ * Serializes a policy/derived-roles shape into a JSON-safe document.
+ * Throws `KerberosExprError` if any raw JS function is encountered.
+ * Pass `{ jsep }` to also validate each `{ $expr }` string via full AST parse.
+ */
+export function serializePolicy(shape: unknown, options?: { jsep?: (expr: string) => unknown }): unknown;
+
+/**
+ * Deserializes a JSON-safe policy/derived-roles document using the provided codec.
+ * Requires `codec.deserialize` (e.g. from `createSafeExprCodec({ jsep })`).
+ */
+export function deserializePolicy(json: unknown, codec: PolicyCodec): unknown;
 
 export type KerberosOptions = ValidationOptions & {
   logger?: KerberosLogger | boolean;

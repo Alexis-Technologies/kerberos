@@ -700,7 +700,7 @@ Static policies passed to the constructor stay in memory and are always checked 
 
 1. Resolve the policy by `kind` / `id` / `role` + `policyVersion` + scope chain in memory.
 2. On a miss, and only if a `cache` is configured, call `await cache.get(key)` for each scope in the chain.
-3. On a hit, the JSON document is passed through `codec.deserialize(...)` and rebuilt into a policy instance.
+3. On a hit, the JSON document is handled according to the `codec` option (see below).
 4. If nothing matches, the action falls back to `EFFECT_DENY` (unchanged behavior).
 
 Cache keys follow this layout:
@@ -722,6 +722,22 @@ The only requirement is a single `get` method, so any cache backend works:
 type CacheLike = {
   get(key: string): unknown | Promise<unknown>;
 };
+```
+
+### `codec` option — three modes
+
+The `codec` option controls how a value returned from the cache is transformed before being passed to the policy constructor:
+
+| Provided option | Behaviour |
+| --------------- | --------- |
+| `codec: { jsep }` | Kerberos uses the **built-in AST allowlist evaluator** with the pre-configured `jsep` instance you supply. `{ $expr: "..." }` descriptors are resolved into runtime evaluator functions. |
+| `codec: { deserialize }` | Your own **custom deserialization** function is called on the raw cached value. |
+| *(omit `codec`)* | The cached value is **passed as-is** to the policy constructor — no `{ $expr }` transformation. Use this when your stored JSON documents don't contain expression descriptors (e.g. plain rules with static `effect` and `roles`). |
+
+> **`jsep` is not a dependency of `@alexify/kerberos`.** It is deliberately kept out so you only pay for it when you need expression-based policies. Install it (and any plugins) separately and pass the instance to Kerberos.
+
+```bash
+npm install jsep @jsep-plugin/object @jsep-plugin/ternary @jsep-plugin/new
 ```
 
 ### Dynamic policy format
@@ -792,17 +808,25 @@ Example: a time-window condition (equivalent to the in-memory expense delete rul
 
 ```javascript
 import { Keyv } from 'keyv';
+import jsep from 'jsep';
+import jsepObject from '@jsep-plugin/object';
+import jsepTernary from '@jsep-plugin/ternary';
+import jsepNew from '@jsep-plugin/new';
 import { Kerberos, serializePolicy } from '@alexify/kerberos';
+
+// 1. Configure jsep once — register plugins and any extra unary operators.
+jsep.plugins.register(jsepObject, jsepTernary, jsepNew);
+jsep.addUnaryOp('typeof');
 
 const keyv = new Keyv();
 
-// Store dynamic policies as JSON documents.
+// 2. Serialize policies into JSON-safe documents (validates $expr ASTs via jsep).
 await keyv.set('derivedRoles:doc_roles', serializePolicy({
   name: 'doc_roles',
   definitions: [
     { name: 'OWNER', parentRoles: ['USER'], condition: { match: { $expr: 'R.attr.ownerId == P.id' } } },
   ],
-}));
+}, { jsep }));
 
 await keyv.set('resource:document:default:', serializePolicy({
   resourcePolicy: {
@@ -813,10 +837,10 @@ await keyv.set('resource:document:default:', serializePolicy({
       { actions: ['view'], effect: 'EFFECT_ALLOW', derivedRoles: ['OWNER'] },
     ],
   },
-}));
+}, { jsep }));
 
-// No static policies: everything is resolved from the cache on demand.
-const kerberos = new Kerberos([], [], { cache: keyv });
+// 3. Pass the same jsep instance so Kerberos can evaluate $expr at runtime.
+const kerberos = new Kerberos([], [], { cache: keyv, codec: { jsep } });
 
 const allowed = await kerberos.isAllowed({
   principal: { id: 'u1', roles: ['USER'] },
@@ -826,7 +850,7 @@ const allowed = await kerberos.isAllowed({
 // -> true
 ```
 
-`serializePolicy(...)` validates every `{ $expr }` and returns a JSON-safe document. You can also store hand-written JSON directly.
+`serializePolicy(shape, { jsep })` validates every `{ $expr }` string via full AST parse and returns a JSON-safe document. Passing `{ jsep }` is optional — without it the function still rejects raw JS functions but skips AST validation (expressions are validated at deserialize time instead). You can also store hand-written JSON directly.
 
 ### Example 2: Keyv + Cacheable + Qified (recommended for multi-host invalidation)
 
@@ -843,7 +867,15 @@ import { Cacheable } from 'cacheable';
 import { createKeyv } from '@keyv/redis';
 import { Qified } from 'qified';
 import { createQified } from '@qified/redis';
+import jsep from 'jsep';
+import jsepObject from '@jsep-plugin/object';
+import jsepTernary from '@jsep-plugin/ternary';
+import jsepNew from '@jsep-plugin/new';
 import { Kerberos } from '@alexify/kerberos';
+
+// Configure jsep once per process.
+jsep.plugins.register(jsepObject, jsepTernary, jsepNew);
+jsep.addUnaryOp('typeof');
 
 // Layer 2 (distributed) storage + layer 1 (in-process) cache.
 const secondary = createKeyv('redis://localhost:6379');
@@ -857,7 +889,7 @@ const cacheable = new Cacheable({
   cacheSync, // distributed invalidation via qified pub/sub
 });
 
-const kerberos = new Kerberos([], [], { cache: cacheable });
+const kerberos = new Kerberos([], [], { cache: cacheable, codec: { jsep } });
 
 // Reads transparently use layer 1 -> layer 2; writes/invalidations are handled
 // by cacheable + qified, not by Kerberos.
@@ -876,22 +908,44 @@ Kerberos deliberately does **not** serialize raw JavaScript function bodies and 
 - `fn.toString()` produces engine/bundler-specific output (V8 vs SpiderMonkey, Babel/esbuild/SWC, `[native code]`), which silently breaks serialization across environments.
 - Re-`eval`ing on every cache hit pays a JIT-compilation cost exactly when load is highest.
 
-Instead, the default codec (`createSafeExprCodec`) uses an **AST allowlist interpreter** built on the tiny, eval-free [`jsep`](https://ericsmekens.github.io/jsep/) parser:
+Instead, the built-in codec (`createSafeExprCodec({ jsep })`) uses an **AST allowlist interpreter** built on the tiny, eval-free [`jsep`](https://ericsmekens.github.io/jsep/) parser:
 
-1. Each `{ $expr }` string is parsed **once** into an AST, which is cached by expression string (`parse-once`).
+1. Each `{ $expr }` string is parsed **once** into an AST via your `jsep` instance, which is cached per (jsep instance, expression string) pair (`parse-once`).
 2. Evaluation walks the AST per request with a strict allowlist — no `eval`, no `new Function`, no recompilation.
 3. Identifiers resolve **only** against the `{ P, R, V, C }` context and curated safe builtins (`Math`, `Date`, `parseInt`, `parseFloat`, ... — so `constructor`, `process`, `require`, `globalThis` simply do not exist as roots). Member keys `__proto__` / `prototype` / `constructor` are blocked at the interpreter level regardless of how they are written. Method calls are limited to a whitelist of safe helpers on string/array/number/`Date` values, plus `Math.*` / `Date.*` static methods. Only `new Date(...)` is permitted as a constructor.
 4. This keeps remote policies expressive (comparisons, logic, ternaries, member access, object/array literals, time windows via `Date`, numeric helpers via `Math`, parsing via `parseInt`/`parseFloat`) while remaining non-Turing-complete and safe to load from a shared store.
 
-### Using a custom codec
-
-The codec is pluggable. If you need different semantics you can supply your own `{ serialize, deserialize }`:
+**`jsep` is not bundled** — you install it separately and pass the pre-configured instance, the same way you pass `ajv` for schema validation. This keeps `@alexify/kerberos` itself zero-dependency.
 
 ```javascript
-const kerberos = new Kerberos([], [], { cache, codec: myCodec });
+// Using the full createSafeExprCodec helper (serialize + deserialize):
+import { createSafeExprCodec, serializePolicy } from '@alexify/kerberos';
+
+const codec = createSafeExprCodec({ jsep });
+
+// Serialize before storing:
+await redis.set('resource:document:default:', JSON.stringify(codec.serialize(policyShape)));
+
+// Kerberos deserializes automatically when codec.jsep (or codec.deserialize) is set:
+const kerberos = new Kerberos([], [], { cache, codec });
+// equivalently: codec: { jsep } — Kerberos creates the built-in evaluator internally
+```
+
+### Using a custom codec
+
+The codec is fully pluggable. Supply `{ deserialize }` to use your own deserialization logic:
+
+```javascript
+const kerberos = new Kerberos([], [], { cache, codec: { deserialize: myDeserializeFn } });
 ```
 
 Other eval-free options such as [`jexl`](https://github.com/TomFrost/jexl) or [`cel-js`](https://www.npmjs.com/package/cel-js) (CEL, the same expression language Cerbos uses) are good fits. Function-serializing libraries like `serialize-javascript` can also be wrapped, but only if you fully trust the store and accept the `eval`-based trust boundary they require.
+
+To skip deserialization entirely (e.g. your cached documents are already plain JSON without `{ $expr }` descriptors), simply omit `codec`:
+
+```javascript
+const kerberos = new Kerberos([], [], { cache }); // values passed as-is to policy constructors
+```
 
 ## Testing
 

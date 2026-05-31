@@ -4,8 +4,25 @@ const { Keyv } = require('keyv');
 
 const { Effect, Kerberos, createSafeExprCodec, serializePolicy, deserializePolicy, KerberosExprError } = require('../src/index.js');
 
-// Dynamic policies are authored as JSON-safe documents: conditions, variables
-// and outputs are `{ $expr }` string descriptors instead of JS functions.
+// ---------------------------------------------------------------------------
+// Shared jsep instance — configured once with all plugins for the test suite.
+// In production code this is the caller's responsibility (analogous to ajv).
+// ---------------------------------------------------------------------------
+const jsepModule = require('jsep');
+const jsep = jsepModule.default || jsepModule;
+jsep.plugins.register(
+  require('@jsep-plugin/object'),
+  require('@jsep-plugin/ternary'),
+  require('@jsep-plugin/new'),
+);
+jsep.addUnaryOp('typeof');
+
+// A codec instance shared across tests.
+const codec = createSafeExprCodec({ jsep });
+
+// ---------------------------------------------------------------------------
+// Dynamic policies expressed as JSON-safe { $expr } documents.
+// ---------------------------------------------------------------------------
 const dynamicDerivedRoles = {
   name: 'doc_roles',
   definitions: [
@@ -50,10 +67,11 @@ const admin = { id: 'root', roles: ['ADMIN'] };
 const openDoc = { id: 'doc1', kind: 'document', attr: { ownerId: 'u1', status: 'OPEN' } };
 const closedDoc = { id: 'doc2', kind: 'document', attr: { ownerId: 'u1', status: 'CLOSED' } };
 
+// Serialize with AST validation (jsep provided).
 async function buildCache() {
   const keyv = new Keyv();
-  await keyv.set('resource:document:default:', serializePolicy(dynamicResourcePolicy));
-  await keyv.set('derivedRoles:doc_roles', serializePolicy(dynamicDerivedRoles));
+  await keyv.set('resource:document:default:', serializePolicy(dynamicResourcePolicy, { jsep }));
+  await keyv.set('derivedRoles:doc_roles', serializePolicy(dynamicDerivedRoles, { jsep }));
   return keyv;
 }
 
@@ -63,7 +81,8 @@ describe('Caching / Storing policies', () => {
 
     beforeEach(async () => {
       // No in-memory policies: everything must be resolved from the cache.
-      kerberos = new Kerberos([], [], { cache: await buildCache() });
+      // Pass codec.jsep so Kerberos uses the built-in AST evaluator.
+      kerberos = new Kerberos([], [], { cache: await buildCache(), codec: { jsep } });
     });
 
     it('resolves a resource policy + derived roles from the cache', async () => {
@@ -101,7 +120,7 @@ describe('Caching / Storing policies', () => {
 
   describe('codec round-trip', () => {
     it('serializes a { $expr } shape into a JSON-safe document', () => {
-      const json = serializePolicy(dynamicResourcePolicy);
+      const json = serializePolicy(dynamicResourcePolicy, { jsep });
       assert.strictEqual(JSON.parse(JSON.stringify(json)).resourcePolicy.resource, 'document');
       assert.deepStrictEqual(
         json.resourcePolicy.rules[1].derivedRoles,
@@ -109,13 +128,17 @@ describe('Caching / Storing policies', () => {
       );
     });
 
+    it('serializes without jsep (structural check only, no AST validation)', () => {
+      const json = serializePolicy(dynamicResourcePolicy);
+      assert.strictEqual(json.resourcePolicy.resource, 'document');
+    });
+
     it('deserializes { $expr } descriptors into callable evaluators', () => {
-      const codec = createSafeExprCodec();
       const evaluate = codec.compileExpr('R.attr.ownerId == P.id');
       assert.strictEqual(evaluate({ R: { attr: { ownerId: 'u1' } }, P: { id: 'u1' } }), true);
       assert.strictEqual(evaluate({ R: { attr: { ownerId: 'u1' } }, P: { id: 'u2' } }), false);
 
-      const shape = deserializePolicy(serializePolicy(dynamicDerivedRoles));
+      const shape = deserializePolicy(serializePolicy(dynamicDerivedRoles), codec);
       assert.strictEqual(typeof shape.definitions[0].condition.match, 'function');
     });
 
@@ -125,11 +148,17 @@ describe('Caching / Storing policies', () => {
         KerberosExprError
       );
     });
+
+    it('accepts a full codec object (createSafeExprCodec result) as codec option', async () => {
+      // createSafeExprCodec returns an object with deserialize — Kerberos treats it
+      // as codec.deserialize (custom path), which produces the same result.
+      const fullCodec = createSafeExprCodec({ jsep });
+      const kerberos = new Kerberos([], [], { cache: await buildCache(), codec: fullCodec });
+      assert.strictEqual(await kerberos.isAllowed({ principal: owner, action: 'view', resource: openDoc }), true);
+    });
   });
 
   describe('safe language builtins (Date, Math, parseInt, ...)', () => {
-    const codec = createSafeExprCodec();
-
     it('supports new Date() and Date.now()', () => {
       const before = Date.now();
       const now = codec.compileExpr('Date.now()')({});
@@ -192,8 +221,8 @@ describe('Caching / Storing policies', () => {
       };
 
       const keyv = new Keyv();
-      await keyv.set('resource:expense:default:', serializePolicy(policy));
-      const kerberos = new Kerberos([], [], { cache: keyv });
+      await keyv.set('resource:expense:default:', serializePolicy(policy, { jsep }));
+      const kerberos = new Kerberos([], [], { cache: keyv, codec: { jsep } });
 
       const resource = { id: 'e1', kind: 'expense', attr: { createdAt: recentCreatedAt, status: 'OPEN' } };
       assert.strictEqual(await kerberos.isAllowed({ principal: owner, action: 'delete', resource }), true);
@@ -209,7 +238,6 @@ describe('Caching / Storing policies', () => {
   });
 
   describe('security: AST allowlist rejects dangerous expressions', () => {
-    const codec = createSafeExprCodec();
     const ctx = { P: { id: 'u1', roles: ['USER'] }, R: { attr: {} }, V: {}, C: {} };
 
     const vectors = [
@@ -255,7 +283,7 @@ describe('Caching / Storing policies', () => {
           ],
         },
       };
-      assert.throws(() => deserializePolicy(malicious), KerberosExprError);
+      assert.throws(() => deserializePolicy(malicious, codec), KerberosExprError);
     });
   });
 
@@ -280,11 +308,27 @@ describe('Caching / Storing policies', () => {
       const kerberos = new Kerberos([inMemory], [], { cache: keyv });
       assert.strictEqual(await kerberos.isAllowed({ principal: owner, action: 'view', resource: openDoc }), true);
     });
+
+    it('uses cached values as-is when no codec is provided (no $expr deserialization)', async () => {
+      // Plain JSON policies without $expr descriptors can be cached and restored
+      // without any codec — Kerberos passes the raw value to the policy constructor.
+      const policy = {
+        resourcePolicy: {
+          version: 'default',
+          resource: 'plain',
+          rules: [{ actions: ['read'], effect: Effect.Allow, roles: ['USER'] }],
+        },
+      };
+      const keyv = new Keyv();
+      await keyv.set('resource:plain:default:', policy);
+      const kerberos = new Kerberos([], [], { cache: keyv }); // no codec
+      const resource = { id: 'p1', kind: 'plain', attr: {} };
+      assert.strictEqual(await kerberos.isAllowed({ principal: owner, action: 'read', resource }), true);
+    });
   });
 
   describe('AST caching', () => {
     it('reuses the cached AST for repeated identical expressions', () => {
-      const codec = createSafeExprCodec();
       const a = codec.compileExpr('R.attr.ownerId == P.id');
       const b = codec.compileExpr('R.attr.ownerId == P.id');
       const ctx = { R: { attr: { ownerId: 'u1' } }, P: { id: 'u1' } };

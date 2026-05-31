@@ -1,10 +1,3 @@
-const jsepModule = require('jsep');
-const objectPlugin = require('@jsep-plugin/object');
-const ternaryPlugin = require('@jsep-plugin/ternary');
-const newPlugin = require('@jsep-plugin/new');
-
-const jsep = jsepModule.default || jsepModule;
-
 /**
  * Error thrown when an expression uses a construct that the safe evaluator
  * refuses to parse or evaluate.
@@ -47,9 +40,7 @@ const MATH_METHODS = new Set([
 ]);
 
 // Whitelisted `new` targets. Only simple Identifier callees are accepted.
-const ALLOWED_CONSTRUCTORS = {
-  Date,
-};
+const ALLOWED_CONSTRUCTORS = { Date };
 
 const DATE_STATIC_METHODS = new Set(['now', 'parse', 'UTC']);
 
@@ -76,18 +67,38 @@ const ALLOWED_GLOBALS = { Math, Date };
 
 const DEFAULT_ROOTS = ['P', 'R', 'V', 'C'];
 
-let jsepConfigured = false;
+// AST cache keyed by jsep instance so different instances (different plugins /
+// operators) get their own namespace. WeakMap ensures the cache is GC-able.
+const astCacheByJsep = new WeakMap();
 
-function configureJsep() {
-  if (jsepConfigured) return;
-  jsep.plugins.register(
-    objectPlugin.default || objectPlugin,
-    ternaryPlugin.default || ternaryPlugin,
-    newPlugin.default || newPlugin
-  );
-  // `typeof` is not a default jsep unary operator.
-  jsep.addUnaryOp('typeof');
-  jsepConfigured = true;
+/**
+ * Parses an expression once and caches the resulting AST keyed by both the
+ * jsep instance and the expression string.
+ *
+ * @param {string} expr
+ * @param {Function} jsepInstance  - a pre-configured jsep callable
+ * @returns {Record<string, unknown>}
+ */
+function parseExpr(expr, jsepInstance) {
+  if (typeof expr !== 'string') throw new KerberosExprError('Expression must be a string');
+
+  let cache = astCacheByJsep.get(jsepInstance);
+  if (!cache) {
+    cache = new Map();
+    astCacheByJsep.set(jsepInstance, cache);
+  }
+
+  if (cache.has(expr)) return cache.get(expr);
+
+  let ast;
+  try {
+    ast = jsepInstance(expr);
+  } catch (error) {
+    throw new KerberosExprError(`Failed to parse expression: ${error.message}`);
+  }
+  validateNode(ast);
+  cache.set(expr, ast);
+  return ast;
 }
 
 /**
@@ -155,33 +166,6 @@ function validateNode(node) {
     default:
       throw new KerberosExprError(`Unsupported expression node: ${node.type}`);
   }
-}
-
-const astCache = new Map();
-
-/**
- * Parses an expression once and caches the resulting AST keyed by the source
- * string, so repeated identical expressions never re-parse.
- *
- * @param {string} expr
- * @returns {Record<string, unknown>}
- */
-function parseExpr(expr) {
-  if (typeof expr !== 'string') throw new KerberosExprError('Expression must be a string');
-
-  const cached = astCache.get(expr);
-  if (cached) return cached;
-
-  configureJsep();
-  let ast;
-  try {
-    ast = jsep(expr);
-  } catch (error) {
-    throw new KerberosExprError(`Failed to parse expression: ${error.message}`);
-  }
-  validateNode(ast);
-  astCache.set(expr, ast);
-  return ast;
 }
 
 function safeKey(key) {
@@ -373,15 +357,17 @@ function deepTransform(value, handlers) {
 }
 
 /**
- * Creates the default, security-first policy codec.
+ * Creates the built-in security-first policy codec.
  *
- * It does NOT serialize JavaScript function bodies and never uses `eval` /
- * `new Function`. Dynamic policies express `conditions`, `variables` and
- * `outputs` as expression descriptors `{ "$expr": "R.attr.ownerId == P.id" }`.
- * Expressions are parsed once into a cached AST via `jsep` and interpreted by a
- * strict allowlist evaluator over the `{ P, R, V, C }` request context.
+ * Requires a pre-configured `jsep` instance (with plugins already registered)
+ * analogously to how `ajv` is passed to `new Kerberos(...)`.
  *
- * @param {{ roots?: string[] }} [options]
+ * Does NOT use `eval` / `new Function` / `fn.toString`. Dynamic policies express
+ * `conditions`, `variables` and `outputs` as `{ "$expr": "..." }` descriptors.
+ * Expressions are parsed once into a cached AST via the provided jsep instance
+ * and evaluated by a strict allowlist interpreter over `{ P, R, V, C }`.
+ *
+ * @param {{ jsep: Function, roots?: string[] }} options
  * @returns {{
  *   isExprDescriptor: (value: unknown) => boolean,
  *   compileExpr: (expr: string) => (ctx: Record<string, unknown>) => unknown,
@@ -389,11 +375,21 @@ function deepTransform(value, handlers) {
  *   deserialize: (jsonSafe: unknown) => unknown,
  * }}
  */
-function createSafeExprCodec(options = {}) {
-  const config = { roots: new Set(options.roots || DEFAULT_ROOTS) };
+function createSafeExprCodec({ jsep, roots } = {}) {
+  if (!jsep || typeof jsep !== 'function') {
+    throw new KerberosExprError(
+      'createSafeExprCodec({ jsep }) requires a pre-configured jsep instance. ' +
+      'Install jsep and its plugins, then pass the instance:\n' +
+      "  const jsep = require('jsep').default;\n" +
+      "  jsep.plugins.register(require('@jsep-plugin/object'), ...);\n" +
+      '  const codec = createSafeExprCodec({ jsep });'
+    );
+  }
+
+  const config = { roots: new Set(roots || DEFAULT_ROOTS) };
 
   function compileExpr(expr) {
-    const ast = parseExpr(expr);
+    const ast = parseExpr(expr, jsep);
     return (ctx) => evalNode(ast, ctx, config);
   }
 
@@ -404,8 +400,8 @@ function createSafeExprCodec(options = {}) {
 
   const serializeHandlers = {
     expr: (descriptor) => {
-      // Validate by parsing; throws on disallowed constructs.
-      parseExpr(descriptor.$expr);
+      // Full validation: parse and check AST via the provided jsep instance.
+      parseExpr(descriptor.$expr, jsep);
       return { $expr: descriptor.$expr };
     },
     func: () => {
@@ -428,28 +424,48 @@ function createSafeExprCodec(options = {}) {
   };
 }
 
-const defaultCodec = createSafeExprCodec();
-
 /**
- * Serializes a policy/derived-roles shape into a JSON-safe document using the
- * default safe codec. Throws if it encounters a raw function.
+ * Serializes a policy/derived-roles shape into a JSON-safe document.
+ *
+ * Throws `KerberosExprError` if any raw JavaScript function is encountered.
+ * Pass `{ jsep }` to also validate each `{ $expr }` string by full AST parse.
  *
  * @param {unknown} shape
+ * @param {{ jsep?: Function }} [options]
  * @returns {unknown}
  */
-function serializePolicy(shape) {
-  return defaultCodec.serialize(shape);
+function serializePolicy(shape, { jsep } = {}) {
+  const handlers = {
+    expr: (descriptor) => {
+      if (typeof descriptor.$expr !== 'string') throw new KerberosExprError('$expr must be a string');
+      if (jsep) parseExpr(descriptor.$expr, jsep);
+      return { $expr: descriptor.$expr };
+    },
+    func: () => {
+      throw new KerberosExprError(
+        'Cannot serialize a raw JavaScript function. Dynamic/remote policies must express conditions, ' +
+        'variables and outputs as { $expr: "..." } string descriptors (no eval / fn.toString).'
+      );
+    },
+  };
+  return deepTransform(shape, handlers);
 }
 
 /**
  * Deserializes a JSON-safe policy/derived-roles document into a runtime shape
- * (with compiled, sandboxed expression functions) using the default safe codec.
+ * using the provided codec.
  *
  * @param {unknown} json
- * @param {{ deserialize: (json: unknown) => unknown }} [codec]
+ * @param {{ deserialize: (json: unknown) => unknown }} codec
  * @returns {unknown}
  */
-function deserializePolicy(json, codec = defaultCodec) {
+function deserializePolicy(json, codec) {
+  if (!codec?.deserialize) {
+    throw new KerberosExprError(
+      'deserializePolicy requires a codec with a deserialize method. ' +
+      'Create one via createSafeExprCodec({ jsep }).'
+    );
+  }
   return codec.deserialize(json);
 }
 
