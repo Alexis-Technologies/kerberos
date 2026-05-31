@@ -14,4 +14,16 @@ describe('ResourceMock', () => {
     assert.equal(resource.kind, resourcesPolicy.expense1.kind);
     assert.deepEqual(resource.attr, resourcesPolicy.expense1.attr);
   });
+
+  it('should expose policyVersion and scope when provided', () => {
+    const resource = new ResourceMock({
+      ...resourcesPolicy.expense1,
+      name: 'expense1',
+      policyVersion: '20210210',
+      scope: 'acme.corp',
+    });
+
+    assert.strictEqual(resource.policyVersion, '20210210');
+    assert.strictEqual(resource.scope, 'acme.corp');
+  });
 });

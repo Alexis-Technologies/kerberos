@@ -54,24 +54,30 @@ class Conditions {
    * @param {unknown} [condition]
    * @returns {boolean}
    */
-  isFulfilled(req, condition = null) {
-    const cond = condition || this.#shape.match;
+  isFulfilled(req, condition = undefined) {
+    const cond = condition === undefined ? this.#shape.match : condition;
     if (typeof cond === 'function') return cond(req);
-    if (typeof cond !== 'object') throw new TypeError(`Invalid condition: ${cond}`);
+    // Fail closed on invalid nested leaves (e.g. `{ all: [false] }` without a
+    // validator). Using `||` here would treat falsy nested values as "missing"
+    // and recurse back to the root match, causing stack overflow.
+    if (typeof cond !== 'object' || cond === null) return false;
 
     const strategyKeys = Object.keys(cond);
     // Fail closed when no strategy is present (e.g. `{ match: {} }` without a
     // validation backend). An empty results set would otherwise vacuously
     // evaluate to `true` and turn a broken conditional rule into an unconditional match.
-    if (strategyKeys.length === 0) return false;
+    if (!strategyKeys.length) return false;
 
     const results = new Set();
     for (const strategyKey of strategyKeys) {
       const strategy = this.#strategies[strategyKey];
-      if (!strategy) throw new Error(`Unknown strategy: ${strategyKey}`);
+      // Forward-compat: ignore unknown keys (schemas allow additional properties).
+      if (!strategy) continue;
       const result = strategy(cond[strategyKey], req);
       results.add(result);
     }
+    // Only unknown/extra keys were present (e.g. `{ description: '...' }`).
+    if (!results.size) return false;
     return !results.has(false);
   }
 }

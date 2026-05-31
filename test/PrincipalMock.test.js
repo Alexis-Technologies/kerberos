@@ -13,4 +13,16 @@ describe('PrincipalMock', () => {
     assert.deepEqual(principal.roles, principalsPolicy.sally.roles);
     assert.deepEqual(principal.attr, principalsPolicy.sally.attr);
   });
+
+  it('should expose policyVersion and scope when provided', () => {
+    const principal = new PrincipalMock({
+      ...principalsPolicy.sally,
+      name: 'sally',
+      policyVersion: '20210210',
+      scope: 'acme.corp',
+    });
+
+    assert.strictEqual(principal.policyVersion, '20210210');
+    assert.strictEqual(principal.scope, 'acme.corp');
+  });
 });

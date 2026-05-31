@@ -14,6 +14,8 @@ export class PrincipalMock {
   get name(): string;
   get roles(): string[];
   get attr(): Record<string, unknown> | undefined;
+  get policyVersion(): string | undefined;
+  get scope(): string | undefined;
 }
 export class PrincipalMockZodSchemas {
   static buildShape(z: unknown): unknown;
@@ -50,6 +52,8 @@ export class ResourceMock {
   get name(): string;
   get kind(): string;
   get attr(): Record<string, unknown> | undefined;
+  get policyVersion(): string | undefined;
+  get scope(): string | undefined;
 }
 export class ResourceMockZodSchemas {
   static buildShape(z: unknown): unknown;

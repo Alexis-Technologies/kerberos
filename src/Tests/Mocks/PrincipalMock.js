@@ -41,6 +41,14 @@ class PrincipalMock {
   get attr() {
     return this.#shape.attr;
   }
+
+  get policyVersion() {
+    return this.#shape.policyVersion;
+  }
+
+  get scope() {
+    return this.#shape.scope;
+  }
 }
 
 module.exports = {

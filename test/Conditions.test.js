@@ -133,6 +133,22 @@ describe('Conditions', () => {
     assert.strictEqual(new Conditions({ match: { any: [] } }).isFulfilled(reqMock), false);
   });
 
+  it('should fail closed on falsy nested condition leaves without recursing to root', () => {
+    assert.strictEqual(new Conditions({ match: { all: [false] } }).isFulfilled(reqMock), false);
+    assert.strictEqual(new Conditions({ match: { all: [null] } }).isFulfilled(reqMock), false);
+  });
+
+  it('should ignore unknown strategy keys for forward compatibility', () => {
+    const condition = new Conditions({
+      match: {
+        all: [({ P }) => P.id === 'user-123'],
+        description: 'owner check',
+      },
+    });
+
+    assert.strictEqual(condition.isFulfilled(reqMock), true);
+  });
+
   it('should match with nested conditions - true case', () => {
     const condition = new Conditions({
       match: {
