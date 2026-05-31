@@ -39,7 +39,15 @@ class Variables {
     const result = {};
     for (const name in this.#shape) {
       if (!Object.prototype.hasOwnProperty.call(this.#shape, name)) continue;
-      result[name] = this.#shape[name](req);
+      const value = this.#shape[name](req);
+      // A variable literally named `__proto__` must become an own entry on `V`
+      // rather than mutating the prototype of the request context. `defineProperty`
+      // bypasses the `__proto__` setter and stores it as a plain data property.
+      if (name === '__proto__') {
+        Object.defineProperty(result, name, { value, enumerable: true, writable: true, configurable: true });
+      } else {
+        result[name] = value;
+      }
     }
     return result;
   }

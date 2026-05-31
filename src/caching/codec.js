@@ -389,7 +389,17 @@ function deepTransform(value, handlers) {
   if (Array.isArray(value)) return value.map((item) => deepTransform(item, handlers));
   if (value && typeof value === 'object') {
     const out = {};
-    for (const key of Object.keys(value)) out[key] = deepTransform(value[key], handlers);
+    for (const key of Object.keys(value)) {
+      const transformed = deepTransform(value[key], handlers);
+      // An own `__proto__` key in untrusted cached JSON must be copied as a plain
+      // data property instead of mutating the output object's prototype.
+      // `defineProperty` bypasses the `__proto__` setter.
+      if (key === '__proto__') {
+        Object.defineProperty(out, key, { value: transformed, enumerable: true, writable: true, configurable: true });
+      } else {
+        out[key] = transformed;
+      }
+    }
     return out;
   }
   return value;

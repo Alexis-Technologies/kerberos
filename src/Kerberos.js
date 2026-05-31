@@ -117,10 +117,14 @@ class Kerberos {
       });
     }
     const { schema, resourceSchema, principalSchema, roleSchema, ...nestedOptions } = options;
-    if (policy && typeof policy === 'object' && 'rolePolicy' in policy) {
+    // Classify by an OWN property only: `in` walks the prototype chain, so a
+    // prototype-injected `rolePolicy`/`principalPolicy` (e.g. from untrusted
+    // cached/deserialized JSON) must not be allowed to steer which policy
+    // constructor is chosen.
+    if (policy && typeof policy === 'object' && Object.prototype.hasOwnProperty.call(policy, 'rolePolicy')) {
       return new RolePolicy(policy, nestedOptions);
     }
-    if (policy && typeof policy === 'object' && 'principalPolicy' in policy) {
+    if (policy && typeof policy === 'object' && Object.prototype.hasOwnProperty.call(policy, 'principalPolicy')) {
       return new PrincipalPolicy(policy, nestedOptions);
     }
     return new ResourcePolicy(policy, nestedOptions);
@@ -313,17 +317,20 @@ class Kerberos {
         typebox: this.#typebox,
       });
 
+      // Normalize the scope into the storage key so the documented base-scope
+      // alias (`'.'` ≡ `''`) is reachable: lookups resolve via the normalized
+      // scope chain, so an un-normalized `'.'` key would never be selected.
       if (handledPolicy instanceof PrincipalPolicy) {
-        principalPolicies.set(`${handledPolicy.principal}.${handledPolicy.version}.${handledPolicy.scope ?? ''}`, handledPolicy);
+        principalPolicies.set(`${handledPolicy.principal}.${handledPolicy.version}.${Kerberos.normalizeScope(handledPolicy.scope)}`, handledPolicy);
         continue;
       }
 
       if (handledPolicy instanceof RolePolicy) {
-        rolePolicies.set(`${handledPolicy.role}.${handledPolicy.version}.${handledPolicy.scope ?? ''}`, handledPolicy);
+        rolePolicies.set(`${handledPolicy.role}.${handledPolicy.version}.${Kerberos.normalizeScope(handledPolicy.scope)}`, handledPolicy);
         continue;
       }
 
-      resourcePolicies.set(`${handledPolicy.kind}.${handledPolicy.version}.${handledPolicy.scope ?? ''}`, handledPolicy);
+      resourcePolicies.set(`${handledPolicy.kind}.${handledPolicy.version}.${Kerberos.normalizeScope(handledPolicy.scope)}`, handledPolicy);
     }
     return { resourcePolicies, principalPolicies, rolePolicies };
   }
