@@ -3,7 +3,7 @@ const { strict: assert } = require('node:assert');
 
 const { principalsPolicy, expenseTestPolicy, resourcesPolicy, expensePolicy, commonRolesPolicy } = require('./mocks/index.js');
 
-const { KerberosTest, PrincipalsMock, ResourcesMock } = require('../src/Tests/index.js');
+const { KerberosTest, PrincipalsMock, ResourcesMock } = require('@alexify/kerberos/tests');
 const { Effect, Kerberos } = require('../src/index.js');
 
 describe('KerberosTest', () => {

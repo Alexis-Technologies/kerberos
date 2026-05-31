@@ -13,5 +13,4 @@ module.exports = {
   ...require('./caching/codec.js'),
   ...require('./schemas'),
   ...require('./validation'),
-  Tests: require('./Tests/index.js'),
 };

@@ -2,7 +2,7 @@ const { describe, it } = require('node:test');
 const { strict: assert } = require('node:assert');
 
 const { principalsPolicy } = require('./mocks/index.js');
-const { PrincipalMock } = require('../src/Tests/index.js');
+const { PrincipalMock } = require('@alexify/kerberos/tests');
 
 describe('PrincipalMock', () => {
   it('should parse schema correctly', () => {

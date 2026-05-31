@@ -3,7 +3,7 @@ const { strict: assert } = require('node:assert');
 
 const { principalsPolicy } = require('./mocks/index.js');
 
-const { PrincipalsMock } = require('../src/Tests/index.js');
+const { PrincipalsMock } = require('@alexify/kerberos/tests');
 
 describe('PrincipalsMock', () => {
   it('should parse schema correctly', () => {

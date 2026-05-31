@@ -80,12 +80,17 @@ metadata) are now complete.
 - `reqId` propagated through evaluation, responses, and audit entries.
 
 ### Changed
+- **`@alexify/kerberos/tests` subpath** — Cerbos-style test harness
+  (`KerberosTest`, `KerberosTests`, mocks, and schema builders) moved out of the
+  main export so production bundles do not pull dev-only code. Import from
+  `@alexify/kerberos/tests` in your test files instead of `Tests` from the root.
 - **Module layout** reorganized: schema builders moved into per-module
   `schemas/` folders plus a shared `src/schemas/`, and validation logic into
   per-module `validation/` folders plus a shared `src/validation/`.
 - **Public exports expanded**: the package root now also exposes `Constants`,
   `Conditions`, `Outputs`, `Variables`, `PrincipalPolicy`, `RolePolicy`, the
-  caching codec helpers, and all schema/validation builders.
+  caching codec helpers, and all schema/validation builders. The test harness
+  lives on `@alexify/kerberos/tests`, not on the root entry.
 - **`Conditions`** now evaluates multiple strategies (`all` / `any` / `none`) in
   a single match object via an O(1) strategy dispatch.
 - **Policy selection** is now type-aware (resource by `kind`, principal by `id`,

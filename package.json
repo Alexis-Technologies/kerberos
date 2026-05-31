@@ -4,6 +4,16 @@
   "description": "Fast and low overhead authorization framework for JavaScript runtime",
   "main": "index.js",
   "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./tests": {
+      "types": "./tests.d.ts",
+      "default": "./tests.js"
+    }
+  },
   "directories": {
     "test": "test"
   },
@@ -66,5 +76,16 @@
     "test"
   ],
   "packageManager": "pnpm@10.10.0",
-  "files": ["index.js", "index.d.ts", "src/", "LICENSE", "README.md", "CHANGELOG.md", "package.json", "pnpm-lock.yaml"]
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "tests.js",
+    "tests.d.ts",
+    "src/",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md",
+    "package.json",
+    "pnpm-lock.yaml"
+  ]
 }

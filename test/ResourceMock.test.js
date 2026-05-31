@@ -3,7 +3,7 @@ const { strict: assert } = require('node:assert');
 
 const { resourcesPolicy } = require('./mocks/index.js');
 
-const { ResourceMock } = require('../src/Tests/index.js');
+const { ResourceMock } = require('@alexify/kerberos/tests');
 
 describe('ResourceMock', () => {
   it('should parse schema correctly', () => {

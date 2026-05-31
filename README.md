@@ -238,7 +238,14 @@ const response = await kerberos.checkResources({
 | `createSafeExprCodec`, `serializePolicy`, `deserializePolicy` | Safe AST codec for [dynamic/stored policies](#caching--storing-policies). |
 | `registerAjvKeywords`, `createAjvAdapter` | [Validation](#schema-validation) helpers. |
 | `JsonSchemas`, `TypeBoxSchemas`, `ZodSchemas`, `KerberosJsonSchemas`, `ResourcePolicyJsonSchemas`, `PrincipalPolicyJsonSchemas`, `RolePolicyJsonSchemas`, … | Schema builders for the three backends. |
-| `Tests` | Built-in [test harness](#testing). |
+
+Subpath **`@alexify/kerberos/tests`** (dev/test only — not loaded by the main entry):
+
+| Export | Purpose |
+| ------ | ------- |
+| `KerberosTest`, `KerberosTests` | Cerbos-style declarative test runner. |
+| `PrincipalMock`, `PrincipalsMock`, `ResourceMock`, `ResourcesMock` | Named fixtures for test suites. |
+| `*ZodSchemas`, `*JsonSchemas`, `*TypeBoxSchemas` | Schema builders for the test harness. |
 
 ## Policy Types
 
@@ -1053,7 +1060,8 @@ const kerberos = new Kerberos([], [], { cache }); // values passed as-is to poli
 ```javascript
 import { describe, it } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { Kerberos, Tests } from '@alexify/kerberos';
+import { Kerberos } from '@alexify/kerberos';
+import { KerberosTests } from '@alexify/kerberos/tests';
 
 describe('KerberosTests', () => {
   describe('Expense Policy (raw mode)', () => {
@@ -1112,7 +1120,7 @@ describe('KerberosTests', () => {
     };
 
     const kerberos = new Kerberos(policies, derivedRoles, { logger: true });
-    const tests = new Tests.KerberosTests(kerberos, [expenseTestPolicy]);
+    const tests = new KerberosTests(kerberos, [expenseTestPolicy]);
 
     tests.run({}, { describe, it, assert });
     // or -> tests.run({ effectAsBoolean: true }, { describe, it, assert });
