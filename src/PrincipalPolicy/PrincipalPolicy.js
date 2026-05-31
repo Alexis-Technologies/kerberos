@@ -91,16 +91,24 @@ class PrincipalPolicy {
     const variables = this.#shape.principalPolicy.variables?.get(reqWithConstants);
     const reqWithVariables = { ...reqWithConstants, variables, V: variables };
 
-    for (const action of reqWithVariables.actions) {
-      const actionEffects = [];
-      let matchedRule = null;
+    const denyValue = !effectAsBoolean ? Effect.Deny : false;
+    const allowValue = !effectAsBoolean ? Effect.Allow : true;
+    const rules = this.rules;
 
-      for (let i = 0; i < this.rules.length; i++) {
-        const rule = this.rules[i];
+    for (const action of reqWithVariables.actions) {
+      // Replace the per-action effects array + double `includes` with flags.
+      let matchedRule = null;
+      let matched = false;
+      let hasDeny = false;
+      let hasAllow = false;
+
+      for (let i = 0; i < rules.length; i++) {
+        const rule = rules[i];
         if (rule.resource !== ALL_ACTIONS && rule.resource !== reqWithVariables.R.kind) continue;
 
-        for (let j = 0; j < rule.actions.length; j++) {
-          const actionRule = rule.actions[j];
+        const actionRules = rule.actions;
+        for (let j = 0; j < actionRules.length; j++) {
+          const actionRule = actionRules[j];
           if (actionRule.action !== ALL_ACTIONS && actionRule.action !== action) continue;
 
           const isConditionFulfilled = actionRule.condition ? actionRule.condition.isFulfilled(reqWithVariables) : true;
@@ -113,21 +121,20 @@ class PrincipalPolicy {
 
           if (!isConditionFulfilled) continue;
 
-          actionEffects.push(actionRule.effect);
+          matched = true;
+          if (actionRule.effect === Effect.Deny) hasDeny = true;
+          else if (actionRule.effect === Effect.Allow) hasAllow = true;
           matchedRule = metaSrc;
         }
       }
 
-      if (!actionEffects.length) continue;
+      if (!matched) continue;
 
       meta.actions[action] = { matchedPolicy: metaSrcBase, matchedRule };
       if (this.scope) meta.actions[action].matchedScope = this.scope;
 
-      if (actionEffects.includes(Effect.Deny)) {
-        effects.set(action, !effectAsBoolean ? Effect.Deny : false);
-      } else if (actionEffects.includes(Effect.Allow)) {
-        effects.set(action, !effectAsBoolean ? Effect.Allow : true);
-      }
+      if (hasDeny) effects.set(action, denyValue);
+      else if (hasAllow) effects.set(action, allowValue);
     }
 
     return { effects, outputs, meta };

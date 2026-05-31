@@ -91,13 +91,15 @@ class RolePolicy {
     const variables = this.#shape.rolePolicy.variables?.get(reqWithConstants);
     const reqWithVariables = { ...reqWithConstants, variables, V: variables };
 
+    const rules = this.rules;
+
     for (const action of reqWithVariables.actions) {
       let matchedResource = false;
       let matchedRule = null;
       let isAllowed = false;
 
-      for (let i = 0; i < this.rules.length; i++) {
-        const rule = this.rules[i];
+      for (let i = 0; i < rules.length; i++) {
+        const rule = rules[i];
         if (rule.resource !== ALL_ACTIONS && rule.resource !== reqWithVariables.R.kind) continue;
 
         matchedResource = true;

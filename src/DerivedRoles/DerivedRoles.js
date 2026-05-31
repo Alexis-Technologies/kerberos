@@ -81,10 +81,13 @@ class DerivedRoles {
     const variables = this.#shape.variables?.get(reqWithConstants);
     const reqWithVariables = { ...reqWithConstants, variables, V: variables };
 
+    // O(1) membership lookups for parent-role matching across all definitions.
+    const principalRoles = new Set(reqWithVariables.P.roles);
+
     for (const def of this.#shape.definitions) {
       let isRoleMatched = false;
       for (const role of def.parentRoles) {
-        if (reqWithVariables.P.roles.includes(role)) {
+        if (principalRoles.has(role)) {
           isRoleMatched = true;
           break;
         }

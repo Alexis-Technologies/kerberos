@@ -113,20 +113,31 @@ class ResourcePolicy {
     const variables = this.#shape.resourcePolicy.variables?.get(reqWithConstants);
     const reqWithVariables = { ...reqWithConstants, variables, V: variables };
 
+    // Principal roles are looked up once per rule/action; a Set turns the inner
+    // `roles.includes(role)` scans into O(1) membership checks.
+    const principalRoles = new Set(reqWithVariables.P.roles);
+
+    const denyValue = !effectAsBoolean ? Effect.Deny : false;
+    const allowValue = !effectAsBoolean ? Effect.Allow : true;
+    const rules = this.rules;
+
     for (const action of reqWithVariables.actions) {
-      const actionEffects = [];
+      // Track effects with two flags instead of building an array and running
+      // `includes` twice; Deny still wins over Allow.
+      let hasDeny = false;
+      let hasAllow = false;
       meta.actions[action] = { matchedPolicy: metaSrcBase };
 
-      for (let i = 0; i < this.rules.length; i++) {
-        const rule = this.rules[i];
+      for (let i = 0; i < rules.length; i++) {
+        const rule = rules[i];
         // Checking if the rule applies to the action
         if (!rule.actions.includes(ALL_ACTIONS) && !rule.actions.includes(action)) continue;
 
         // Checking if the roles match
         let rolesMatch = false;
-        if (rule.roles && Array.isArray(rule.roles)) {
+        if (Array.isArray(rule.roles)) {
           for (const role of rule.roles) {
-            if (reqWithVariables.P.roles.includes(role)) {
+            if (principalRoles.has(role)) {
               rolesMatch = true;
               break;
             }
@@ -134,7 +145,7 @@ class ResourcePolicy {
         }
 
         let derivedRolesMatch = false;
-        if (rule.derivedRoles && Array.isArray(rule.derivedRoles)) {
+        if (!rolesMatch && Array.isArray(rule.derivedRoles)) {
           for (const role of rule.derivedRoles) {
             if (derivedRoles.has(role)) {
               derivedRolesMatch = true;
@@ -156,20 +167,15 @@ class ResourcePolicy {
         }
 
         if (isConditionFulfilled) {
-          actionEffects.push(rule.effect);
+          if (rule.effect === Effect.Deny) hasDeny = true;
+          else if (rule.effect === Effect.Allow) hasAllow = true;
           meta.actions[action].matchedRule = metaSrc;
           if (this.scope) meta.actions[action].matchedScope = this.scope;
         }
       }
 
-      if (actionEffects.includes(Effect.Deny)) {
-        effects.set(action, !effectAsBoolean ? Effect.Deny : false);
-      } else if (actionEffects.includes(Effect.Allow)) {
-        effects.set(action, !effectAsBoolean ? Effect.Allow : true);
-      } else {
-        // If there are no rules allowing the action, the default is Deny
-        effects.set(action, !effectAsBoolean ? Effect.Deny : false);
-      }
+      // Deny wins; otherwise Allow; otherwise default Deny.
+      effects.set(action, hasDeny ? denyValue : hasAllow ? allowValue : denyValue);
     }
 
     return { effects, outputs, meta };

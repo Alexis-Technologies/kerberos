@@ -14,15 +14,58 @@ class KerberosExprError extends Error {
 // because the check runs on the resolved string key inside the interpreter.
 const BLOCKED_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 
-const ALLOWED_BINARY_OPS = new Set([
-  '&&', '||', '??',
-  '===', '!==', '==', '!=',
-  '<', '>', '<=', '>=',
-  '+', '-', '*', '/', '%', '**',
-  '&', '|', '^', '<<', '>>', '>>>',
-]);
+/**
+ * Builds a prototype-less dispatch table so lookups can never resolve to
+ * inherited members (e.g. `constructor`, `__proto__`) and stay O(1).
+ *
+ * @param {Record<string, unknown>} entries
+ * @returns {Record<string, unknown>}
+ */
+function createDispatch(entries) {
+  return Object.assign(Object.create(null), entries);
+}
 
-const ALLOWED_UNARY_OPS = new Set(['!', '-', '+', '~', 'typeof']);
+// Short-circuit operators must evaluate their right branch lazily, so they are
+// handled explicitly instead of through the eager binary dispatch table.
+const SHORT_CIRCUIT_OPS = new Set(['&&', '||', '??']);
+
+// O(1) binary operator dispatch. Each handler receives the already-evaluated
+// operands; short-circuit operators are intentionally excluded (see above).
+const BINARY_OPS = createDispatch({
+  '===': (left, right) => left === right,
+  '!==': (left, right) => left !== right,
+  '==': (left, right) => left == right, // eslint-disable-line eqeqeq
+  '!=': (left, right) => left != right, // eslint-disable-line eqeqeq
+  '<': (left, right) => left < right,
+  '>': (left, right) => left > right,
+  '<=': (left, right) => left <= right,
+  '>=': (left, right) => left >= right,
+  '+': (left, right) => left + right,
+  '-': (left, right) => left - right,
+  '*': (left, right) => left * right,
+  '/': (left, right) => left / right,
+  '%': (left, right) => left % right,
+  '**': (left, right) => left ** right,
+  '&': (left, right) => left & right,
+  '|': (left, right) => left | right,
+  '^': (left, right) => left ^ right,
+  '<<': (left, right) => left << right,
+  '>>': (left, right) => left >> right,
+  '>>>': (left, right) => left >>> right,
+});
+
+// O(1) unary operator dispatch over the already-evaluated argument.
+const UNARY_OPS = createDispatch({
+  '!': (value) => !value,
+  '-': (value) => -value,
+  '+': (value) => +value,
+  '~': (value) => ~value,
+  typeof: (value) => typeof value,
+});
+
+const ALLOWED_BINARY_OPS = new Set([...SHORT_CIRCUIT_OPS, ...Object.keys(BINARY_OPS)]);
+
+const ALLOWED_UNARY_OPS = new Set(Object.keys(UNARY_OPS));
 
 // Methods that may be called on string / array / number values. None of these
 // can leak a function reference or constructor.
@@ -108,64 +151,67 @@ function parseExpr(expr, jsepInstance) {
  *
  * @param {Record<string, unknown>} node
  */
+// O(1) node-type dispatch for structural validation. Mirrors NODE_EVALUATORS so
+// every evaluable node type has a matching gate (defense in depth).
+const NODE_VALIDATORS = createDispatch({
+  Literal() {},
+  Identifier() {},
+  MemberExpression(node) {
+    validateNode(node.object);
+    if (node.computed) validateNode(node.property);
+  },
+  BinaryExpression(node) {
+    if (!ALLOWED_BINARY_OPS.has(node.operator)) throw new KerberosExprError(`Operator "${node.operator}" is not allowed`);
+    validateNode(node.left);
+    validateNode(node.right);
+  },
+  UnaryExpression(node) {
+    if (!ALLOWED_UNARY_OPS.has(node.operator)) throw new KerberosExprError(`Unary operator "${node.operator}" is not allowed`);
+    validateNode(node.argument);
+  },
+  ConditionalExpression(node) {
+    validateNode(node.test);
+    validateNode(node.consequent);
+    validateNode(node.alternate);
+  },
+  ArrayExpression(node) {
+    for (const element of node.elements) validateNode(element);
+  },
+  ObjectExpression(node) {
+    for (const property of node.properties) {
+      if (property.computed) validateNode(property.key);
+      validateNode(property.shorthand ? property.key : property.value);
+    }
+  },
+  CallExpression(node) {
+    if (node.callee.type === 'Identifier') {
+      if (!Object.prototype.hasOwnProperty.call(GLOBAL_FUNCTIONS, node.callee.name)) {
+        throw new KerberosExprError(`Function "${node.callee.name}" is not allowed`);
+      }
+    } else if (node.callee.type === 'MemberExpression') {
+      validateNode(node.callee);
+    } else {
+      throw new KerberosExprError('Only whitelisted function or method calls are allowed');
+    }
+    for (const argument of node.arguments) validateNode(argument);
+  },
+  NewExpression(node) {
+    if (node.callee.type !== 'Identifier' || !Object.prototype.hasOwnProperty.call(ALLOWED_CONSTRUCTORS, node.callee.name)) {
+      throw new KerberosExprError('Only whitelisted constructors are allowed (Date)');
+    }
+    for (const argument of node.arguments) validateNode(argument);
+  },
+  Compound() {
+    throw new KerberosExprError('Compound expressions (e.g. "a, b", "a in b") are not allowed');
+  },
+});
+
 function validateNode(node) {
   if (!node || typeof node !== 'object') throw new KerberosExprError('Invalid expression node');
 
-  switch (node.type) {
-    case 'Literal':
-      return;
-    case 'Identifier':
-      return;
-    case 'MemberExpression':
-      validateNode(node.object);
-      if (node.computed) validateNode(node.property);
-      return;
-    case 'BinaryExpression':
-      if (!ALLOWED_BINARY_OPS.has(node.operator)) throw new KerberosExprError(`Operator "${node.operator}" is not allowed`);
-      validateNode(node.left);
-      validateNode(node.right);
-      return;
-    case 'UnaryExpression':
-      if (!ALLOWED_UNARY_OPS.has(node.operator)) throw new KerberosExprError(`Unary operator "${node.operator}" is not allowed`);
-      validateNode(node.argument);
-      return;
-    case 'ConditionalExpression':
-      validateNode(node.test);
-      validateNode(node.consequent);
-      validateNode(node.alternate);
-      return;
-    case 'ArrayExpression':
-      for (const element of node.elements) validateNode(element);
-      return;
-    case 'ObjectExpression':
-      for (const property of node.properties) {
-        if (property.computed) validateNode(property.key);
-        validateNode(property.shorthand ? property.key : property.value);
-      }
-      return;
-    case 'CallExpression':
-      if (node.callee.type === 'Identifier') {
-        if (!Object.prototype.hasOwnProperty.call(GLOBAL_FUNCTIONS, node.callee.name)) {
-          throw new KerberosExprError(`Function "${node.callee.name}" is not allowed`);
-        }
-      } else if (node.callee.type === 'MemberExpression') {
-        validateNode(node.callee);
-      } else {
-        throw new KerberosExprError('Only whitelisted function or method calls are allowed');
-      }
-      for (const argument of node.arguments) validateNode(argument);
-      return;
-    case 'NewExpression':
-      if (node.callee.type !== 'Identifier' || !Object.prototype.hasOwnProperty.call(ALLOWED_CONSTRUCTORS, node.callee.name)) {
-        throw new KerberosExprError('Only whitelisted constructors are allowed (Date)');
-      }
-      for (const argument of node.arguments) validateNode(argument);
-      return;
-    case 'Compound':
-      throw new KerberosExprError('Compound expressions (e.g. "a, b", "a in b") are not allowed');
-    default:
-      throw new KerberosExprError(`Unsupported expression node: ${node.type}`);
-  }
+  const validator = NODE_VALIDATORS[node.type];
+  if (!validator) throw new KerberosExprError(`Unsupported expression node: ${node.type}`);
+  validator(node);
 }
 
 function safeKey(key) {
@@ -202,43 +248,18 @@ function evalBinary(node, ctx, config) {
     return left === null || left === undefined ? evalNode(node.right, ctx, config) : left;
   }
 
+  const handler = BINARY_OPS[operator];
+  if (!handler) throw new KerberosExprError(`Operator "${operator}" is not allowed`);
+
   const left = evalNode(node.left, ctx, config);
   const right = evalNode(node.right, ctx, config);
-
-  switch (operator) {
-    case '===': return left === right;
-    case '!==': return left !== right;
-    case '==': return left == right; // eslint-disable-line eqeqeq
-    case '!=': return left != right; // eslint-disable-line eqeqeq
-    case '<': return left < right;
-    case '>': return left > right;
-    case '<=': return left <= right;
-    case '>=': return left >= right;
-    case '+': return left + right;
-    case '-': return left - right;
-    case '*': return left * right;
-    case '/': return left / right;
-    case '%': return left % right;
-    case '**': return left ** right;
-    case '&': return left & right;
-    case '|': return left | right;
-    case '^': return left ^ right;
-    case '<<': return left << right;
-    case '>>': return left >> right;
-    case '>>>': return left >>> right;
-    default: throw new KerberosExprError(`Operator "${operator}" is not allowed`);
-  }
+  return handler(left, right);
 }
 
 function evalUnary(node, ctx, config) {
-  switch (node.operator) {
-    case '!': return !evalNode(node.argument, ctx, config);
-    case '-': return -evalNode(node.argument, ctx, config);
-    case '+': return +evalNode(node.argument, ctx, config);
-    case '~': return ~evalNode(node.argument, ctx, config);
-    case 'typeof': return typeof evalNode(node.argument, ctx, config);
-    default: throw new KerberosExprError(`Unary operator "${node.operator}" is not allowed`);
-  }
+  const handler = UNARY_OPS[node.operator];
+  if (!handler) throw new KerberosExprError(`Unary operator "${node.operator}" is not allowed`);
+  return handler(evalNode(node.argument, ctx, config));
 }
 
 function evalObject(node, ctx, config) {
@@ -253,9 +274,15 @@ function evalObject(node, ctx, config) {
   return result;
 }
 
+function evalArguments(nodeArguments, ctx, config) {
+  const args = new Array(nodeArguments.length);
+  for (let i = 0; i < nodeArguments.length; i++) args[i] = evalNode(nodeArguments[i], ctx, config);
+  return args;
+}
+
 function evalCall(node, ctx, config) {
   const { callee } = node;
-  const args = node.arguments.map((argument) => evalNode(argument, ctx, config));
+  const args = evalArguments(node.arguments, ctx, config);
 
   if (callee.type === 'Identifier') {
     if (!Object.prototype.hasOwnProperty.call(GLOBAL_FUNCTIONS, callee.name)) {
@@ -303,41 +330,53 @@ function evalNew(node, ctx, config) {
   const Constructor = ALLOWED_CONSTRUCTORS[node.callee.name];
   if (!Constructor) throw new KerberosExprError(`Constructor "${node.callee.name}" is not allowed`);
 
-  const args = node.arguments.map((argument) => evalNode(argument, ctx, config));
+  const args = evalArguments(node.arguments, ctx, config);
   return new Constructor(...args);
 }
 
+function evalIdentifier(node, ctx, config) {
+  if (Object.prototype.hasOwnProperty.call(ALLOWED_GLOBALS, node.name)) return ALLOWED_GLOBALS[node.name];
+  if (config.roots.has(node.name)) return ctx == null ? undefined : ctx[node.name];
+  throw new KerberosExprError(
+    `Unknown identifier "${node.name}" (allowed roots: ${[...config.roots].join(', ')}, Math, Date, ${Object.keys(GLOBAL_FUNCTIONS).join(', ')})`
+  );
+}
+
+function evalArray(node, ctx, config) {
+  const { elements } = node;
+  const result = new Array(elements.length);
+  for (let i = 0; i < elements.length; i++) result[i] = evalNode(elements[i], ctx, config);
+  return result;
+}
+
+function evalConditional(node, ctx, config) {
+  return evalNode(node.test, ctx, config) ? evalNode(node.consequent, ctx, config) : evalNode(node.alternate, ctx, config);
+}
+
+function throwCompound() {
+  throw new KerberosExprError('Compound expressions are not allowed');
+}
+
+// O(1) node-type dispatch used by the interpreter hot path. A prototype-less
+// table guarantees an unknown/poisoned `node.type` resolves to `undefined`.
+const NODE_EVALUATORS = createDispatch({
+  Literal: (node) => node.value,
+  Identifier: evalIdentifier,
+  MemberExpression: evalMember,
+  BinaryExpression: evalBinary,
+  UnaryExpression: evalUnary,
+  ConditionalExpression: evalConditional,
+  ArrayExpression: evalArray,
+  ObjectExpression: evalObject,
+  CallExpression: evalCall,
+  NewExpression: evalNew,
+  Compound: throwCompound,
+});
+
 function evalNode(node, ctx, config) {
-  switch (node.type) {
-    case 'Literal':
-      return node.value;
-    case 'Identifier':
-      if (Object.prototype.hasOwnProperty.call(ALLOWED_GLOBALS, node.name)) return ALLOWED_GLOBALS[node.name];
-      if (config.roots.has(node.name)) return ctx == null ? undefined : ctx[node.name];
-      throw new KerberosExprError(
-        `Unknown identifier "${node.name}" (allowed roots: ${[...config.roots].join(', ')}, Math, Date, ${Object.keys(GLOBAL_FUNCTIONS).join(', ')})`
-      );
-    case 'MemberExpression':
-      return evalMember(node, ctx, config);
-    case 'BinaryExpression':
-      return evalBinary(node, ctx, config);
-    case 'UnaryExpression':
-      return evalUnary(node, ctx, config);
-    case 'ConditionalExpression':
-      return evalNode(node.test, ctx, config) ? evalNode(node.consequent, ctx, config) : evalNode(node.alternate, ctx, config);
-    case 'ArrayExpression':
-      return node.elements.map((element) => evalNode(element, ctx, config));
-    case 'ObjectExpression':
-      return evalObject(node, ctx, config);
-    case 'CallExpression':
-      return evalCall(node, ctx, config);
-    case 'NewExpression':
-      return evalNew(node, ctx, config);
-    case 'Compound':
-      throw new KerberosExprError('Compound expressions are not allowed');
-    default:
-      throw new KerberosExprError(`Unsupported expression node: ${node.type}`);
-  }
+  const evaluator = NODE_EVALUATORS[node.type];
+  if (!evaluator) throw new KerberosExprError(`Unsupported expression node: ${node.type}`);
+  return evaluator(node, ctx, config);
 }
 
 function isExprDescriptor(value) {
@@ -380,8 +419,8 @@ function createSafeExprCodec({ jsep, roots } = {}) {
     throw new KerberosExprError(
       'createSafeExprCodec({ jsep }) requires a pre-configured jsep instance. ' +
       'Install jsep and its plugins, then pass the instance:\n' +
-      "  const jsep = require('jsep').default;\n" +
-      "  jsep.plugins.register(require('@jsep-plugin/object'), ...);\n" +
+      '  const jsep = require(\'jsep\').default;\n' +
+      '  jsep.plugins.register(require(\'@jsep-plugin/object\'), ...);\n' +
       '  const codec = createSafeExprCodec({ jsep });'
     );
   }
