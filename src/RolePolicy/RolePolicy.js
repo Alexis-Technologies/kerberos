@@ -61,7 +61,9 @@ class RolePolicy {
   }
 
   get scope() {
-    return this.#shape.rolePolicy.scope;
+    const scope = this.#shape.rolePolicy.scope;
+    if (!scope || scope === '.') return undefined;
+    return scope;
   }
 
   get parentRoles() {

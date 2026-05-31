@@ -129,13 +129,17 @@ class KerberosTest {
 
           const { results } = await kerberosInstance.checkResources({ principal, resources: resourcesToCheck }, effectAsBoolean);
 
-          // Check results
-          for (const result of results) {
-            const resource = allResourcesMock.getById(result.resource.id);
-            if (!resource) throw new Error(`Resource with ID "${result.resource.id}" not found!`);
+          const resultsByResourceId = new Map();
+          for (const result of results) resultsByResourceId.set(result.resource.id, result);
 
-            const resourceName = resource.name;
-            const resourceData = principalResourcesMap.get(resourceName);
+          for (const resourceData of principalResourcesMap.values()) {
+            const result = resultsByResourceId.get(resourceData.resource.id);
+            assert.ok(
+              result,
+              `No result returned for resource "${resourceData.resource.name}" (id: "${resourceData.resource.id}")!`
+            );
+
+            const resourceName = resourceData.resource.name;
 
             for (const [action, expectedEffect] of Object.entries(resourceData.expectedActions)) {
               const effect = result.actions[action];

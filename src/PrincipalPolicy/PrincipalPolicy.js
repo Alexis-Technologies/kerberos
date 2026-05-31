@@ -65,7 +65,9 @@ class PrincipalPolicy {
   }
 
   get scope() {
-    return this.#shape.principalPolicy.scope;
+    const scope = this.#shape.principalPolicy.scope;
+    if (!scope || scope === '.') return undefined;
+    return scope;
   }
 
   get rules() {

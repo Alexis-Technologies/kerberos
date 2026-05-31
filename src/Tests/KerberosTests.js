@@ -36,7 +36,7 @@ class KerberosTests {
 
   #policies = [];
 
-  #tests = [];
+  #policyGroups = [];
 
   #principals = null;
 
@@ -51,12 +51,14 @@ class KerberosTests {
     if (!kerberos || !(kerberos instanceof Kerberos)) throw new Error('Kerberos instance is required');
     this.#kerberos = kerberos;
     this.#policies = KerberosTests.parsePolicies(policies, options);
-    for (const policy of this.#policies) this.#tests.push(...KerberosTests.parseTests(policy.tests, kerberos, options));
+    for (const policy of this.#policies) {
+      this.#policyGroups.push({ policy, tests: KerberosTests.parseTests(policy.tests, kerberos, options) });
+    }
     const principals = [];
-    for (const policy of policies) principals.push(...KerberosTests.parsePrincipals(policy.principals, options));
+    for (const policy of this.#policies) principals.push(...KerberosTests.parsePrincipals(policy.principals, options));
     this.#principals = new PrincipalsMock(principals, options);
     const resources = [];
-    for (const policy of policies) resources.push(...KerberosTests.parseResources(policy.resources, options));
+    for (const policy of this.#policies) resources.push(...KerberosTests.parseResources(policy.resources, options));
     this.#resources = new ResourcesMock(resources, options);
   }
 
@@ -68,9 +70,9 @@ class KerberosTests {
    * @returns {void}
    */
   run({ effectAsBoolean = false }, { describe, it, assert }) {
-    for (const policy of this.#policies) {
+    for (const { policy, tests } of this.#policyGroups) {
       describe(policy.name, () => {
-        for (const test of this.#tests) {
+        for (const test of tests) {
           test.run(
             {
               kerberos: this.#kerberos,

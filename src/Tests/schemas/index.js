@@ -21,7 +21,12 @@ class KerberosTestZodSchemas extends ZodSchemas {
       .object({
         principals: z.union([z.array(z.string()).nonempty(), z.instanceof(PrincipalsMock)]),
         resources: z.union([z.array(z.string()).nonempty(), z.instanceof(ResourcesMock)]),
-        actions: z.array(z.string()).nonempty().transform((actions) => new Set(actions)),
+        actions: z
+          .union([
+            z.array(z.string()).nonempty(),
+            z.instanceof(Set),
+          ])
+          .transform((actions) => (actions instanceof Set ? actions : new Set(actions))),
       });
   }
 

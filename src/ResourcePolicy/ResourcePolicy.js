@@ -75,7 +75,11 @@ class ResourcePolicy {
   }
 
   get scope() {
-    return this.#shape.resourcePolicy.scope;
+    const scope = this.#shape.resourcePolicy.scope;
+    // `'.'` is the documented base-scope alias; treat it like an unset scope
+    // so output `src` and `matchedScope` match Kerberos lookup normalization.
+    if (!scope || scope === '.') return undefined;
+    return scope;
   }
 
   get importDerivedRoles() {

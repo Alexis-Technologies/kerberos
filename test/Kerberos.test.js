@@ -643,6 +643,25 @@ describe('Kerberos', () => {
       assert.strictEqual(actionMeta.matchedScope, 'acme.corp');
     });
 
+    it('should treat scope "." as base scope in metadata and output src', async () => {
+      const { buildExpensePolicy } = require('./mocks/expense_policy.js');
+      const baseScopeKerberos = new Kerberos([buildExpensePolicy({ scope: '.' })], [commonRolesPolicy]);
+      const principal = principalsPolicy.sally;
+      const resource = resourcesPolicy.expense1;
+      const resources = [{ resource, actions: ['view'] }];
+
+      const results = await baseScopeKerberos.checkResources({
+        principal,
+        resources,
+        includeMeta: true,
+      });
+
+      const actionMeta = results.results[0].meta.actions.view;
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(actionMeta, 'matchedScope'), false);
+      assert.ok(actionMeta.matchedPolicy.startsWith('resource.expense.vdefault'));
+      assert.ok(!actionMeta.matchedPolicy.includes('/.'));
+    });
+
     it('should work with boolean mode and metadata', async () => {
       const principal = {
         ...principalsPolicy.sally,
