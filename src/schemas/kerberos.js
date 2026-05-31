@@ -23,9 +23,11 @@ class KerberosZodSchemas extends ZodSchemas {
 
   static buildIsAllowedArgs(z) {
     return z.object({
+      reqId: z.string().optional(),
       principal: ZodSchemas.buildRequestPrincipal(z),
       action: z.string(),
       resource: ZodSchemas.buildRequestResource(z),
+      includeMeta: z.boolean().optional(),
     });
   }
 
@@ -66,9 +68,11 @@ class KerberosJsonSchemas extends JsonSchemas {
   static buildIsAllowedArgs() {
     return JsonSchemas.buildObjectShape(
       {
+        reqId: { type: 'string' },
         principal: JsonSchemas.buildRequestPrincipal(),
         action: { type: 'string' },
         resource: JsonSchemas.buildRequestResource(),
+        includeMeta: { type: 'boolean' },
       },
       ['principal', 'action', 'resource']
     );
@@ -114,9 +118,11 @@ class KerberosTypeBoxSchemas extends TypeBoxSchemas {
 
   static buildIsAllowedArgs(t) {
     return t.Object({
+      reqId: t.Optional(t.String()),
       principal: TypeBoxSchemas.buildRequestPrincipal(t),
       action: t.String(),
       resource: TypeBoxSchemas.buildRequestResource(t),
+      includeMeta: t.Optional(t.Boolean()),
     });
   }
 

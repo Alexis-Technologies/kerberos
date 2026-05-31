@@ -97,11 +97,14 @@ class JsonSchemas {
   }
 
   static buildObjectShape(properties, required, extras = {}) {
+    // `additionalProperties: true` keeps validation lenient/forward-compatible:
+    // unknown fields are accepted rather than rejected, matching the TypeBox
+    // backend (lenient by default) and Zod (strips unknown keys by default).
     return {
       type: 'object',
       properties,
       required,
-      additionalProperties: false,
+      additionalProperties: true,
       ...extras,
     };
   }
@@ -122,7 +125,7 @@ class JsonSchemas {
       type: 'object',
       properties,
       required: [...required],
-      additionalProperties: false,
+      additionalProperties: true,
     };
 
     if (Object.keys(defs).length > 0) merged.$defs = defs;

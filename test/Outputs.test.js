@@ -15,7 +15,7 @@ describe('Outputs functionality', () => {
           effect: Effect.Deny,
           roles: ['*'],
           condition: {
-            match: ({ }) => {
+            match: () => {
               const now = new Date();
               return now.getHours() > 18 || now.getHours() < 8;
             }

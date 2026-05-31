@@ -6,13 +6,14 @@ const { Variables, VariablesJsonSchemas, VariablesTypeBoxSchemas, VariablesZodSc
 
 class RolePolicyZodSchemas extends ZodSchemas {
   static buildRuleShape(z) {
-    return z.object({
-      name: z.string().optional(),
-      resource: z.union([z.string(), z.literal(ALL_ACTIONS)]),
-      allowActions: z.array(z.string()).nonempty(),
-      condition: z.union([ConditionsZodSchemas.buildShape(z), z.instanceof(Conditions)]).optional(),
-      output: z.union([OutputsZodSchemas.buildShape(z), z.instanceof(Outputs)]).optional(),
-    });
+    return z
+      .object({
+        name: z.string().optional(),
+        resource: z.union([z.string(), z.literal(ALL_ACTIONS)]),
+        allowActions: z.array(z.string()).nonempty(),
+        condition: z.union([ConditionsZodSchemas.buildShape(z), z.instanceof(Conditions)]).optional(),
+        output: z.union([OutputsZodSchemas.buildShape(z), z.instanceof(Outputs)]).optional(),
+      });
   }
 
   static buildRolePolicyShape(z) {

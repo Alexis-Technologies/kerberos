@@ -42,15 +42,16 @@ class ResourcePolicyZodSchemas extends ZodSchemas {
   }
 
   static buildResourcePolicyShape(z) {
-    return z.object({
-      version: z.string(),
-      resource: z.string(),
-      scope: ZodSchemas.buildScopeString(z).optional(),
-      rules: z.array(ResourcePolicyZodSchemas.buildRuleShape(z)).nonempty(),
-      variables: z.union([VariablesZodSchemas.buildShape(z), z.instanceof(Variables)]).optional(),
-      constants: z.union([ConstantsZodSchemas.buildShape(z), z.instanceof(Constants)]).optional(),
-      importDerivedRoles: z.array(z.string()).optional(),
-    });
+    return z
+      .object({
+        version: z.string(),
+        resource: z.string(),
+        scope: ZodSchemas.buildScopeString(z).optional(),
+        rules: z.array(ResourcePolicyZodSchemas.buildRuleShape(z)).nonempty(),
+        variables: z.union([VariablesZodSchemas.buildShape(z), z.instanceof(Variables)]).optional(),
+        constants: z.union([ConstantsZodSchemas.buildShape(z), z.instanceof(Constants)]).optional(),
+        importDerivedRoles: z.array(z.string()).optional(),
+      });
   }
 
   static buildShape(z) {

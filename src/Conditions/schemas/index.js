@@ -21,14 +21,28 @@ class ConditionsZodSchemas extends ZodSchemas {
   }
 
   static buildConditionMatchShape(z) {
-    return z.lazy(() =>
+    // A single object with three optional strategies (instead of a union of
+    // single-key objects). Zod strips unknown keys when parsing, so a union of
+    // single-key objects silently dropped the other strategies from a
+    // multi-strategy match like `{ all: [...], none: [...] }`. `.refine()` keeps
+    // the structural invariant (at least one strategy) while staying lenient to
+    // unknown keys, matching the JSON Schema and TypeBox backends.
+    const matchShape = z.lazy(() =>
       z.union([
         ConditionsZodSchemas.buildConditionSingleMatchExpr(z),
-        z.object({ any: z.array(ConditionsZodSchemas.buildConditionMatchShape(z)).nonempty() }),
-        z.object({ all: z.array(ConditionsZodSchemas.buildConditionMatchShape(z)).nonempty() }),
-        z.object({ none: z.array(ConditionsZodSchemas.buildConditionMatchShape(z)).nonempty() }),
+        z
+          .object({
+            any: z.array(matchShape).nonempty().optional(),
+            all: z.array(matchShape).nonempty().optional(),
+            none: z.array(matchShape).nonempty().optional(),
+          })
+          .refine(
+            (value) => value.any !== undefined || value.all !== undefined || value.none !== undefined,
+            { message: 'A condition match must define at least one of "any", "all", or "none".' }
+          ),
       ])
     );
+    return matchShape;
   }
 
   static buildShape(z) {
@@ -40,6 +54,10 @@ class ConditionsZodSchemas extends ZodSchemas {
  * Plain JSON Schema builders for conditions.
  */
 class ConditionsJsonSchemas extends JsonSchemas {
+  // Monotonic counter that keeps each generated condition-match `$id` unique so
+  // recursive `$ref`s never collide across embedded policy schemas.
+  static #matchSchemaSeq = 0;
+
   static buildFullRequest() {
     return JsonSchemas.mergeObjectShapes(
       JsonSchemas.buildRequest(),
@@ -59,31 +77,36 @@ class ConditionsJsonSchemas extends JsonSchemas {
     return JsonSchemas.buildFunctionShape();
   }
 
-  static buildConditionStrategyObject(itemSchema) {
-    return {
-      type: 'object',
-      properties: {
-        any: JsonSchemas.buildNonEmptyArrayShape(itemSchema),
-        all: JsonSchemas.buildNonEmptyArrayShape(itemSchema),
-        none: JsonSchemas.buildNonEmptyArrayShape(itemSchema),
-      },
-      additionalProperties: false,
-      minProperties: 1,
-    };
-  }
-
   static buildConditionMatchShape() {
-    // Plain JSON Schema can't safely self-reference here (a shared `$id` would
-    // collide when this builder is embedded in multiple policy schemas on the
-    // same Ajv instance), so nested condition entries are validated to a
-    // bounded depth. This still rejects non-condition primitives such as
-    // `{ all: [42] }`, which `items: true` previously let through only to fail
-    // later inside `Conditions.isFulfilled`.
-    const matchExpr = ConditionsJsonSchemas.buildConditionSingleMatchExpr();
-    const leaf = { anyOf: [matchExpr, { type: 'object', minProperties: 1 }] };
-    const nested = { anyOf: [matchExpr, ConditionsJsonSchemas.buildConditionStrategyObject(leaf)] };
+    // Recursively validate nested condition entries. The subschema gets a unique
+    // `$id` so its strategy arrays can `$ref` back to it (full recursion),
+    // while staying collision-free when embedded in several policy schemas on
+    // the same Ajv instance. We stay lenient to unknown keys
+    // (`additionalProperties: true`) but still require at least one valid
+    // strategy via `anyOf`, so a malformed match with no strategy (or a
+    // primitive leaf) is rejected while extra/forward-compat keys are tolerated.
+    // This mirrors the TypeBox/Zod backends.
+    const $id = `kerberos:condition-match-${(ConditionsJsonSchemas.#matchSchemaSeq += 1)}`;
+    const self = { $ref: $id };
     return {
-      anyOf: [matchExpr, ConditionsJsonSchemas.buildConditionStrategyObject(nested)],
+      $id,
+      anyOf: [
+        ConditionsJsonSchemas.buildConditionSingleMatchExpr(),
+        {
+          type: 'object',
+          properties: {
+            any: JsonSchemas.buildNonEmptyArrayShape(self),
+            all: JsonSchemas.buildNonEmptyArrayShape(self),
+            none: JsonSchemas.buildNonEmptyArrayShape(self),
+          },
+          additionalProperties: true,
+          anyOf: [
+            { required: ['any'] },
+            { required: ['all'] },
+            { required: ['none'] },
+          ],
+        },
+      ],
     };
   }
 
