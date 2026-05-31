@@ -11,8 +11,8 @@ describe('DerivedRoles', () => {
 
     assert.strictEqual(derivedRoles.name, 'common_roles');
     assert.strictEqual(derivedRoles.roles.size, 4);
-    assert.strictEqual(derivedRoles.schema.variables, undefined);
-    assert.strictEqual(derivedRoles.schema.constants, undefined);
+    assert.strictEqual(derivedRoles.shape.variables, undefined);
+    assert.strictEqual(derivedRoles.shape.constants, undefined);
   });
 
   it('should get roles', () => {

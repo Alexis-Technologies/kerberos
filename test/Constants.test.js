@@ -1,5 +1,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert').strict;
+const { z } = require('zod');
 
 const { Constants } = require('../src/Constants');
 
@@ -54,10 +55,10 @@ describe('Constants', () => {
     });
   });
 
-  it('should throw an error with an invalid schema', () => {
+  it('should throw an error with an invalid schema if zod is provided', () => {
     assert.throws(() => {
       // eslint-disable-next-line no-new
-      new Constants(new Map());
+      new Constants(new Map(), { z });
     });
   });
 });

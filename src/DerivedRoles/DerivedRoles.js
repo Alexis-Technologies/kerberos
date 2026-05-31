@@ -1,63 +1,103 @@
-const { DerivedRolesSchemaSchema } = require('./schemas.js');
+const { parseDerivedRolesShape } = require('./validation');
 
 const { Variables } = require('../Variables');
 const { Conditions } = require('../Conditions');
 const { Constants } = require('../Constants');
 
+/**
+ * Represents a derived roles definition set.
+ */
 class DerivedRoles {
-  static parseConstants(constants) {
-    return constants instanceof Constants ? constants : new Constants(constants);
+  /**
+   * Parses a derived roles shape with the configured validation backend.
+   *
+   * @param {unknown} shape
+   * @param {object} [options]
+   * @returns {unknown}
+   */
+  static parseShape(shape, options = {}) {
+    return parseDerivedRolesShape(shape, options);
   }
 
-  static parseVariables(variables) {
-    return variables instanceof Variables ? variables : new Variables(variables);
+  static parseConstants(constants, options = {}) {
+    return constants instanceof Constants ? constants : new Constants(constants, options);
   }
 
-  static parseConditions(conditions) {
-    return conditions instanceof Conditions ? conditions : new Conditions(conditions);
+  static parseVariables(variables, options = {}) {
+    return variables instanceof Variables ? variables : new Variables(variables, options);
   }
 
-  constructor(schema) {
-    this.schema = DerivedRolesSchemaSchema.parse(schema);
-    if (this.schema.constants) this.schema.constants = DerivedRoles.parseConstants(this.schema.constants);
-    if (this.schema.variables) this.schema.variables = DerivedRoles.parseVariables(this.schema.variables);
-    this.schema.definitions = this.schema.definitions.map((def) => ({
-      ...def,
-      condition: DerivedRoles.parseConditions(def.condition),
-    }));
+  static parseConditions(conditions, options = {}) {
+    return conditions instanceof Conditions ? conditions : new Conditions(conditions, options);
+  }
+
+  #shape = null;
+
+  /**
+   * @param {unknown} shape
+   * @param {object} [options]
+   */
+  constructor(shape, options = {}) {
+    this.#shape = DerivedRoles.parseShape(shape, options);
+    if (this.#shape.constants) this.#shape.constants = DerivedRoles.parseConstants(this.#shape.constants, options);
+    if (this.#shape.variables) this.#shape.variables = DerivedRoles.parseVariables(this.#shape.variables, options);
+    if (this.#shape.definitions?.length) {
+      const defs = [];
+      for (const def of this.#shape.definitions) {
+        defs.push({ ...def, condition: DerivedRoles.parseConditions(def.condition, options) });
+      }
+      this.#shape.definitions = defs;
+    }
   }
 
   get name() {
-    return this.schema.name;
+    return this.#shape.name;
   }
 
   get roles() {
-    return new Map(this.schema.definitions.map((def) => [def.name, def]));
+    const rolesMap = new Map();
+    for (const def of this.#shape.definitions) rolesMap.set(def.name, def);
+    return rolesMap;
   }
 
+  get shape() {
+    return this.#shape;
+  }
+
+  /**
+   * Resolves active derived roles for a request.
+   *
+   * @param {Record<string, unknown>} req
+   * @returns {Set<string>}
+   */
   get(req) {
     const roles = new Set();
 
-    for (const [name, def] of this.roles) {
-      if (this.isRoleMatched(def, this.populateVariables(this.populateConstants(req)))) roles.add(name);
+    if (!this.#shape.definitions.length) return roles;
+
+    const constants = this.#shape.constants?.get();
+    const reqWithConstants = { ...req, constants, C: constants };
+
+    const variables = this.#shape.variables?.get(reqWithConstants);
+    const reqWithVariables = { ...reqWithConstants, variables, V: variables };
+
+    // O(1) membership lookups for parent-role matching across all definitions.
+    const principalRoles = new Set(reqWithVariables.P.roles);
+
+    for (const def of this.#shape.definitions) {
+      let isRoleMatched = false;
+      for (const role of def.parentRoles) {
+        if (principalRoles.has(role)) {
+          isRoleMatched = true;
+          break;
+        }
+      }
+      if (!isRoleMatched) continue;
+
+      if (def.condition.isFulfilled(reqWithVariables)) roles.add(def.name);
     }
 
     return roles;
-  }
-
-  populateVariables(req) {
-    const variables = this.schema.variables?.get(req);
-    return { ...req, variables, V: variables };
-  }
-
-  populateConstants(req) {
-    const constants = this.schema.constants?.get();
-    return { ...req, constants, C: constants };
-  }
-
-  isRoleMatched(def, req) {
-    if (!def.parentRoles.some((role) => req.P.roles.includes(role))) return false;
-    return def.condition.isFulfilled(req);
   }
 }
 

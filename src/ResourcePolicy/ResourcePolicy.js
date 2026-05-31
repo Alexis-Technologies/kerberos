@@ -1,104 +1,203 @@
-const { ResourcePolicyRootSchemaSchema } = require('./schemas.js');
+const { Outputs } = require('../Outputs');
+const { parseResourcePolicyShape } = require('./validation');
 
-const { ALL_ACTIONS, Effect } = require('../schemas.js');
+const { ALL_ACTIONS, Effect } = require('../schemas');
 const { Variables } = require('../Variables');
 const { Conditions } = require('../Conditions');
 const { Constants } = require('../Constants');
 
+/**
+ * Represents a resource policy and evaluates actions for requests.
+ */
 class ResourcePolicy {
-  static parseConstants(constants) {
-    return constants instanceof Constants ? constants : new Constants(constants);
+  /**
+   * Parses a resource policy shape with the configured validation backend.
+   *
+   * @param {unknown} shape
+   * @param {object} [options]
+   * @returns {unknown}
+   */
+  static parseShape(shape, options = {}) {
+    return parseResourcePolicyShape(shape, options);
   }
 
-  static parseVariables(variables) {
-    return variables instanceof Variables ? variables : new Variables(variables);
+  static parseConstants(constants, options = {}) {
+    return constants instanceof Constants ? constants : new Constants(constants, options);
   }
 
-  static parseConditions(conditions) {
+  static parseVariables(variables, options = {}) {
+    return variables instanceof Variables ? variables : new Variables(variables, options);
+  }
+
+  static parseConditions(conditions, options = {}) {
     if (!conditions) return undefined;
-    return conditions instanceof Conditions ? conditions : new Conditions(conditions);
+    return conditions instanceof Conditions ? conditions : new Conditions(conditions, options);
   }
 
-  constructor(schema) {
-    this.schema = ResourcePolicyRootSchemaSchema.parse(schema);
-    if (this.schema.resourcePolicy.constants) {
-      this.schema.resourcePolicy.constants = ResourcePolicy.parseConstants(this.schema.resourcePolicy.constants);
+  static parseOutputs(outputs, options = {}) {
+    if (!outputs) return undefined;
+    return outputs instanceof Outputs ? outputs : new Outputs(outputs, options);
+  }
+
+  #shape = null;
+
+  /**
+   * @param {unknown} shape
+   * @param {object} [options]
+   */
+  constructor(shape, options = {}) {
+    this.#shape = ResourcePolicy.parseShape(shape, options);
+    if (this.#shape.resourcePolicy.constants) {
+      this.#shape.resourcePolicy.constants = ResourcePolicy.parseConstants(this.#shape.resourcePolicy.constants, options);
     }
-    if (this.schema.resourcePolicy.variables) {
-      this.schema.resourcePolicy.variables = ResourcePolicy.parseVariables(this.schema.resourcePolicy.variables);
+    if (this.#shape.resourcePolicy.variables) {
+      this.#shape.resourcePolicy.variables = ResourcePolicy.parseVariables(this.#shape.resourcePolicy.variables, options);
     }
-    this.schema.resourcePolicy.rules = this.schema.resourcePolicy.rules.map((rule) => ({
-      ...rule,
-      condition: ResourcePolicy.parseConditions(rule.condition),
-    }));
+    if (this.#shape.resourcePolicy.rules?.length) {
+      const rules = [];
+      for (const rule of this.#shape.resourcePolicy.rules) {
+        rules.push({
+          ...rule,
+          condition: ResourcePolicy.parseConditions(rule.condition, options),
+          output: ResourcePolicy.parseOutputs(rule.output, options),
+        });
+      }
+      this.#shape.resourcePolicy.rules = rules;
+    }
   }
 
   get kind() {
-    return this.schema.resourcePolicy.resource;
+    return this.#shape.resourcePolicy.resource;
+  }
+
+  get version() {
+    return this.#shape.resourcePolicy.version;
+  }
+
+  get scope() {
+    const scope = this.#shape.resourcePolicy.scope;
+    // `'.'` is the documented base-scope alias; treat it like an unset scope
+    // so output `src` and `matchedScope` match Kerberos lookup normalization.
+    if (!scope || scope === '.') return undefined;
+    return scope;
   }
 
   get importDerivedRoles() {
-    return this.schema.resourcePolicy.importDerivedRoles ?? [];
+    return this.#shape.resourcePolicy.importDerivedRoles ?? [];
   }
 
   get rules() {
-    return this.schema.resourcePolicy.rules;
+    return this.#shape.resourcePolicy.rules;
   }
 
-  populateVariables(req) {
-    const variables = this.schema.resourcePolicy.variables?.get(req);
-    return { ...req, variables, V: variables };
+  get shape() {
+    return this.#shape;
   }
 
-  populateConstants(req) {
-    const constants = this.schema.resourcePolicy.constants?.get();
-    return { ...req, constants, C: constants };
-  }
+  /**
+   * Evaluates a request and returns action effects, outputs and metadata.
+   *
+   * @param {Record<string, unknown>} req
+   * @param {Set<string>} derivedRoles
+   * @param {boolean} [effectAsBoolean=false]
+   * @returns {{ effects: Map<string, string | boolean>, outputs: Map<string, unknown>, meta: Record<string, unknown> }}
+   */
+  check(req, derivedRoles, effectAsBoolean = false) {
+    const effects = new Map();
+    const outputs = new Map();
+    const metaSrcPrefix = `resource.${this.kind}.v${this.version}`;
+    const metaSrcBase = this.scope ? `${metaSrcPrefix}/${this.scope}` : metaSrcPrefix;
+    const meta = { actions: {}, effectiveDerivedRoles: [...derivedRoles.values()] };
 
-  buildEffects(req, derivedRoles) {
-    const result = new Map();
+    if (!req.actions?.length) return { effects, outputs, meta };
 
-    for (const action of req.actions) {
-      const actionEffects = [];
+    const constants = this.#shape.resourcePolicy.constants?.get();
+    const reqWithConstants = { ...req, constants, C: constants };
 
-      for (const rule of this.rules) {
+    const variables = this.#shape.resourcePolicy.variables?.get(reqWithConstants);
+    const reqWithVariables = { ...reqWithConstants, variables, V: variables };
+
+    // Principal roles are looked up once per rule/action; a Set turns the inner
+    // `roles.includes(role)` scans into O(1) membership checks.
+    const principalRoles = new Set(reqWithVariables.P.roles);
+
+    const denyValue = !effectAsBoolean ? Effect.Deny : false;
+    const allowValue = !effectAsBoolean ? Effect.Allow : true;
+    const rules = this.rules;
+
+    for (const action of reqWithVariables.actions) {
+      // Track effects with two flags instead of building an array and running
+      // `includes` twice; Deny still wins over Allow.
+      let hasDeny = false;
+      let hasAllow = false;
+      // Record the rule that determines the final effect: a Deny rule pins the
+      // matched rule (Deny wins), otherwise the latest fulfilled Allow rule.
+      let matchedRuleSrc = null;
+      let matchedRuleIsDeny = false;
+      meta.actions[action] = { matchedPolicy: metaSrcBase };
+
+      for (let i = 0; i < rules.length; i++) {
+        const rule = rules[i];
         // Checking if the rule applies to the action
         if (!rule.actions.includes(ALL_ACTIONS) && !rule.actions.includes(action)) continue;
 
-        // Checking if the roles match
-        const rolesMatch = rule.roles?.some((role) => req.P.roles.includes(role)) ?? false;
-        const derivedRolesMatch = rule.derivedRoles?.some((role) => derivedRoles.has(role)) ?? false;
+        // Checking if the roles match (`*` is the wildcard role and matches any principal)
+        let rolesMatch = false;
+        if (Array.isArray(rule.roles)) {
+          for (const role of rule.roles) {
+            if (role === ALL_ACTIONS || principalRoles.has(role)) {
+              rolesMatch = true;
+              break;
+            }
+          }
+        }
+
+        let derivedRolesMatch = false;
+        if (!rolesMatch && Array.isArray(rule.derivedRoles)) {
+          for (const role of rule.derivedRoles) {
+            if (derivedRoles.has(role)) {
+              derivedRolesMatch = true;
+              break;
+            }
+          }
+        }
 
         if (!rolesMatch && !derivedRolesMatch) continue;
 
         // Checking the condition
-        const conditionPasses = rule.condition ? rule.condition.isFulfilled(req) : true;
-        if (conditionPasses) {
-          actionEffects.push(rule.effect);
+        const isConditionFulfilled = rule.condition ? rule.condition.isFulfilled(reqWithVariables) : true;
+        const metaSrc = `${metaSrcBase}#${rule.name || 'UNNAMED_RULE' + `_${i + 1}`}`;
+
+        // Build outputs based on rule activation and condition fulfillment.
+        // `build` returns null when the rule has no output branch for the
+        // current activation state, so we don't emit spurious null outputs.
+        if (rule.output) {
+          const output = rule.output.build(reqWithVariables, isConditionFulfilled, metaSrc);
+          if (output) outputs.set(output.src, output);
+        }
+
+        if (isConditionFulfilled) {
+          if (rule.effect === Effect.Deny) {
+            hasDeny = true;
+            matchedRuleSrc = metaSrc;
+            matchedRuleIsDeny = true;
+          } else if (rule.effect === Effect.Allow) {
+            hasAllow = true;
+            if (!matchedRuleIsDeny) matchedRuleSrc = metaSrc;
+          }
         }
       }
 
-      if (actionEffects.includes(Effect.Deny)) {
-        result.set(action, Effect.Deny);
-      } else if (actionEffects.includes(Effect.Allow)) {
-        result.set(action, Effect.Allow);
-      } else {
-        // If there are no rules allowing the action, the default is Deny
-        result.set(action, Effect.Deny);
+      if (matchedRuleSrc !== null) {
+        meta.actions[action].matchedRule = matchedRuleSrc;
+        if (this.scope) meta.actions[action].matchedScope = this.scope;
       }
+
+      // Deny wins; otherwise Allow; otherwise default Deny.
+      effects.set(action, hasDeny ? denyValue : hasAllow ? allowValue : denyValue);
     }
 
-    return result;
-  }
-
-  isAllowed(req, derivedRoles) {
-    const effects = this.buildEffects(this.populateVariables(this.populateConstants({ ...req, actions: [req.action] })), derivedRoles);
-    return effects.get(req.action) === Effect.Allow || effects.get(ALL_ACTIONS) === Effect.Allow;
-  }
-
-  // returns map of actions and effects
-  check(req, derivedRoles) {
-    return this.buildEffects(this.populateVariables(this.populateConstants(req)), derivedRoles);
+    return { effects, outputs, meta };
   }
 }
 

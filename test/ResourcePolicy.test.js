@@ -20,129 +20,131 @@ describe('ResourcePolicy', () => {
     assert.strictEqual(resourcePolicy.rules.length, 10);
   });
 
-  describe('isAllowed', () => {
+  describe('check', () => {
     it('should allow ADMIN to view', () => {
       const principal = principalsPolicy.ian;
       const resource = resourcesPolicy.expense1;
-      const action = 'view';
-      const req = { P: principal, principal, R: resource, resource, action };
+      const actions = ['view'];
+      const req = { P: principal, principal, R: resource, resource, actions };
 
-      const isAllowed = resourcePolicy.isAllowed(req, new DerivedRoles(commonRolesPolicy).get(req));
+      const { effects } = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
 
-      assert.strictEqual(isAllowed, true);
+      assert.deepStrictEqual(Object.fromEntries(effects), { view: Effect.Allow });
     });
 
     it('should allow OWNER to view', () => {
       const principal = principalsPolicy.sally;
       const resource = resourcesPolicy.expense1;
-      const action = 'view';
-      const req = { P: principal, principal, R: resource, resource, action };
+      const actions = ['view'];
+      const req = { P: principal, principal, R: resource, resource, actions };
 
-      const isAllowed = resourcePolicy.isAllowed(req, new DerivedRoles(commonRolesPolicy).get(req));
+      const { effects } = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
 
-      assert.strictEqual(isAllowed, true);
+      assert.deepStrictEqual(Object.fromEntries(effects), { view: Effect.Allow });
     });
 
     it('should allowed Frank to view expenses as FINANCE role', () => {
       const principal = principalsPolicy.frank;
       const resource = resourcesPolicy.expense1;
-      const action = 'view';
+      const actions = ['view'];
 
-      const req = { P: principal, principal, R: resource, resource, action };
+      const req = { P: principal, principal, R: resource, resource, actions };
 
-      const isAllowed = resourcePolicy.isAllowed(req, new DerivedRoles(commonRolesPolicy).get(req));
+      const { effects } = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
 
-      assert.strictEqual(isAllowed, true);
+      assert.deepStrictEqual(Object.fromEntries(effects), { view: Effect.Allow });
     });
 
     it('should allowed Derek to delete expenses as FINANCE_MANAGER', () => {
       const principal = principalsPolicy.derek;
       const resource = resourcesPolicy.expense1;
-      const action = 'delete';
+      const actions = ['delete'];
 
-      const req = { P: principal, principal, R: resource, resource, action };
+      const req = { P: principal, principal, R: resource, resource, actions };
 
-      const allowed = resourcePolicy.isAllowed(req, new DerivedRoles(commonRolesPolicy).get(req));
+      const { effects } = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
 
-      assert.strictEqual(allowed, true);
+      assert.deepStrictEqual(Object.fromEntries(effects), { delete: Effect.Allow });
     });
 
     it('should not allow Sally to approve expenses over $10,000', () => {
       const principal = principalsPolicy.sally;
       const resource = resourcesPolicy.expense3;
-      const action = 'approve';
+      const actions = ['approve'];
 
-      const req = { P: principal, principal, R: resource, resource, action };
+      const req = { P: principal, principal, R: resource, resource, actions };
 
-      const allowed = resourcePolicy.isAllowed(req, new DerivedRoles(commonRolesPolicy).get(req));
+      const { effects } = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
 
-      assert.strictEqual(allowed, false);
+      assert.deepStrictEqual(Object.fromEntries(effects), { approve: Effect.Deny });
     });
 
     it('should allow Mark to view expenses in his region as REGION_MANAGER', () => {
       const principal = principalsPolicy.mark;
       const resource = resourcesPolicy.expense1;
-      const action = 'view';
+      const actions = ['view'];
 
-      const req = { P: principal, principal, R: resource, resource, action };
+      const req = { P: principal, principal, R: resource, resource, actions };
 
-      const allowed = resourcePolicy.isAllowed(req, new DerivedRoles(commonRolesPolicy).get(req));
+      const { effects } = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
 
-      assert.strictEqual(allowed, true);
+      assert.deepStrictEqual(Object.fromEntries(effects), { view: Effect.Allow });
     });
 
     it('should not allow Simon to view expenses in a different region', () => {
       const principal = principalsPolicy.simon;
       const resource = resourcesPolicy.expense1;
-      const action = 'view';
+      const actions = ['view'];
 
-      const req = { P: principal, principal, R: resource, resource, action };
+      const req = { P: principal, principal, R: resource, resource, actions };
 
-      const allowed = resourcePolicy.isAllowed(req, new DerivedRoles(commonRolesPolicy).get(req));
+      const { effects } = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
 
-      assert.strictEqual(allowed, false);
+      assert.deepStrictEqual(Object.fromEntries(effects), { view: Effect.Deny });
     });
 
     it('should allow Ian to perform any action', () => {
       const principal = principalsPolicy.ian;
       const resource = resourcesPolicy.expense1;
       const actions = ['view', 'create', 'update', 'delete', 'approve', 'view:approver'];
+      const req = { P: principal, principal, R: resource, resource, actions };
 
-      for (const action of actions) {
-        const req = { P: principal, principal, R: resource, resource, action };
+      const { effects } = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
 
-        const allowed = resourcePolicy.isAllowed(req, new DerivedRoles(commonRolesPolicy).get(req));
-
-        assert.strictEqual(allowed, true);
-      }
+      assert.deepStrictEqual(Object.fromEntries(effects), {
+        view: Effect.Allow,
+        create: Effect.Allow,
+        update: Effect.Allow,
+        delete: Effect.Allow,
+        approve: Effect.Allow,
+        'view:approver': Effect.Allow,
+      });
     });
 
     it('should allow Sally to delete her own expense if created within the last hour', () => {
       const principal = principalsPolicy.sally;
       const resource = { ...resourcesPolicy.expense1, attr: { ...resourcesPolicy.expense1.attr, createdAt: new Date(Date.now() - 30 * 60 * 1000).toISOString() } }; // 30 minutes ago
-      const action = 'delete';
+      const actions = ['delete'];
 
-      const req = { P: principal, principal, R: resource, resource, action };
+      const req = { P: principal, principal, R: resource, resource, actions };
 
-      const allowed = resourcePolicy.isAllowed(req, new DerivedRoles(commonRolesPolicy).get(req));
+      const { effects } = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
 
-      assert.strictEqual(allowed, true);
+      assert.deepStrictEqual(Object.fromEntries(effects), { delete: Effect.Allow });
     });
 
     it('should not allow Sally to delete her own expense if created over an hour ago', () => {
       const principal = principalsPolicy.sally;
       const resource = { ...resourcesPolicy.expense1, attr: { ...resourcesPolicy.expense1.attr, createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString() } }; // 2 hours ago
-      const action = 'delete';
+      const actions = ['delete'];
 
-      const req = { P: principal, principal, R: resource, resource, action };
+      const req = { P: principal, principal, R: resource, resource, actions };
 
-      const allowed = resourcePolicy.isAllowed(req, new DerivedRoles(commonRolesPolicy).get(req));
+      const { effects } = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
 
-      assert.strictEqual(allowed, false);
+      assert.deepStrictEqual(Object.fromEntries(effects), { delete: Effect.Deny });
     });
-  });
 
-  describe('check', () => {
     it('should return map of actions and effects (Ian)', () => {
       const principal = principalsPolicy.ian;
       const resource = resourcesPolicy.expense1;
@@ -150,7 +152,7 @@ describe('ResourcePolicy', () => {
 
       const req = { P: principal, principal, R: resource, resource, actions };
 
-      const effects = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
+      const { effects } = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
 
       assert.deepStrictEqual(Object.fromEntries(effects), {
         view: Effect.Allow,
@@ -169,7 +171,7 @@ describe('ResourcePolicy', () => {
 
       const req = { P: principal, principal, R: resource, resource, actions };
 
-      const effects = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
+      const { effects } = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
 
       assert.deepStrictEqual(Object.fromEntries(effects), {
         view: Effect.Allow,
@@ -188,7 +190,7 @@ describe('ResourcePolicy', () => {
 
       const req = { P: principal, principal, R: resource, resource, actions };
 
-      const effects = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
+      const { effects } = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
 
       assert.deepStrictEqual(Object.fromEntries(effects), {
         view: Effect.Allow,
@@ -207,7 +209,7 @@ describe('ResourcePolicy', () => {
 
       const req = { P: principal, principal, R: resource, resource, actions };
 
-      const effects = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
+      const { effects } = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
 
       assert.deepStrictEqual(Object.fromEntries(effects), {
         view: Effect.Allow,
@@ -226,7 +228,7 @@ describe('ResourcePolicy', () => {
 
       const req = { P: principal, principal, R: resource, resource, actions };
 
-      const effects = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
+      const { effects } = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
 
       assert.deepStrictEqual(Object.fromEntries(effects), {
         view: Effect.Deny,
@@ -245,7 +247,7 @@ describe('ResourcePolicy', () => {
 
       const req = { P: principal, principal, R: resource, resource, actions };
 
-      const effects = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
+      const { effects } = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
 
       assert.deepStrictEqual(Object.fromEntries(effects), {
         view: Effect.Allow,
@@ -264,7 +266,7 @@ describe('ResourcePolicy', () => {
 
       const req = { P: principal, principal, R: resource, resource, actions };
 
-      const effects = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
+      const { effects } = resourcePolicy.check(req, new DerivedRoles(commonRolesPolicy).get(req));
 
       assert.deepStrictEqual(Object.fromEntries(effects), {
         view: Effect.Deny,

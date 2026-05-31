@@ -3,7 +3,7 @@ const { strict: assert } = require('node:assert');
 
 const { principalsPolicy, expenseTestPolicy, resourcesPolicy, expensePolicy, commonRolesPolicy } = require('./mocks/index.js');
 
-const { KerberosTest, PrincipalsMock, ResourcesMock } = require('../src/Tests/index.js');
+const { KerberosTest, PrincipalsMock, ResourcesMock } = require('@alexify/kerberos/tests');
 const { Effect, Kerberos } = require('../src/index.js');
 
 describe('KerberosTest', () => {
@@ -42,5 +42,42 @@ describe('KerberosTest', () => {
       },
       { describe, it, assert }
     );
+  });
+
+  it('should fail when checkResources returns no results for a requested resource', async () => {
+    class EmptyResultKerberos extends Kerberos {
+      async checkResources() {
+        return { results: [] };
+      }
+    }
+
+    const kerberosTest = new KerberosTest(
+      expenseTestPolicy.tests[0],
+      new EmptyResultKerberos([expensePolicy], [commonRolesPolicy])
+    );
+    const assertions = [];
+
+    kerberosTest.run(
+      {
+        principals: [new PrincipalsMock(principalsPolicy)],
+        resources: [new ResourcesMock(resourcesPolicy)],
+      },
+      {
+        describe: (_, fn) => fn(),
+        it: (_, fn) => assertions.push(fn),
+        assert: {
+          ok(value, message) {
+            if (!value) throw new Error(message);
+          },
+          strictEqual(actual, expected, message) {
+            if (actual !== expected) throw new Error(message);
+          },
+        },
+      }
+    );
+
+    await assert.rejects(async () => {
+      for (const fn of assertions) await fn();
+    }, /No result returned for resource/);
   });
 });

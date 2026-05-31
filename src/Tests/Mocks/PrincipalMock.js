@@ -1,32 +1,57 @@
-const { z } = require('zod');
+const { PrincipalMockZodSchemas } = require('./schemas');
+const { parsePrincipalMockShape } = require('./validation');
 
-const RequestPrincipalSchema = require('../../schemas.js').RequestPrincipalSchema;
-
-const PrincipalMockSchema = RequestPrincipalSchema.extend({ name: z.string() });
-
+/**
+ * Represents a named principal fixture used by the test helpers.
+ */
 class PrincipalMock {
-  constructor(schema) {
-    this.schema = PrincipalMockSchema.parse(schema);
+  /**
+   * Parses a principal mock shape with the configured validation backend.
+   *
+   * @param {unknown} shape
+   * @param {object} [options]
+   * @returns {unknown}
+   */
+  static parseShape(shape, options = {}) {
+    return parsePrincipalMockShape(shape, options);
+  }
+
+  #shape = null;
+
+  /**
+   * @param {unknown} shape
+   * @param {object} [options]
+   */
+  constructor(shape, options = {}) {
+    this.#shape = PrincipalMock.parseShape(shape, options);
   }
 
   get id() {
-    return this.schema.id;
+    return this.#shape.id;
   }
 
   get name() {
-    return this.schema.name;
+    return this.#shape.name;
   }
 
   get roles() {
-    return this.schema.roles;
+    return this.#shape.roles;
   }
 
   get attr() {
-    return this.schema.attr;
+    return this.#shape.attr;
+  }
+
+  get policyVersion() {
+    return this.#shape.policyVersion;
+  }
+
+  get scope() {
+    return this.#shape.scope;
   }
 }
 
 module.exports = {
   PrincipalMock,
-  PrincipalMockSchema,
+  PrincipalMockZodSchemas,
 };

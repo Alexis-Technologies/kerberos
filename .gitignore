@@ -116,3 +116,6 @@ dist
 .nuxt
 .nitro
 .cache
+
+.cursor/plans
+.pnpm-store

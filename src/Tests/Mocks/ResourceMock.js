@@ -1,29 +1,54 @@
-const { z } = require('zod');
+const { ResourceMockZodSchemas } = require('./schemas');
+const { parseResourceMockShape } = require('./validation');
 
-const { RequestResourceSchema } = require('../../schemas.js');
-
-const ResourceMockSchema = RequestResourceSchema.extend({ name: z.string() });
-
+/**
+ * Represents a named resource fixture used by the test helpers.
+ */
 class ResourceMock {
-  constructor(schema) {
-    this.schema = ResourceMockSchema.parse(schema);
+  /**
+   * Parses a resource mock shape with the configured validation backend.
+   *
+   * @param {unknown} shape
+   * @param {object} [options]
+   * @returns {unknown}
+   */
+  static parseShape(shape, options = {}) {
+    return parseResourceMockShape(shape, options);
+  }
+
+  #shape = null;
+
+  /**
+   * @param {unknown} shape
+   * @param {object} [options]
+   */
+  constructor(shape, options = {}) {
+    this.#shape = ResourceMock.parseShape(shape, options);
   }
 
   get id() {
-    return this.schema.id;
+    return this.#shape.id;
   }
 
   get name() {
-    return this.schema.name;
+    return this.#shape.name;
   }
 
   get kind() {
-    return this.schema.kind;
+    return this.#shape.kind;
   }
 
   get attr() {
-    return this.schema.attr;
+    return this.#shape.attr;
+  }
+
+  get policyVersion() {
+    return this.#shape.policyVersion;
+  }
+
+  get scope() {
+    return this.#shape.scope;
   }
 }
 
-module.exports = { ResourceMock, ResourceMockSchema };
+module.exports = { ResourceMock, ResourceMockZodSchemas };

@@ -1,7 +1,16 @@
 module.exports = {
+  ...require('./Constants/index.js'),
+  ...require('./Conditions/index.js'),
+  ...require('./Outputs/index.js'),
+  ...require('./Variables/index.js'),
   ...require('./ResourcePolicy/index.js'),
+  ...require('./PrincipalPolicy/index.js'),
+  ...require('./RolePolicy/index.js'),
   ...require('./DerivedRoles/index.js'),
+  ...require('./Metadata/schemas/index.js'),
   ...require('./Kerberos.js'),
-  ...require('./schemas.js'),
-  Tests: require('./Tests/index.js'),
+  ...require('./caching/cache.js'),
+  ...require('./caching/codec.js'),
+  ...require('./schemas'),
+  ...require('./validation'),
 };

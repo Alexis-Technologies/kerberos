@@ -1,5 +1,6 @@
 const { describe, it } = require('node:test');
 const { strict: assert } = require('node:assert');
+const { z } = require('zod');
 
 const { Conditions } = require('../src/Conditions');
 
@@ -113,11 +114,39 @@ describe('Conditions', () => {
     assert.strictEqual(condition.isFulfilled(reqMock), false);
   });
 
-  it('should match with invalid schema', () => {
+  it('should throw an error with an invalid schema if zod is provided', () => {
     assert.throws(() => {
       // eslint-disable-next-line no-new
-      new Conditions({ invalidKey: 'invalidValue' });
+      new Conditions({ invalidKey: 'invalidValue' }, { z });
     });
+  });
+
+  it('should not match an empty strategy object when validation is disabled', () => {
+    const condition = new Conditions({ match: {} });
+
+    assert.strictEqual(condition.isFulfilled(reqMock), false);
+  });
+
+  it('should not match empty all or none strategy arrays when validation is disabled', () => {
+    assert.strictEqual(new Conditions({ match: { all: [] } }).isFulfilled(reqMock), false);
+    assert.strictEqual(new Conditions({ match: { none: [] } }).isFulfilled(reqMock), false);
+    assert.strictEqual(new Conditions({ match: { any: [] } }).isFulfilled(reqMock), false);
+  });
+
+  it('should fail closed on falsy nested condition leaves without recursing to root', () => {
+    assert.strictEqual(new Conditions({ match: { all: [false] } }).isFulfilled(reqMock), false);
+    assert.strictEqual(new Conditions({ match: { all: [null] } }).isFulfilled(reqMock), false);
+  });
+
+  it('should ignore unknown strategy keys for forward compatibility', () => {
+    const condition = new Conditions({
+      match: {
+        all: [({ P }) => P.id === 'user-123'],
+        description: 'owner check',
+      },
+    });
+
+    assert.strictEqual(condition.isFulfilled(reqMock), true);
   });
 
   it('should match with nested conditions - true case', () => {
@@ -127,7 +156,7 @@ describe('Conditions', () => {
           ({ P }) => P.id === 'user-123',
           {
             any: [({ P }) => P.attr.account.email === 'test@example.com', ({ P }) => P.attr.account.email === 'other@example.com'],
-            none: [({ P }) => P.attr.account.email === 'test@example.com', ({ P }) => P.id === 'user-999'],
+            none: [({ P }) => P.attr.account.email === 'wrong@example.com', ({ P }) => P.id === 'user-999'],
           },
         ],
       },
@@ -142,8 +171,8 @@ describe('Conditions', () => {
         all: [
           ({ P }) => P.id === 'user-123',
           {
-            any: [({ P }) => P.attr.account.email === '', ({ P }) => P.attr.account.email === ''],
-            none: [({ P }) => P.attr.account.email === '', ({ P }) => P.id === 'user-999'],
+            any: [({ P }) => P.attr.account.email === 'wrong@example.com', ({ P }) => P.attr.account.email === 'other@example.com'],
+            none: [({ P }) => P.attr.account.email === 'wrong@example.com', ({ P }) => P.id === 'user-999'],
           },
         ],
       },

@@ -3,5 +3,7 @@ module.exports = {
   ...require('./testdata/principals.js'),
   ...require('./testdata/resources.js'),
   ...require('./expense_policy.js'),
+  ...require('./principal_policy.js'),
+  ...require('./role_policy.js'),
   ...require('./expense_test.js'),
 };

@@ -1,4 +1,4 @@
-const { PrincipalsMock, ResourcesMock } = require('../../src/Tests');
+const { PrincipalsMock, ResourcesMock } = require('@alexify/kerberos/tests');
 const { principalsPolicy } = require('./testdata/principals.js');
 const { resourcesPolicy } = require('./testdata/resources.js');
 

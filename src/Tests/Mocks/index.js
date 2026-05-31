@@ -3,4 +3,5 @@ module.exports = {
   ...require('./PrincipalsMock.js'),
   ...require('./ResourceMock.js'),
   ...require('./ResourcesMock.js'),
+  ...require('./schemas'),
 };
