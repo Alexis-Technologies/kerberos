@@ -1,5 +1,19 @@
 const { KERBEROS_TYPE_KEYWORD, KERBEROS_INSTANCE_OF_KEYWORD } = require('./keywords.js');
 
+// O(1) strategy dispatch for the `typeof` check keyword. A prototype-less table
+// guards against poisoned `expectedType` values (e.g. "constructor"), and the
+// literal-string predicates satisfy the `valid-typeof` lint rule.
+const TYPE_CHECKS = Object.assign(Object.create(null), {
+  bigint: (value) => typeof value === 'bigint',
+  boolean: (value) => typeof value === 'boolean',
+  function: (value) => typeof value === 'function',
+  number: (value) => typeof value === 'number',
+  object: (value) => typeof value === 'object',
+  string: (value) => typeof value === 'string',
+  symbol: (value) => typeof value === 'symbol',
+  undefined: (value) => typeof value === 'undefined',
+});
+
 /**
  * Registers Kerberos-specific Ajv keywords needed to validate the policy DSL.
  *
@@ -15,26 +29,8 @@ function registerAjvKeywords(ajv) {
       schemaType: 'string',
       errors: false,
       validate(expectedType, value) {
-        switch (expectedType) {
-          case 'bigint':
-            return typeof value === 'bigint';
-          case 'boolean':
-            return typeof value === 'boolean';
-          case 'function':
-            return typeof value === 'function';
-          case 'number':
-            return typeof value === 'number';
-          case 'object':
-            return typeof value === 'object';
-          case 'string':
-            return typeof value === 'string';
-          case 'symbol':
-            return typeof value === 'symbol';
-          case 'undefined':
-            return typeof value === 'undefined';
-          default:
-            return false;
-        }
+        const check = TYPE_CHECKS[expectedType];
+        return check ? check(value) : false;
       },
     });
   }
