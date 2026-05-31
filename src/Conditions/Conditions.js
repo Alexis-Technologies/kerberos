@@ -17,14 +17,17 @@ class Conditions {
 
   #strategies = {
     any: (conds, req) => {
+      if (!Array.isArray(conds) || !conds.length) return false;
       for (const cond of conds) if (this.isFulfilled(req, cond)) return true;
       return false;
     },
     all: (conds, req) => {
+      if (!Array.isArray(conds) || !conds.length) return false;
       for (const cond of conds) if (!this.isFulfilled(req, cond)) return false;
       return true;
     },
     none: (conds, req) => {
+      if (!Array.isArray(conds) || !conds.length) return false;
       for (const cond of conds) if (this.isFulfilled(req, cond)) return false;
       return true;
     },

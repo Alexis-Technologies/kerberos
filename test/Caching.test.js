@@ -149,6 +149,17 @@ describe('Caching / Storing policies', () => {
       );
     });
 
+    it('throws when a descriptor has a non-string $expr', () => {
+      assert.throws(
+        () => serializePolicy({ condition: { match: { $expr: 42 } } }),
+        KerberosExprError
+      );
+      assert.throws(
+        () => codec.deserialize({ condition: { match: { $expr: null } } }),
+        KerberosExprError
+      );
+    });
+
     it('accepts a full codec object (createSafeExprCodec result) as codec option', async () => {
       // createSafeExprCodec returns an object with deserialize — Kerberos treats it
       // as codec.deserialize (custom path), which produces the same result.

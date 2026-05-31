@@ -379,12 +379,24 @@ function evalNode(node, ctx, config) {
   return evaluator(node, ctx, config);
 }
 
+function hasExprDescriptorKey(value) {
+  return (
+    Boolean(value) &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.prototype.hasOwnProperty.call(value, '$expr')
+  );
+}
+
 function isExprDescriptor(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value) && typeof value.$expr === 'string';
+  return hasExprDescriptorKey(value) && typeof value.$expr === 'string';
 }
 
 function deepTransform(value, handlers) {
-  if (isExprDescriptor(value)) return handlers.expr(value);
+  if (hasExprDescriptorKey(value)) {
+    if (typeof value.$expr !== 'string') throw new KerberosExprError('$expr must be a string');
+    return handlers.expr(value);
+  }
   if (typeof value === 'function') return handlers.func(value);
   if (Array.isArray(value)) return value.map((item) => deepTransform(item, handlers));
   if (value && typeof value === 'object') {

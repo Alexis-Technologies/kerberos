@@ -127,6 +127,12 @@ describe('Conditions', () => {
     assert.strictEqual(condition.isFulfilled(reqMock), false);
   });
 
+  it('should not match empty all or none strategy arrays when validation is disabled', () => {
+    assert.strictEqual(new Conditions({ match: { all: [] } }).isFulfilled(reqMock), false);
+    assert.strictEqual(new Conditions({ match: { none: [] } }).isFulfilled(reqMock), false);
+    assert.strictEqual(new Conditions({ match: { any: [] } }).isFulfilled(reqMock), false);
+  });
+
   it('should match with nested conditions - true case', () => {
     const condition = new Conditions({
       match: {

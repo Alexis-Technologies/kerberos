@@ -36,6 +36,7 @@ export type TypeBoxLike = {
   Recursive(factory: (self: unknown) => unknown, options?: Record<string, unknown>): unknown;
   Boolean(options?: Record<string, unknown>): unknown;
   Intersect(items: unknown[], options?: Record<string, unknown>): unknown;
+  Never(options?: Record<string, unknown>): unknown;
 };
 
 export type ValidationOptions = {
