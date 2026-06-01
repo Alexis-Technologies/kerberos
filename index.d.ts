@@ -1,3 +1,6 @@
+/** Non-empty array that accepts both mutable and `as const` readonly literals. */
+export type NonEmptyArray<T> = readonly [T, ...readonly T[]];
+
 export type ParseLikeValidator<T = unknown> = {
   parse(value: unknown): T;
 };
@@ -141,13 +144,13 @@ type ConditionSingleMatchExpression = (req: RequestWithConstants & RequestWithVa
 type ConditionMatch =
   | ConditionSingleMatchExpression
   | {
-      any: [ConditionMatch, ...ConditionMatch[]];
+      any: NonEmptyArray<ConditionMatch>;
     }
   | {
-      all: [ConditionMatch, ...ConditionMatch[]];
+      all: NonEmptyArray<ConditionMatch>;
     }
   | {
-      none: [ConditionMatch, ...ConditionMatch[]];
+      none: NonEmptyArray<ConditionMatch>;
     };
 export type ConditionsSchema = {
   match: ConditionMatch;
@@ -212,7 +215,7 @@ export class MetadataTypeBoxSchemas {
 
 type DerivedRolesDefinition = {
   name: string;
-  parentRoles: [string, ...string[]];
+  parentRoles: NonEmptyArray<string>;
   condition: ConditionsSchema | Conditions;
 };
 export type DerivedRolesSchema = {
@@ -220,7 +223,7 @@ export type DerivedRolesSchema = {
   description?: string;
   variables?: VariablesSchema | Variables;
   constants?: ConstantsSchema | Constants;
-  definitions: [DerivedRolesDefinition, ...DerivedRolesDefinition[]];
+  definitions: NonEmptyArray<DerivedRolesDefinition>;
 };
 export class DerivedRoles {
   constructor(schema: DerivedRolesSchema, options?: ValidationOptions);
@@ -237,26 +240,26 @@ export class DerivedRolesTypeBoxSchemas {
 }
 
 type BaseRule = {
-  actions: [string, ...string[]];
+  actions: NonEmptyArray<string>;
   effect: Effect;
   condition?: ConditionsSchema | Conditions;
   output?: OutputsSchema | Outputs;
 };
 type RuleWithRoles = BaseRule & {
-  roles: [string, ...string[]] | ['*'];
+  roles: NonEmptyArray<string> | readonly ['*'];
 };
 type RuleWithDerivedRoles = BaseRule & {
-  derivedRoles: [string, ...string[]];
+  derivedRoles: NonEmptyArray<string>;
 };
 type Rule = RuleWithRoles | RuleWithDerivedRoles;
 export type ResourcePolicySchema = {
   version: string;
   resource: string;
   scope?: string;
-  rules: [Rule, ...Rule[]];
+  rules: NonEmptyArray<Rule>;
   variables?: VariablesSchema | Variables;
   constants?: ConstantsSchema | Constants;
-  importDerivedRoles?: [string, ...string[]] | string[];
+  importDerivedRoles?: NonEmptyArray<string> | readonly string[];
 };
 export type ResourcePolicyRootSchema = {
   resourcePolicy: ResourcePolicySchema;
@@ -291,13 +294,13 @@ type PrincipalPolicyActionRuleSchema = {
 };
 type PrincipalPolicyRuleSchema = {
   resource: string;
-  actions: [PrincipalPolicyActionRuleSchema, ...PrincipalPolicyActionRuleSchema[]];
+  actions: NonEmptyArray<PrincipalPolicyActionRuleSchema>;
 };
 export type PrincipalPolicySchema = {
   principal: string;
   version: string;
   scope?: string;
-  rules: [PrincipalPolicyRuleSchema, ...PrincipalPolicyRuleSchema[]];
+  rules: NonEmptyArray<PrincipalPolicyRuleSchema>;
   variables?: VariablesSchema | Variables;
   constants?: ConstantsSchema | Constants;
 };
@@ -328,7 +331,7 @@ export class PrincipalPolicyTypeBoxSchemas {
 type RolePolicyRuleSchema = {
   name?: string;
   resource: string;
-  allowActions: [string, ...string[]];
+  allowActions: NonEmptyArray<string>;
   condition?: ConditionsSchema | Conditions;
   output?: OutputsSchema | Outputs;
 };
@@ -336,8 +339,8 @@ export type RolePolicySchema = {
   role: string;
   version: string;
   scope?: string;
-  parentRoles?: [string, ...string[]] | string[];
-  rules: [RolePolicyRuleSchema, ...RolePolicyRuleSchema[]];
+  parentRoles?: NonEmptyArray<string> | readonly string[];
+  rules: NonEmptyArray<RolePolicyRuleSchema>;
   variables?: VariablesSchema | Variables;
   constants?: ConstantsSchema | Constants;
 };
@@ -364,8 +367,14 @@ export class RolePolicyTypeBoxSchemas {
   static buildShape(typebox: TypeBoxLike): unknown;
 }
 
-type KerberosPolicy = ResourcePolicy | ResourcePolicyRootSchema | PrincipalPolicy | PrincipalPolicyRootSchema | RolePolicy | RolePolicyRootSchema;
-type KerberosDerivedRoles = DerivedRoles | DerivedRolesSchema;
+export type KerberosPolicy =
+  | ResourcePolicy
+  | ResourcePolicyRootSchema
+  | PrincipalPolicy
+  | PrincipalPolicyRootSchema
+  | RolePolicy
+  | RolePolicyRootSchema;
+export type KerberosDerivedRoles = DerivedRoles | DerivedRolesSchema;
 export type KerberosAuditLogEntry = {
   callId?: string;
   reqId?: string;
@@ -504,7 +513,13 @@ export class Kerberos {
   static generateCallId(): string;
   static normalizeScope(scope?: string): string;
   static getScopeSearchChain(scope?: string): string[];
-  isAllowed(args: { principal: RequestPrincipal; resource: RequestResource; action: string }): Promise<boolean>;
+  isAllowed(args: {
+    reqId?: string;
+    principal: RequestPrincipal;
+    resource: RequestResource;
+    action: string;
+    includeMeta?: boolean;
+  }): Promise<boolean>;
   checkResources(
     args: {
       reqId?: string;

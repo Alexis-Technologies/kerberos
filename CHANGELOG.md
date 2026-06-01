@@ -5,6 +5,20 @@ All notable changes to **`@alexify/kerberos`** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-06-01
+
+### Fixed
+
+- Policy schema types now accept `as const` readonly literals (via `NonEmptyArray<T>`)
+  without type assertions.
+- `isAllowed` args type now includes optional `reqId` and `includeMeta`.
+
+### Added
+
+- Exported `KerberosPolicy`, `KerberosDerivedRoles`, and `NonEmptyArray` types for
+  consumer-side policy definitions.
+- Compile-time type tests (`test/types.test-d.ts` via `tsd`).
+
 ## [2.0.0] - 2026-05-31
 
 Version 2 turns Kerberos.js from a resource-policy engine into a full,
@@ -126,5 +140,6 @@ Initial release.
 - In-browser / serverless authorization.
 - Built-in test harness (`Tests`).
 
+[2.0.1]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v2.0.1
 [2.0.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v2.0.0
 [1.0.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v1.0.0
