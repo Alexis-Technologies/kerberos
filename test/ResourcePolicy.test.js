@@ -123,7 +123,10 @@ describe('ResourcePolicy', () => {
 
     it('should allow Sally to delete her own expense if created within the last hour', () => {
       const principal = principalsPolicy.sally;
-      const resource = { ...resourcesPolicy.expense1, attr: { ...resourcesPolicy.expense1.attr, createdAt: new Date(Date.now() - 30 * 60 * 1000).toISOString() } }; // 30 minutes ago
+      const resource = {
+        ...resourcesPolicy.expense1,
+        attr: { ...resourcesPolicy.expense1.attr, createdAt: new Date(Date.now() - 30 * 60 * 1000).toISOString() },
+      }; // 30 minutes ago
       const actions = ['delete'];
 
       const req = { P: principal, principal, R: resource, resource, actions };
@@ -135,7 +138,10 @@ describe('ResourcePolicy', () => {
 
     it('should not allow Sally to delete her own expense if created over an hour ago', () => {
       const principal = principalsPolicy.sally;
-      const resource = { ...resourcesPolicy.expense1, attr: { ...resourcesPolicy.expense1.attr, createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString() } }; // 2 hours ago
+      const resource = {
+        ...resourcesPolicy.expense1,
+        attr: { ...resourcesPolicy.expense1.attr, createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString() },
+      }; // 2 hours ago
       const actions = ['delete'];
 
       const req = { P: principal, principal, R: resource, resource, actions };

@@ -22,7 +22,7 @@ describe('KerberosTests', () => {
     assert.ok(tests);
   });
 
-  it('should run only each policy suite\'s own tests', () => {
+  it("should run only each policy suite's own tests", () => {
     const kerberos = new Kerberos([expensePolicy], [commonRolesPolicy]);
     const policyA = {
       name: 'Suite A',
@@ -115,11 +115,14 @@ describe('KerberosTests', () => {
     const tests = new KerberosTests(kerberos, [policyA, policyB]);
     const pending = [];
 
-    tests.run({}, {
-      describe: (_, fn) => fn(),
-      it: (_, fn) => pending.push(fn),
-      assert: { ok: () => {}, strictEqual: () => {} },
-    });
+    tests.run(
+      {},
+      {
+        describe: (_, fn) => fn(),
+        it: (_, fn) => pending.push(fn),
+        assert: { ok: () => {}, strictEqual: () => {} },
+      },
+    );
 
     for (const fn of pending) await fn();
 

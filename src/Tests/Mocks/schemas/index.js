@@ -19,7 +19,7 @@ class PrincipalMockJsonSchemas extends JsonSchemas {
         ...JsonSchemas.buildRequestPrincipal().properties,
         name: { type: 'string' },
       },
-      [...JsonSchemas.buildRequestPrincipal().required, 'name']
+      [...JsonSchemas.buildRequestPrincipal().required, 'name'],
     );
   }
 }
@@ -84,7 +84,7 @@ class PrincipalsMockTypeBoxSchemas extends PrincipalMockTypeBoxSchemas {
           scope: t.Optional(TypeBoxSchemas.buildScopeString(t)),
           roles: TypeBoxSchemas.buildNonEmptyArrayShape(t, t.String()),
           attr: t.Optional(TypeBoxSchemas.buildUnknownRecordShape(t)),
-        })
+        }),
       ),
     ]);
   }
@@ -109,7 +109,7 @@ class ResourceMockJsonSchemas extends JsonSchemas {
         ...JsonSchemas.buildRequestResource().properties,
         name: { type: 'string' },
       },
-      [...JsonSchemas.buildRequestResource().required, 'name']
+      [...JsonSchemas.buildRequestResource().required, 'name'],
     );
   }
 }
@@ -174,7 +174,7 @@ class ResourcesMockTypeBoxSchemas extends ResourceMockTypeBoxSchemas {
           policyVersion: t.Optional(t.String()),
           scope: t.Optional(TypeBoxSchemas.buildScopeString(t)),
           attr: t.Optional(TypeBoxSchemas.buildUnknownRecordShape(t)),
-        })
+        }),
       ),
     ]);
   }

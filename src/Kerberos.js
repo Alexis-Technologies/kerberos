@@ -151,7 +151,7 @@ class Kerberos {
         buildJson: () => JsonSchemas.buildRequest(),
         buildTypeBox: (t) => TypeBoxSchemas.buildRequest(t),
         buildZod: (z) => ZodSchemas.buildRequest(z),
-      }
+      },
     );
   }
 
@@ -229,7 +229,19 @@ class Kerberos {
    * @param {unknown[]} derivedRoles
    * @param {object} [options]
    */
-  constructor(policies, derivedRoles, { logger, cache, codec, z, ajv, typebox, getCallId } = { logger: false, cache: null, codec: null, z: null, ajv: null, typebox: null, getCallId: null }) {
+  constructor(
+    policies,
+    derivedRoles,
+    { logger, cache, codec, z, ajv, typebox, getCallId } = {
+      logger: false,
+      cache: null,
+      codec: null,
+      z: null,
+      ajv: null,
+      typebox: null,
+      getCallId: null,
+    },
+  ) {
     this.#getCallId = Kerberos.generateCallId;
 
     this.#ajv = ajv ?? null;
@@ -247,13 +259,31 @@ class Kerberos {
       this.#isAllowedArgsValidator = KerberosZodSchemas.buildIsAllowedArgs(z);
       this.#checkResourcesArgsValidator = KerberosZodSchemas.buildCheckResourcesArgs(z);
     } else if (this.#ajv && this.#typebox) {
-      this.#resourcePolicyValidator = createAjvAdapter(this.#ajv, KerberosTypeBoxSchemas.buildResourcePolicyInstance(this.#typebox));
-      this.#principalPolicyValidator = createAjvAdapter(this.#ajv, KerberosTypeBoxSchemas.buildPrincipalPolicyInstance(this.#typebox));
-      this.#rolePolicyValidator = createAjvAdapter(this.#ajv, KerberosTypeBoxSchemas.buildRolePolicyInstance(this.#typebox));
-      this.#derivedRolesValidator = createAjvAdapter(this.#ajv, KerberosTypeBoxSchemas.buildDerivedRolesInstance(this.#typebox));
+      this.#resourcePolicyValidator = createAjvAdapter(
+        this.#ajv,
+        KerberosTypeBoxSchemas.buildResourcePolicyInstance(this.#typebox),
+      );
+      this.#principalPolicyValidator = createAjvAdapter(
+        this.#ajv,
+        KerberosTypeBoxSchemas.buildPrincipalPolicyInstance(this.#typebox),
+      );
+      this.#rolePolicyValidator = createAjvAdapter(
+        this.#ajv,
+        KerberosTypeBoxSchemas.buildRolePolicyInstance(this.#typebox),
+      );
+      this.#derivedRolesValidator = createAjvAdapter(
+        this.#ajv,
+        KerberosTypeBoxSchemas.buildDerivedRolesInstance(this.#typebox),
+      );
       this.#requestValidator = createAjvAdapter(this.#ajv, TypeBoxSchemas.buildRequest(this.#typebox));
-      this.#isAllowedArgsValidator = createAjvAdapter(this.#ajv, KerberosTypeBoxSchemas.buildIsAllowedArgs(this.#typebox));
-      this.#checkResourcesArgsValidator = createAjvAdapter(this.#ajv, KerberosTypeBoxSchemas.buildCheckResourcesArgs(this.#typebox));
+      this.#isAllowedArgsValidator = createAjvAdapter(
+        this.#ajv,
+        KerberosTypeBoxSchemas.buildIsAllowedArgs(this.#typebox),
+      );
+      this.#checkResourcesArgsValidator = createAjvAdapter(
+        this.#ajv,
+        KerberosTypeBoxSchemas.buildCheckResourcesArgs(this.#typebox),
+      );
     } else if (this.#ajv) {
       this.#resourcePolicyValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildResourcePolicyInstance());
       this.#principalPolicyValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildPrincipalPolicyInstance());
@@ -321,16 +351,25 @@ class Kerberos {
       // alias (`'.'` ≡ `''`) is reachable: lookups resolve via the normalized
       // scope chain, so an un-normalized `'.'` key would never be selected.
       if (handledPolicy instanceof PrincipalPolicy) {
-        principalPolicies.set(`${handledPolicy.principal}.${handledPolicy.version}.${Kerberos.normalizeScope(handledPolicy.scope)}`, handledPolicy);
+        principalPolicies.set(
+          `${handledPolicy.principal}.${handledPolicy.version}.${Kerberos.normalizeScope(handledPolicy.scope)}`,
+          handledPolicy,
+        );
         continue;
       }
 
       if (handledPolicy instanceof RolePolicy) {
-        rolePolicies.set(`${handledPolicy.role}.${handledPolicy.version}.${Kerberos.normalizeScope(handledPolicy.scope)}`, handledPolicy);
+        rolePolicies.set(
+          `${handledPolicy.role}.${handledPolicy.version}.${Kerberos.normalizeScope(handledPolicy.scope)}`,
+          handledPolicy,
+        );
         continue;
       }
 
-      resourcePolicies.set(`${handledPolicy.kind}.${handledPolicy.version}.${Kerberos.normalizeScope(handledPolicy.scope)}`, handledPolicy);
+      resourcePolicies.set(
+        `${handledPolicy.kind}.${handledPolicy.version}.${Kerberos.normalizeScope(handledPolicy.scope)}`,
+        handledPolicy,
+      );
     }
     return { resourcePolicies, principalPolicies, rolePolicies };
   }
@@ -355,7 +394,10 @@ class Kerberos {
     for (const name of policy.importDerivedRoles) {
       let role = this.#derivedRoles.get(name);
       if (!role) {
-        role = await this.#resolveFromCache(`derivedRoles:${name}`, (shape) => new DerivedRoles(shape, this.#policyOptions()));
+        role = await this.#resolveFromCache(
+          `derivedRoles:${name}`,
+          (shape) => new DerivedRoles(shape, this.#policyOptions()),
+        );
       }
       if (!role) continue;
       const derivedRoles = role.get(req);
@@ -370,37 +412,46 @@ class Kerberos {
   }
 
   #logMethodStart(reqKind, callId, reqId) {
-    this.#logger.debug({
-      callId,
-      reqId,
-      timestamp: new Date().toISOString(),
-      reqKind,
-      event: `${reqKind}.start`,
-    }, `Kerberos.js ${reqKind} start!`);
+    this.#logger.debug(
+      {
+        callId,
+        reqId,
+        timestamp: new Date().toISOString(),
+        reqKind,
+        event: `${reqKind}.start`,
+      },
+      `Kerberos.js ${reqKind} start!`,
+    );
   }
 
   #logMethodError(reqKind, callId, reqId, error) {
-    this.#logger.error({
-      callId,
-      reqId,
-      timestamp: new Date().toISOString(),
-      reqKind,
-      event: `${reqKind}.error`,
-      errorName: error?.name,
-      errorMessage: error?.message,
-      stack: error?.stack,
-    }, `Kerberos.js ${reqKind} error!`);
+    this.#logger.error(
+      {
+        callId,
+        reqId,
+        timestamp: new Date().toISOString(),
+        reqKind,
+        event: `${reqKind}.error`,
+        errorName: error?.name,
+        errorMessage: error?.message,
+        stack: error?.stack,
+      },
+      `Kerberos.js ${reqKind} error!`,
+    );
   }
 
   #logMethodFinish(reqKind, callId, reqId, duration) {
-    this.#logger.debug({
-      callId,
-      reqId,
-      timestamp: new Date().toISOString(),
-      reqKind,
-      event: `${reqKind}.finish`,
-      duration,
-    }, `Kerberos.js ${reqKind} finish!`);
+    this.#logger.debug(
+      {
+        callId,
+        reqId,
+        timestamp: new Date().toISOString(),
+        reqKind,
+        event: `${reqKind}.finish`,
+        duration,
+      },
+      `Kerberos.js ${reqKind} finish!`,
+    );
   }
 
   async #getResourcePolicy(req) {
@@ -414,7 +465,10 @@ class Kerberos {
 
     if (this.#cache.enabled) {
       for (const scope of scopeSearchChain) {
-        const policy = await this.#resolveFromCache(`resource:${req.R.kind}:${version}:${scope}`, (shape) => new ResourcePolicy(shape, this.#policyOptions()));
+        const policy = await this.#resolveFromCache(
+          `resource:${req.R.kind}:${version}:${scope}`,
+          (shape) => new ResourcePolicy(shape, this.#policyOptions()),
+        );
         if (policy) return policy;
       }
     }
@@ -433,7 +487,10 @@ class Kerberos {
 
     if (this.#cache.enabled) {
       for (const scope of scopeSearchChain) {
-        const policy = await this.#resolveFromCache(`principal:${req.P.id}:${version}:${scope}`, (shape) => new PrincipalPolicy(shape, this.#policyOptions()));
+        const policy = await this.#resolveFromCache(
+          `principal:${req.P.id}:${version}:${scope}`,
+          (shape) => new PrincipalPolicy(shape, this.#policyOptions()),
+        );
         if (policy) return policy;
       }
     }
@@ -452,7 +509,10 @@ class Kerberos {
 
     if (this.#cache.enabled) {
       for (const scope of scopeSearchChain) {
-        const policy = await this.#resolveFromCache(`role:${role}:${version}:${scope}`, (shape) => new RolePolicy(shape, this.#policyOptions()));
+        const policy = await this.#resolveFromCache(
+          `role:${role}:${version}:${scope}`,
+          (shape) => new RolePolicy(shape, this.#policyOptions()),
+        );
         if (policy) return policy;
       }
     }
@@ -551,9 +611,7 @@ class Kerberos {
 
   async #evaluatePolicySources(req, effectAsBoolean = false) {
     const principalPolicy = await this.#getPrincipalPolicy(req);
-    const principalResult = principalPolicy
-      ? principalPolicy.check(req, effectAsBoolean)
-      : createEmptyPolicyResult();
+    const principalResult = principalPolicy ? principalPolicy.check(req, effectAsBoolean) : createEmptyPolicyResult();
 
     const unresolvedActions = [];
     for (const action of req.actions) {
@@ -575,7 +633,8 @@ class Kerberos {
     if (roleUnresolvedActions.length) {
       const resourcePolicy = await this.#getResourcePolicy(req);
       if (resourcePolicy) {
-        const resourceReq = roleUnresolvedActions.length === req.actions.length ? req : { ...req, actions: roleUnresolvedActions };
+        const resourceReq =
+          roleUnresolvedActions.length === req.actions.length ? req : { ...req, actions: roleUnresolvedActions };
         const importedDerivedRoles = await this.#getImportedDerivedRoles(resourcePolicy, req);
         resourceResult = resourcePolicy.check(resourceReq, importedDerivedRoles, effectAsBoolean);
       }
@@ -665,7 +724,7 @@ class Kerberos {
           z: this.#z,
           ajv: this.#ajv,
           typebox: this.#typebox,
-        }
+        },
       );
 
       const { effects, outputs, meta } = await this.#evaluatePolicySources(req);
@@ -723,7 +782,7 @@ class Kerberos {
             z: this.#z,
             ajv: this.#ajv,
             typebox: this.#typebox,
-          }
+          },
         );
 
         const { effects, outputs, meta } = await this.#evaluatePolicySources(req, effectAsBoolean);

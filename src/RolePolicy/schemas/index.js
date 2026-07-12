@@ -1,4 +1,9 @@
-const { Conditions, ConditionsJsonSchemas, ConditionsTypeBoxSchemas, ConditionsZodSchemas } = require('../../Conditions');
+const {
+  Conditions,
+  ConditionsJsonSchemas,
+  ConditionsTypeBoxSchemas,
+  ConditionsZodSchemas,
+} = require('../../Conditions');
 const { Constants, ConstantsJsonSchemas, ConstantsTypeBoxSchemas, ConstantsZodSchemas } = require('../../Constants');
 const { Outputs, OutputsJsonSchemas, OutputsTypeBoxSchemas, OutputsZodSchemas } = require('../../Outputs');
 const { ALL_ACTIONS, JsonSchemas, TypeBoxSchemas, ZodSchemas } = require('../../schemas');
@@ -6,14 +11,13 @@ const { Variables, VariablesJsonSchemas, VariablesTypeBoxSchemas, VariablesZodSc
 
 class RolePolicyZodSchemas extends ZodSchemas {
   static buildRuleShape(z) {
-    return z
-      .object({
-        name: z.string().optional(),
-        resource: z.union([z.string(), z.literal(ALL_ACTIONS)]),
-        allowActions: z.array(z.string()).nonempty(),
-        condition: z.union([ConditionsZodSchemas.buildShape(z), z.instanceof(Conditions)]).optional(),
-        output: z.union([OutputsZodSchemas.buildShape(z), z.instanceof(Outputs)]).optional(),
-      });
+    return z.object({
+      name: z.string().optional(),
+      resource: z.union([z.string(), z.literal(ALL_ACTIONS)]),
+      allowActions: z.array(z.string()).nonempty(),
+      condition: z.union([ConditionsZodSchemas.buildShape(z), z.instanceof(Conditions)]).optional(),
+      output: z.union([OutputsZodSchemas.buildShape(z), z.instanceof(Outputs)]).optional(),
+    });
   }
 
   static buildRolePolicyShape(z) {
@@ -45,19 +49,13 @@ class RolePolicyJsonSchemas extends JsonSchemas {
         },
         allowActions: JsonSchemas.buildNonEmptyArrayShape({ type: 'string' }),
         condition: {
-          anyOf: [
-            ConditionsJsonSchemas.buildShape(),
-            JsonSchemas.buildInstanceOfShape(Conditions),
-          ],
+          anyOf: [ConditionsJsonSchemas.buildShape(), JsonSchemas.buildInstanceOfShape(Conditions)],
         },
         output: {
-          anyOf: [
-            OutputsJsonSchemas.buildShape(),
-            JsonSchemas.buildInstanceOfShape(Outputs),
-          ],
+          anyOf: [OutputsJsonSchemas.buildShape(), JsonSchemas.buildInstanceOfShape(Outputs)],
         },
       },
-      ['resource', 'allowActions']
+      ['resource', 'allowActions'],
     );
   }
 
@@ -73,19 +71,13 @@ class RolePolicyJsonSchemas extends JsonSchemas {
         },
         rules: JsonSchemas.buildNonEmptyArrayShape(RolePolicyJsonSchemas.buildRuleShape()),
         variables: {
-          anyOf: [
-            VariablesJsonSchemas.buildShape(),
-            JsonSchemas.buildInstanceOfShape(Variables),
-          ],
+          anyOf: [VariablesJsonSchemas.buildShape(), JsonSchemas.buildInstanceOfShape(Variables)],
         },
         constants: {
-          anyOf: [
-            ConstantsJsonSchemas.buildShape(),
-            JsonSchemas.buildInstanceOfShape(Constants),
-          ],
+          anyOf: [ConstantsJsonSchemas.buildShape(), JsonSchemas.buildInstanceOfShape(Constants)],
         },
       },
-      ['role', 'version', 'rules']
+      ['role', 'version', 'rules'],
     );
   }
 
@@ -94,7 +86,7 @@ class RolePolicyJsonSchemas extends JsonSchemas {
       {
         rolePolicy: RolePolicyJsonSchemas.buildRolePolicyShape(),
       },
-      ['rolePolicy']
+      ['rolePolicy'],
     );
   }
 }
@@ -106,16 +98,10 @@ class RolePolicyTypeBoxSchemas extends TypeBoxSchemas {
       resource: t.Union([t.String(), t.Literal(ALL_ACTIONS)]),
       allowActions: TypeBoxSchemas.buildNonEmptyArrayShape(t, t.String()),
       condition: t.Optional(
-        t.Union([
-          ConditionsTypeBoxSchemas.buildShape(t),
-          TypeBoxSchemas.buildInstanceOfShape(t, Conditions),
-        ])
+        t.Union([ConditionsTypeBoxSchemas.buildShape(t), TypeBoxSchemas.buildInstanceOfShape(t, Conditions)]),
       ),
       output: t.Optional(
-        t.Union([
-          OutputsTypeBoxSchemas.buildShape(t),
-          TypeBoxSchemas.buildInstanceOfShape(t, Outputs),
-        ])
+        t.Union([OutputsTypeBoxSchemas.buildShape(t), TypeBoxSchemas.buildInstanceOfShape(t, Outputs)]),
       ),
     });
   }
@@ -128,16 +114,10 @@ class RolePolicyTypeBoxSchemas extends TypeBoxSchemas {
       parentRoles: t.Optional(t.Array(t.String())),
       rules: TypeBoxSchemas.buildNonEmptyArrayShape(t, RolePolicyTypeBoxSchemas.buildRuleShape(t)),
       variables: t.Optional(
-        t.Union([
-          VariablesTypeBoxSchemas.buildShape(t),
-          TypeBoxSchemas.buildInstanceOfShape(t, Variables),
-        ])
+        t.Union([VariablesTypeBoxSchemas.buildShape(t), TypeBoxSchemas.buildInstanceOfShape(t, Variables)]),
       ),
       constants: t.Optional(
-        t.Union([
-          ConstantsTypeBoxSchemas.buildShape(t),
-          TypeBoxSchemas.buildInstanceOfShape(t, Constants),
-        ])
+        t.Union([ConstantsTypeBoxSchemas.buildShape(t), TypeBoxSchemas.buildInstanceOfShape(t, Constants)]),
       ),
     });
   }

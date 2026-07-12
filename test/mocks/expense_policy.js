@@ -60,10 +60,7 @@ function buildExpensePolicy({ version = 'default', scope } = {}) {
           derivedRoles: ['FINANCE', 'FINANCE_MANAGER'],
           condition: {
             match: {
-              all: [
-                ({ R, P }) => R.attr.ownerId !== P.id,
-                ({ R }) => R.attr.status === 'OPEN',
-              ],
+              all: [({ R, P }) => R.attr.ownerId !== P.id, ({ R }) => R.attr.status === 'OPEN'],
             },
           },
         },
@@ -74,10 +71,7 @@ function buildExpensePolicy({ version = 'default', scope } = {}) {
           roles: ['USER'],
           condition: {
             match: {
-              all: [
-                ({ P }) => !P.roles.includes('MANAGER'),
-                ({ R }) => R.attr.amount > 10000,
-              ],
+              all: [({ P }) => !P.roles.includes('MANAGER'), ({ R }) => R.attr.amount > 10000],
             },
           },
           output: {

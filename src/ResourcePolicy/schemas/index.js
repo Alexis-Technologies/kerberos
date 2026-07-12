@@ -1,4 +1,9 @@
-const { Conditions, ConditionsJsonSchemas, ConditionsTypeBoxSchemas, ConditionsZodSchemas } = require('../../Conditions');
+const {
+  Conditions,
+  ConditionsJsonSchemas,
+  ConditionsTypeBoxSchemas,
+  ConditionsZodSchemas,
+} = require('../../Conditions');
 const { Constants, ConstantsJsonSchemas, ConstantsTypeBoxSchemas, ConstantsZodSchemas } = require('../../Constants');
 const { Outputs, OutputsJsonSchemas, OutputsTypeBoxSchemas, OutputsZodSchemas } = require('../../Outputs');
 const { ALL_ACTIONS, Effect, JsonSchemas, TypeBoxSchemas, ZodSchemas } = require('../../schemas');
@@ -42,16 +47,15 @@ class ResourcePolicyZodSchemas extends ZodSchemas {
   }
 
   static buildResourcePolicyShape(z) {
-    return z
-      .object({
-        version: z.string(),
-        resource: z.string(),
-        scope: ZodSchemas.buildScopeString(z).optional(),
-        rules: z.array(ResourcePolicyZodSchemas.buildRuleShape(z)).nonempty(),
-        variables: z.union([VariablesZodSchemas.buildShape(z), z.instanceof(Variables)]).optional(),
-        constants: z.union([ConstantsZodSchemas.buildShape(z), z.instanceof(Constants)]).optional(),
-        importDerivedRoles: z.array(z.string()).optional(),
-      });
+    return z.object({
+      version: z.string(),
+      resource: z.string(),
+      scope: ZodSchemas.buildScopeString(z).optional(),
+      rules: z.array(ResourcePolicyZodSchemas.buildRuleShape(z)).nonempty(),
+      variables: z.union([VariablesZodSchemas.buildShape(z), z.instanceof(Variables)]).optional(),
+      constants: z.union([ConstantsZodSchemas.buildShape(z), z.instanceof(Constants)]).optional(),
+      importDerivedRoles: z.array(z.string()).optional(),
+    });
   }
 
   static buildShape(z) {
@@ -78,19 +82,13 @@ class ResourcePolicyJsonSchemas extends JsonSchemas {
             }),
             derivedRoles: JsonSchemas.buildNonEmptyArrayShape({ type: 'string' }),
             condition: {
-              anyOf: [
-                ConditionsJsonSchemas.buildShape(),
-                JsonSchemas.buildInstanceOfShape(Conditions),
-              ],
+              anyOf: [ConditionsJsonSchemas.buildShape(), JsonSchemas.buildInstanceOfShape(Conditions)],
             },
             output: {
-              anyOf: [
-                OutputsJsonSchemas.buildShape(),
-                JsonSchemas.buildInstanceOfShape(Outputs),
-              ],
+              anyOf: [OutputsJsonSchemas.buildShape(), JsonSchemas.buildInstanceOfShape(Outputs)],
             },
           },
-          ['actions', 'effect']
+          ['actions', 'effect'],
         ),
         {
           oneOf: [
@@ -110,23 +108,17 @@ class ResourcePolicyJsonSchemas extends JsonSchemas {
         scope: JsonSchemas.buildScopeString(),
         rules: JsonSchemas.buildNonEmptyArrayShape(ResourcePolicyJsonSchemas.buildRuleShape()),
         variables: {
-          anyOf: [
-            VariablesJsonSchemas.buildShape(),
-            JsonSchemas.buildInstanceOfShape(Variables),
-          ],
+          anyOf: [VariablesJsonSchemas.buildShape(), JsonSchemas.buildInstanceOfShape(Variables)],
         },
         constants: {
-          anyOf: [
-            ConstantsJsonSchemas.buildShape(),
-            JsonSchemas.buildInstanceOfShape(Constants),
-          ],
+          anyOf: [ConstantsJsonSchemas.buildShape(), JsonSchemas.buildInstanceOfShape(Constants)],
         },
         importDerivedRoles: {
           type: 'array',
           items: { type: 'string' },
         },
       },
-      ['version', 'resource', 'rules']
+      ['version', 'resource', 'rules'],
     );
   }
 
@@ -135,7 +127,7 @@ class ResourcePolicyJsonSchemas extends JsonSchemas {
       {
         resourcePolicy: ResourcePolicyJsonSchemas.buildResourcePolicyShape(),
       },
-      ['resourcePolicy']
+      ['resourcePolicy'],
     );
   }
 }
@@ -150,24 +142,13 @@ class ResourcePolicyTypeBoxSchemas extends TypeBoxSchemas {
         name: t.Optional(t.String()),
         actions: TypeBoxSchemas.buildNonEmptyArrayShape(t, t.String()),
         effect: t.Union([t.Literal(Effect.Allow), t.Literal(Effect.Deny)]),
-        roles: t.Optional(
-          TypeBoxSchemas.buildNonEmptyArrayShape(
-            t,
-            t.Union([t.String(), t.Literal(ALL_ACTIONS)])
-          )
-        ),
+        roles: t.Optional(TypeBoxSchemas.buildNonEmptyArrayShape(t, t.Union([t.String(), t.Literal(ALL_ACTIONS)]))),
         derivedRoles: t.Optional(TypeBoxSchemas.buildNonEmptyArrayShape(t, t.String())),
         condition: t.Optional(
-          t.Union([
-            ConditionsTypeBoxSchemas.buildShape(t),
-            TypeBoxSchemas.buildInstanceOfShape(t, Conditions),
-          ])
+          t.Union([ConditionsTypeBoxSchemas.buildShape(t), TypeBoxSchemas.buildInstanceOfShape(t, Conditions)]),
         ),
         output: t.Optional(
-          t.Union([
-            OutputsTypeBoxSchemas.buildShape(t),
-            TypeBoxSchemas.buildInstanceOfShape(t, Outputs),
-          ])
+          t.Union([OutputsTypeBoxSchemas.buildShape(t), TypeBoxSchemas.buildInstanceOfShape(t, Outputs)]),
         ),
       }),
       // `roles` and `derivedRoles` are mutually exclusive: each branch requires
@@ -193,16 +174,10 @@ class ResourcePolicyTypeBoxSchemas extends TypeBoxSchemas {
       scope: t.Optional(TypeBoxSchemas.buildScopeString(t)),
       rules: TypeBoxSchemas.buildNonEmptyArrayShape(t, ResourcePolicyTypeBoxSchemas.buildRuleShape(t)),
       variables: t.Optional(
-        t.Union([
-          VariablesTypeBoxSchemas.buildShape(t),
-          TypeBoxSchemas.buildInstanceOfShape(t, Variables),
-        ])
+        t.Union([VariablesTypeBoxSchemas.buildShape(t), TypeBoxSchemas.buildInstanceOfShape(t, Variables)]),
       ),
       constants: t.Optional(
-        t.Union([
-          ConstantsTypeBoxSchemas.buildShape(t),
-          TypeBoxSchemas.buildInstanceOfShape(t, Constants),
-        ])
+        t.Union([ConstantsTypeBoxSchemas.buildShape(t), TypeBoxSchemas.buildInstanceOfShape(t, Constants)]),
       ),
       importDerivedRoles: t.Optional(t.Array(t.String())),
     });

@@ -31,7 +31,7 @@ const resourceMock = {
 
 const variableSchema = {
   isPublished: ({ R }) => R.attr.publishedAt != null && R.attr.publishedAt?.length > 0,
-  label: ({ R }) => R.attr.publishedAt ? 'Published' : 'Unpublished',
+  label: ({ R }) => (R.attr.publishedAt ? 'Published' : 'Unpublished'),
   teams: () => ['red', 'blue'],
   lookup: () => ({ red: 9001, blue: 0 }),
 };
@@ -72,7 +72,7 @@ describe('Variables', () => {
 
   it('should throw an error with an invalid schema if zod is provided', () => {
     assert.throws(() => {
-      // eslint-disable-next-line no-new
+      // oxlint-disable-next-line no-new
       new Variables({ invalidKey: 'invalidValue' }, { z });
     });
   });

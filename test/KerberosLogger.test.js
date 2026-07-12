@@ -42,11 +42,14 @@ function createPinoCollector(level = 'info') {
     },
   });
 
-  const logger = pino({
-    level,
-    base: null,
-    timestamp: false,
-  }, destination);
+  const logger = pino(
+    {
+      level,
+      base: null,
+      timestamp: false,
+    },
+    destination,
+  );
 
   return {
     logger,
@@ -83,21 +86,26 @@ describe('Kerberos logger support', () => {
 
     const kerberos = createKerberosWithLogger(true);
 
-    await withPatchedConsole({
-      group: (...args) => events.group.push(args),
-      log: (...args) => events.log.push(args),
-      table: (...args) => events.table.push(args),
-      debug: (...args) => events.debug.push(args),
-      groupEnd: () => { events.groupEnd++; },
-    }, async () => {
-      const isAllowed = await kerberos.isAllowed({
-        principal: principalsPolicy.sally,
-        action: 'view',
-        resource: resourcesPolicy.expense1,
-      });
+    await withPatchedConsole(
+      {
+        group: (...args) => events.group.push(args),
+        log: (...args) => events.log.push(args),
+        table: (...args) => events.table.push(args),
+        debug: (...args) => events.debug.push(args),
+        groupEnd: () => {
+          events.groupEnd++;
+        },
+      },
+      async () => {
+        const isAllowed = await kerberos.isAllowed({
+          principal: principalsPolicy.sally,
+          action: 'view',
+          resource: resourcesPolicy.expense1,
+        });
 
-      assert.strictEqual(isAllowed, true);
-    });
+        assert.strictEqual(isAllowed, true);
+      },
+    );
 
     assert.deepStrictEqual(events.group, [['Kerberos.js']]);
     assert.deepStrictEqual(events.log, [['Principal sally is ALLOWED to perform action view on resource expense1']]);
@@ -158,7 +166,9 @@ describe('Kerberos logger support', () => {
       table: (...args) => events.table.push(args),
       debug: (...args) => events.debug.push(args),
       error: (...args) => events.error.push(args),
-      groupEnd: () => { events.groupEnd++; },
+      groupEnd: () => {
+        events.groupEnd++;
+      },
     };
 
     const kerberos = createKerberosWithLogger(logger);

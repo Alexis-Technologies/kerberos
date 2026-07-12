@@ -34,8 +34,8 @@ const SHORT_CIRCUIT_OPS = new Set(['&&', '||', '??']);
 const BINARY_OPS = createDispatch({
   '===': (left, right) => left === right,
   '!==': (left, right) => left !== right,
-  '==': (left, right) => left == right, // eslint-disable-line eqeqeq
-  '!=': (left, right) => left != right, // eslint-disable-line eqeqeq
+  '==': (left, right) => left == right, // oxlint-disable-line eqeqeq
+  '!=': (left, right) => left != right, // oxlint-disable-line eqeqeq
   '<': (left, right) => left < right,
   '>': (left, right) => left > right,
   '<=': (left, right) => left <= right,
@@ -70,16 +70,49 @@ const ALLOWED_UNARY_OPS = new Set(Object.keys(UNARY_OPS));
 // Methods that may be called on string / array / number values. None of these
 // can leak a function reference or constructor.
 const VALUE_METHODS = new Set([
-  'includes', 'indexOf', 'lastIndexOf', 'startsWith', 'endsWith',
-  'toLowerCase', 'toUpperCase', 'trim', 'trimStart', 'trimEnd',
-  'slice', 'substring', 'charAt', 'charCodeAt', 'at', 'concat',
-  'split', 'join', 'padStart', 'padEnd', 'repeat', 'toFixed', 'toString',
+  'includes',
+  'indexOf',
+  'lastIndexOf',
+  'startsWith',
+  'endsWith',
+  'toLowerCase',
+  'toUpperCase',
+  'trim',
+  'trimStart',
+  'trimEnd',
+  'slice',
+  'substring',
+  'charAt',
+  'charCodeAt',
+  'at',
+  'concat',
+  'split',
+  'join',
+  'padStart',
+  'padEnd',
+  'repeat',
+  'toFixed',
+  'toString',
 ]);
 
 // Math is exposed as a safe, side-effect-free global root.
 const MATH_METHODS = new Set([
-  'abs', 'ceil', 'floor', 'round', 'trunc', 'sign',
-  'min', 'max', 'pow', 'sqrt', 'cbrt', 'log', 'log2', 'log10', 'exp', 'hypot',
+  'abs',
+  'ceil',
+  'floor',
+  'round',
+  'trunc',
+  'sign',
+  'min',
+  'max',
+  'pow',
+  'sqrt',
+  'cbrt',
+  'log',
+  'log2',
+  'log10',
+  'exp',
+  'hypot',
 ]);
 
 // Whitelisted `new` targets. Only simple Identifier callees are accepted.
@@ -88,11 +121,27 @@ const ALLOWED_CONSTRUCTORS = { Date };
 const DATE_STATIC_METHODS = new Set(['now', 'parse', 'UTC']);
 
 const DATE_METHODS = new Set([
-  'getTime', 'valueOf', 'toISOString', 'toJSON', 'toString',
-  'getFullYear', 'getMonth', 'getDate', 'getDay',
-  'getHours', 'getMinutes', 'getSeconds', 'getMilliseconds',
-  'getUTCFullYear', 'getUTCMonth', 'getUTCDate', 'getUTCDay',
-  'getUTCHours', 'getUTCMinutes', 'getUTCSeconds', 'getUTCMilliseconds',
+  'getTime',
+  'valueOf',
+  'toISOString',
+  'toJSON',
+  'toString',
+  'getFullYear',
+  'getMonth',
+  'getDate',
+  'getDay',
+  'getHours',
+  'getMinutes',
+  'getSeconds',
+  'getMilliseconds',
+  'getUTCFullYear',
+  'getUTCMonth',
+  'getUTCDate',
+  'getUTCDay',
+  'getUTCHours',
+  'getUTCMinutes',
+  'getUTCSeconds',
+  'getUTCMilliseconds',
 ]);
 
 // Top-level function calls with an Identifier callee (no member access).
@@ -161,12 +210,16 @@ const NODE_VALIDATORS = createDispatch({
     if (node.computed) validateNode(node.property);
   },
   BinaryExpression(node) {
-    if (!ALLOWED_BINARY_OPS.has(node.operator)) throw new KerberosExprError(`Operator "${node.operator}" is not allowed`);
+    if (!ALLOWED_BINARY_OPS.has(node.operator)) {
+      throw new KerberosExprError(`Operator "${node.operator}" is not allowed`);
+    }
     validateNode(node.left);
     validateNode(node.right);
   },
   UnaryExpression(node) {
-    if (!ALLOWED_UNARY_OPS.has(node.operator)) throw new KerberosExprError(`Unary operator "${node.operator}" is not allowed`);
+    if (!ALLOWED_UNARY_OPS.has(node.operator)) {
+      throw new KerberosExprError(`Unary operator "${node.operator}" is not allowed`);
+    }
     validateNode(node.argument);
   },
   ConditionalExpression(node) {
@@ -196,7 +249,10 @@ const NODE_VALIDATORS = createDispatch({
     for (const argument of node.arguments) validateNode(argument);
   },
   NewExpression(node) {
-    if (node.callee.type !== 'Identifier' || !Object.prototype.hasOwnProperty.call(ALLOWED_CONSTRUCTORS, node.callee.name)) {
+    if (
+      node.callee.type !== 'Identifier' ||
+      !Object.prototype.hasOwnProperty.call(ALLOWED_CONSTRUCTORS, node.callee.name)
+    ) {
       throw new KerberosExprError('Only whitelisted constructors are allowed (Date)');
     }
     for (const argument of node.arguments) validateNode(argument);
@@ -267,7 +323,9 @@ function evalObject(node, ctx, config) {
   for (const property of node.properties) {
     const rawKey = property.computed
       ? evalNode(property.key, ctx, config)
-      : property.key.type === 'Identifier' ? property.key.name : evalNode(property.key, ctx, config);
+      : property.key.type === 'Identifier'
+        ? property.key.name
+        : evalNode(property.key, ctx, config);
     const keyStr = safeKey(rawKey);
     result[keyStr] = evalNode(property.shorthand ? property.key : property.value, ctx, config);
   }
@@ -291,7 +349,9 @@ function evalCall(node, ctx, config) {
     return GLOBAL_FUNCTIONS[callee.name](...args);
   }
 
-  if (callee.type !== 'MemberExpression') throw new KerberosExprError('Only whitelisted function or method calls are allowed');
+  if (callee.type !== 'MemberExpression') {
+    throw new KerberosExprError('Only whitelisted function or method calls are allowed');
+  }
 
   const method = callee.computed ? evalNode(callee.property, ctx, config) : callee.property.name;
   const methodStr = safeKey(method);
@@ -316,7 +376,9 @@ function evalCall(node, ctx, config) {
   }
 
   const isAllowedReceiver = typeof receiver === 'string' || typeof receiver === 'number' || Array.isArray(receiver);
-  if (!isAllowedReceiver) throw new KerberosExprError('Method calls are only allowed on string, number, array or Date values');
+  if (!isAllowedReceiver) {
+    throw new KerberosExprError('Method calls are only allowed on string, number, array or Date values');
+  }
   if (!VALUE_METHODS.has(methodStr)) throw new KerberosExprError(`Method "${methodStr}" is not allowed`);
 
   const fn = receiver[methodStr];
@@ -325,7 +387,9 @@ function evalCall(node, ctx, config) {
 }
 
 function evalNew(node, ctx, config) {
-  if (node.callee.type !== 'Identifier') throw new KerberosExprError('Only whitelisted constructors are allowed (Date)');
+  if (node.callee.type !== 'Identifier') {
+    throw new KerberosExprError('Only whitelisted constructors are allowed (Date)');
+  }
 
   const Constructor = ALLOWED_CONSTRUCTORS[node.callee.name];
   if (!Constructor) throw new KerberosExprError(`Constructor "${node.callee.name}" is not allowed`);
@@ -338,7 +402,7 @@ function evalIdentifier(node, ctx, config) {
   if (Object.prototype.hasOwnProperty.call(ALLOWED_GLOBALS, node.name)) return ALLOWED_GLOBALS[node.name];
   if (config.roots.has(node.name)) return ctx == null ? undefined : ctx[node.name];
   throw new KerberosExprError(
-    `Unknown identifier "${node.name}" (allowed roots: ${[...config.roots].join(', ')}, Math, Date, ${Object.keys(GLOBAL_FUNCTIONS).join(', ')})`
+    `Unknown identifier "${node.name}" (allowed roots: ${[...config.roots].join(', ')}, Math, Date, ${Object.keys(GLOBAL_FUNCTIONS).join(', ')})`,
   );
 }
 
@@ -350,7 +414,9 @@ function evalArray(node, ctx, config) {
 }
 
 function evalConditional(node, ctx, config) {
-  return evalNode(node.test, ctx, config) ? evalNode(node.consequent, ctx, config) : evalNode(node.alternate, ctx, config);
+  return evalNode(node.test, ctx, config)
+    ? evalNode(node.consequent, ctx, config)
+    : evalNode(node.alternate, ctx, config);
 }
 
 function throwCompound() {
@@ -440,10 +506,10 @@ function createSafeExprCodec({ jsep, roots } = {}) {
   if (!jsep || typeof jsep !== 'function') {
     throw new KerberosExprError(
       'createSafeExprCodec({ jsep }) requires a pre-configured jsep instance. ' +
-      'Install jsep and its plugins, then pass the instance:\n' +
-      '  const jsep = require(\'jsep\').default;\n' +
-      '  jsep.plugins.register(require(\'@jsep-plugin/object\'), ...);\n' +
-      '  const codec = createSafeExprCodec({ jsep });'
+        'Install jsep and its plugins, then pass the instance:\n' +
+        "  const jsep = require('jsep').default;\n" +
+        "  jsep.plugins.register(require('@jsep-plugin/object'), ...);\n" +
+        '  const codec = createSafeExprCodec({ jsep });',
     );
   }
 
@@ -468,7 +534,7 @@ function createSafeExprCodec({ jsep, roots } = {}) {
     func: () => {
       throw new KerberosExprError(
         'Cannot serialize a raw JavaScript function. Dynamic/remote policies must express conditions, ' +
-        'variables and outputs as { $expr: "..." } string descriptors (no eval / fn.toString).'
+          'variables and outputs as { $expr: "..." } string descriptors (no eval / fn.toString).',
       );
     },
   };
@@ -505,7 +571,7 @@ function serializePolicy(shape, { jsep } = {}) {
     func: () => {
       throw new KerberosExprError(
         'Cannot serialize a raw JavaScript function. Dynamic/remote policies must express conditions, ' +
-        'variables and outputs as { $expr: "..." } string descriptors (no eval / fn.toString).'
+          'variables and outputs as { $expr: "..." } string descriptors (no eval / fn.toString).',
       );
     },
   };
@@ -524,7 +590,7 @@ function deserializePolicy(json, codec) {
   if (!codec?.deserialize) {
     throw new KerberosExprError(
       'deserializePolicy requires a codec with a deserialize method. ' +
-      'Create one via createSafeExprCodec({ jsep }).'
+        'Create one via createSafeExprCodec({ jsep }).',
     );
   }
   return codec.deserialize(json);

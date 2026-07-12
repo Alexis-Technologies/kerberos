@@ -1,4 +1,9 @@
-const { Conditions, ConditionsJsonSchemas, ConditionsTypeBoxSchemas, ConditionsZodSchemas } = require('../../Conditions');
+const {
+  Conditions,
+  ConditionsJsonSchemas,
+  ConditionsTypeBoxSchemas,
+  ConditionsZodSchemas,
+} = require('../../Conditions');
 const { Constants, ConstantsJsonSchemas, ConstantsTypeBoxSchemas, ConstantsZodSchemas } = require('../../Constants');
 const { JsonSchemas, TypeBoxSchemas, ZodSchemas } = require('../../schemas');
 const { Variables, VariablesJsonSchemas, VariablesTypeBoxSchemas, VariablesZodSchemas } = require('../../Variables');
@@ -36,13 +41,10 @@ class DerivedRolesJsonSchemas extends JsonSchemas {
         name: { type: 'string' },
         parentRoles: JsonSchemas.buildNonEmptyArrayShape({ type: 'string' }),
         condition: {
-          anyOf: [
-            ConditionsJsonSchemas.buildShape(),
-            JsonSchemas.buildInstanceOfShape(Conditions),
-          ],
+          anyOf: [ConditionsJsonSchemas.buildShape(), JsonSchemas.buildInstanceOfShape(Conditions)],
         },
       },
-      ['name', 'parentRoles', 'condition']
+      ['name', 'parentRoles', 'condition'],
     );
   }
 
@@ -52,20 +54,14 @@ class DerivedRolesJsonSchemas extends JsonSchemas {
         name: { type: 'string' },
         description: { type: 'string' },
         variables: {
-          anyOf: [
-            VariablesJsonSchemas.buildShape(),
-            JsonSchemas.buildInstanceOfShape(Variables),
-          ],
+          anyOf: [VariablesJsonSchemas.buildShape(), JsonSchemas.buildInstanceOfShape(Variables)],
         },
         constants: {
-          anyOf: [
-            ConstantsJsonSchemas.buildShape(),
-            JsonSchemas.buildInstanceOfShape(Constants),
-          ],
+          anyOf: [ConstantsJsonSchemas.buildShape(), JsonSchemas.buildInstanceOfShape(Constants)],
         },
         definitions: JsonSchemas.buildNonEmptyArrayShape(DerivedRolesJsonSchemas.buildDerivedRolesDefinitionShape()),
       },
-      ['name', 'definitions']
+      ['name', 'definitions'],
     );
   }
 }
@@ -78,10 +74,7 @@ class DerivedRolesTypeBoxSchemas extends TypeBoxSchemas {
     return t.Object({
       name: t.String(),
       parentRoles: TypeBoxSchemas.buildNonEmptyArrayShape(t, t.String()),
-      condition: t.Union([
-        ConditionsTypeBoxSchemas.buildShape(t),
-        TypeBoxSchemas.buildInstanceOfShape(t, Conditions),
-      ]),
+      condition: t.Union([ConditionsTypeBoxSchemas.buildShape(t), TypeBoxSchemas.buildInstanceOfShape(t, Conditions)]),
     });
   }
 
@@ -90,18 +83,15 @@ class DerivedRolesTypeBoxSchemas extends TypeBoxSchemas {
       name: t.String(),
       description: t.Optional(t.String()),
       variables: t.Optional(
-        t.Union([
-          VariablesTypeBoxSchemas.buildShape(t),
-          TypeBoxSchemas.buildInstanceOfShape(t, Variables),
-        ])
+        t.Union([VariablesTypeBoxSchemas.buildShape(t), TypeBoxSchemas.buildInstanceOfShape(t, Variables)]),
       ),
       constants: t.Optional(
-        t.Union([
-          ConstantsTypeBoxSchemas.buildShape(t),
-          TypeBoxSchemas.buildInstanceOfShape(t, Constants),
-        ])
+        t.Union([ConstantsTypeBoxSchemas.buildShape(t), TypeBoxSchemas.buildInstanceOfShape(t, Constants)]),
       ),
-      definitions: TypeBoxSchemas.buildNonEmptyArrayShape(t, DerivedRolesTypeBoxSchemas.buildDerivedRolesDefinitionShape(t)),
+      definitions: TypeBoxSchemas.buildNonEmptyArrayShape(
+        t,
+        DerivedRolesTypeBoxSchemas.buildDerivedRolesDefinitionShape(t),
+      ),
     });
   }
 }

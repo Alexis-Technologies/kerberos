@@ -34,10 +34,16 @@ class PrincipalPolicy {
   constructor(shape, options = {}) {
     this.#shape = PrincipalPolicy.parseShape(shape, options);
     if (this.#shape.principalPolicy.constants) {
-      this.#shape.principalPolicy.constants = PrincipalPolicy.parseConstants(this.#shape.principalPolicy.constants, options);
+      this.#shape.principalPolicy.constants = PrincipalPolicy.parseConstants(
+        this.#shape.principalPolicy.constants,
+        options,
+      );
     }
     if (this.#shape.principalPolicy.variables) {
-      this.#shape.principalPolicy.variables = PrincipalPolicy.parseVariables(this.#shape.principalPolicy.variables, options);
+      this.#shape.principalPolicy.variables = PrincipalPolicy.parseVariables(
+        this.#shape.principalPolicy.variables,
+        options,
+      );
     }
     if (this.#shape.principalPolicy.rules?.length) {
       const rules = [];

@@ -12,7 +12,9 @@ const Effect = {
  */
 class ZodSchemas {
   static buildScopeString(z) {
-    return z.string().regex(/^[a-zA-Z0-9._-]*$/, 'Scope must contain only alphanumeric characters, dots, hyphens and underscores');
+    return z
+      .string()
+      .regex(/^[a-zA-Z0-9._-]*$/, 'Scope must contain only alphanumeric characters, dots, hyphens and underscores');
   }
 
   static buildRequestPrincipal(z) {
@@ -142,7 +144,7 @@ class JsonSchemas {
         roles: JsonSchemas.buildNonEmptyArrayShape({ type: 'string' }),
         attr: JsonSchemas.buildUnknownRecordShape(),
       },
-      ['id', 'roles']
+      ['id', 'roles'],
     );
   }
 
@@ -155,7 +157,7 @@ class JsonSchemas {
         scope: JsonSchemas.buildScopeString(),
         attr: JsonSchemas.buildUnknownRecordShape(),
       },
-      ['id', 'kind']
+      ['id', 'kind'],
     );
   }
 
@@ -171,7 +173,7 @@ class JsonSchemas {
         callId: { type: 'string' },
         includeMeta: { type: 'boolean' },
       },
-      ['principal', 'resource', 'P', 'R', 'actions']
+      ['principal', 'resource', 'P', 'R', 'actions'],
     );
   }
 }

@@ -48,10 +48,16 @@ class ResourcePolicy {
   constructor(shape, options = {}) {
     this.#shape = ResourcePolicy.parseShape(shape, options);
     if (this.#shape.resourcePolicy.constants) {
-      this.#shape.resourcePolicy.constants = ResourcePolicy.parseConstants(this.#shape.resourcePolicy.constants, options);
+      this.#shape.resourcePolicy.constants = ResourcePolicy.parseConstants(
+        this.#shape.resourcePolicy.constants,
+        options,
+      );
     }
     if (this.#shape.resourcePolicy.variables) {
-      this.#shape.resourcePolicy.variables = ResourcePolicy.parseVariables(this.#shape.resourcePolicy.variables, options);
+      this.#shape.resourcePolicy.variables = ResourcePolicy.parseVariables(
+        this.#shape.resourcePolicy.variables,
+        options,
+      );
     }
     if (this.#shape.resourcePolicy.rules?.length) {
       const rules = [];

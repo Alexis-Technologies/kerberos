@@ -57,7 +57,10 @@ describe('Conditions', () => {
   it('should match with any of multiple functions - true case', () => {
     const condition = new Conditions({
       match: {
-        any: [({ P }) => P.attr.account.email === 'test@example.com', ({ P }) => P.attr.account.email === 'other@example.com'],
+        any: [
+          ({ P }) => P.attr.account.email === 'test@example.com',
+          ({ P }) => P.attr.account.email === 'other@example.com',
+        ],
       },
     });
 
@@ -67,7 +70,10 @@ describe('Conditions', () => {
   it('should match with any of multiple functions - false case', () => {
     const condition = new Conditions({
       match: {
-        any: [({ P }) => P.attr.account.email === 'notfound@example.com', ({ P }) => P.attr.account.email === 'other@example.com'],
+        any: [
+          ({ P }) => P.attr.account.email === 'notfound@example.com',
+          ({ P }) => P.attr.account.email === 'other@example.com',
+        ],
       },
     });
 
@@ -116,7 +122,7 @@ describe('Conditions', () => {
 
   it('should throw an error with an invalid schema if zod is provided', () => {
     assert.throws(() => {
-      // eslint-disable-next-line no-new
+      // oxlint-disable-next-line no-new
       new Conditions({ invalidKey: 'invalidValue' }, { z });
     });
   });
@@ -155,7 +161,10 @@ describe('Conditions', () => {
         all: [
           ({ P }) => P.id === 'user-123',
           {
-            any: [({ P }) => P.attr.account.email === 'test@example.com', ({ P }) => P.attr.account.email === 'other@example.com'],
+            any: [
+              ({ P }) => P.attr.account.email === 'test@example.com',
+              ({ P }) => P.attr.account.email === 'other@example.com',
+            ],
             none: [({ P }) => P.attr.account.email === 'wrong@example.com', ({ P }) => P.id === 'user-999'],
           },
         ],
@@ -171,7 +180,10 @@ describe('Conditions', () => {
         all: [
           ({ P }) => P.id === 'user-123',
           {
-            any: [({ P }) => P.attr.account.email === 'wrong@example.com', ({ P }) => P.attr.account.email === 'other@example.com'],
+            any: [
+              ({ P }) => P.attr.account.email === 'wrong@example.com',
+              ({ P }) => P.attr.account.email === 'other@example.com',
+            ],
             none: [({ P }) => P.attr.account.email === 'wrong@example.com', ({ P }) => P.id === 'user-999'],
           },
         ],

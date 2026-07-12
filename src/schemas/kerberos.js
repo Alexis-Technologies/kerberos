@@ -40,7 +40,7 @@ class KerberosZodSchemas extends ZodSchemas {
           z.object({
             resource: ZodSchemas.buildRequestResource(z),
             actions: z.array(z.string()).nonempty(),
-          })
+          }),
         )
         .nonempty(),
       includeMeta: z.boolean().optional(),
@@ -74,7 +74,7 @@ class KerberosJsonSchemas extends JsonSchemas {
         resource: JsonSchemas.buildRequestResource(),
         includeMeta: { type: 'boolean' },
       },
-      ['principal', 'action', 'resource']
+      ['principal', 'action', 'resource'],
     );
   }
 
@@ -89,12 +89,12 @@ class KerberosJsonSchemas extends JsonSchemas {
               resource: JsonSchemas.buildRequestResource(),
               actions: JsonSchemas.buildNonEmptyArrayShape({ type: 'string' }),
             },
-            ['resource', 'actions']
-          )
+            ['resource', 'actions'],
+          ),
         ),
         includeMeta: { type: 'boolean' },
       },
-      ['principal', 'resources']
+      ['principal', 'resources'],
     );
   }
 }
@@ -135,7 +135,7 @@ class KerberosTypeBoxSchemas extends TypeBoxSchemas {
         t.Object({
           resource: TypeBoxSchemas.buildRequestResource(t),
           actions: TypeBoxSchemas.buildNonEmptyArrayShape(t, t.String()),
-        })
+        }),
       ),
       includeMeta: t.Optional(t.Boolean()),
     });

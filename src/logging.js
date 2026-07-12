@@ -1,4 +1,11 @@
-const LEGACY_EXCLUDED_FOR_TABLE = new Set(['principalScope', 'principalPolicyVersion', 'resourceScope', 'resourcePolicyVersion', 'outputs', 'meta']);
+const LEGACY_EXCLUDED_FOR_TABLE = new Set([
+  'principalScope',
+  'principalPolicyVersion',
+  'resourceScope',
+  'resourcePolicyVersion',
+  'outputs',
+  'meta',
+]);
 
 const LEGACY_READABLE_HEADERS_MAP = {
   callId: 'Call ID',
@@ -23,7 +30,12 @@ function hasMethod(value, methodName) {
 }
 
 function isLegacyLogger(logger) {
-  return hasMethod(logger, 'log') || hasMethod(logger, 'table') || hasMethod(logger, 'group') || hasMethod(logger, 'groupEnd');
+  return (
+    hasMethod(logger, 'log') ||
+    hasMethod(logger, 'table') ||
+    hasMethod(logger, 'group') ||
+    hasMethod(logger, 'groupEnd')
+  );
 }
 
 function isStructuredLogger(logger) {
@@ -152,12 +164,8 @@ function createLegacyLoggerWriter(logger) {
 function createStructuredLoggerWriter(logger) {
   const sink = hasMethod(logger, 'child') ? logger.child({ component: 'Kerberos.js' }) : logger;
   const writeMethod = hasMethod(sink, 'info') ? sink.info.bind(sink) : sink.debug.bind(sink);
-  const debugMethod = hasMethod(sink, 'debug')
-    ? sink.debug.bind(sink)
-    : writeMethod;
-  const errorMethod = hasMethod(sink, 'error')
-    ? sink.error.bind(sink)
-    : writeMethod;
+  const debugMethod = hasMethod(sink, 'debug') ? sink.debug.bind(sink) : writeMethod;
+  const errorMethod = hasMethod(sink, 'error') ? sink.error.bind(sink) : writeMethod;
 
   return {
     enabled: true,

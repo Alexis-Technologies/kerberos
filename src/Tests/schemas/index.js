@@ -17,26 +17,21 @@ const {
  */
 class KerberosTestZodSchemas extends ZodSchemas {
   static buildInputShape(z) {
-    return z
-      .object({
-        principals: z.union([z.array(z.string()).nonempty(), z.instanceof(PrincipalsMock)]),
-        resources: z.union([z.array(z.string()).nonempty(), z.instanceof(ResourcesMock)]),
-        actions: z
-          .union([
-            z.array(z.string()).nonempty(),
-            z.instanceof(Set),
-          ])
-          .transform((actions) => (actions instanceof Set ? actions : new Set(actions))),
-      });
+    return z.object({
+      principals: z.union([z.array(z.string()).nonempty(), z.instanceof(PrincipalsMock)]),
+      resources: z.union([z.array(z.string()).nonempty(), z.instanceof(ResourcesMock)]),
+      actions: z
+        .union([z.array(z.string()).nonempty(), z.instanceof(Set)])
+        .transform((actions) => (actions instanceof Set ? actions : new Set(actions))),
+    });
   }
 
   static buildExpectedItemShape(z) {
-    return z
-      .object({
-        principal: z.union([z.string(), z.instanceof(PrincipalMock)]),
-        resource: z.union([z.string(), z.instanceof(ResourceMock)]),
-        actions: z.record(z.string(), z.union([z.nativeEnum(Effect), z.boolean()])),
-      });
+    return z.object({
+      principal: z.union([z.string(), z.instanceof(PrincipalMock)]),
+      resource: z.union([z.string(), z.instanceof(ResourceMock)]),
+      actions: z.record(z.string(), z.union([z.nativeEnum(Effect), z.boolean()])),
+    });
   }
 
   static buildShape(z) {
@@ -82,7 +77,7 @@ class KerberosTestJsonSchemas extends JsonSchemas {
         },
         actions: JsonSchemas.buildNonEmptyArrayShape({ type: 'string' }),
       },
-      ['principals', 'resources', 'actions']
+      ['principals', 'resources', 'actions'],
     );
   }
 
@@ -99,7 +94,7 @@ class KerberosTestJsonSchemas extends JsonSchemas {
           anyOf: [{ enum: Object.values(Effect) }, { type: 'boolean' }],
         }),
       },
-      ['principal', 'resource', 'actions']
+      ['principal', 'resource', 'actions'],
     );
   }
 
@@ -110,7 +105,7 @@ class KerberosTestJsonSchemas extends JsonSchemas {
         input: KerberosTestJsonSchemas.buildInputShape(),
         expected: JsonSchemas.buildNonEmptyArrayShape(KerberosTestJsonSchemas.buildExpectedItemShape()),
       },
-      ['name', 'input', 'expected']
+      ['name', 'input', 'expected'],
     );
   }
 }
@@ -134,14 +129,7 @@ class KerberosTestTypeBoxSchemas extends TypeBoxSchemas {
     return t.Object({
       principal: t.Union([t.String(), TypeBoxSchemas.buildInstanceOfShape(t, PrincipalMock)]),
       resource: t.Union([t.String(), TypeBoxSchemas.buildInstanceOfShape(t, ResourceMock)]),
-      actions: t.Record(
-        t.String(),
-        t.Union([
-          t.Literal(Effect.Allow),
-          t.Literal(Effect.Deny),
-          t.Boolean(),
-        ])
-      ),
+      actions: t.Record(t.String(), t.Union([t.Literal(Effect.Allow), t.Literal(Effect.Deny), t.Boolean()])),
     });
   }
 
@@ -184,19 +172,13 @@ class KerberosTestsJsonSchemas extends JsonSchemas {
           ],
         },
         resources: {
-          anyOf: [
-            JsonSchemas.buildInstanceOfShape(ResourcesMock),
-            ResourcesMockJsonSchemas.buildShape(ResourceMock),
-          ],
+          anyOf: [JsonSchemas.buildInstanceOfShape(ResourcesMock), ResourcesMockJsonSchemas.buildShape(ResourceMock)],
         },
         tests: JsonSchemas.buildNonEmptyArrayShape({
-          anyOf: [
-            JsonSchemas.buildInstanceOfShape(KerberosTest),
-            KerberosTestJsonSchemas.buildShape(),
-          ],
+          anyOf: [JsonSchemas.buildInstanceOfShape(KerberosTest), KerberosTestJsonSchemas.buildShape()],
         }),
       },
-      ['name', 'principals', 'resources', 'tests']
+      ['name', 'principals', 'resources', 'tests'],
     );
   }
 
@@ -219,16 +201,16 @@ class KerberosTestsTypeBoxSchemas extends TypeBoxSchemas {
       ]),
       tests: TypeBoxSchemas.buildNonEmptyArrayShape(
         t,
-        t.Union([
-          TypeBoxSchemas.buildInstanceOfShape(t, KerberosTest),
-          KerberosTestTypeBoxSchemas.buildShape(t),
-        ])
+        t.Union([TypeBoxSchemas.buildInstanceOfShape(t, KerberosTest), KerberosTestTypeBoxSchemas.buildShape(t)]),
       ),
     });
   }
 
   static buildShape(t, KerberosTest) {
-    return TypeBoxSchemas.buildNonEmptyArrayShape(t, KerberosTestsTypeBoxSchemas.buildTestsPolicyShape(t, KerberosTest));
+    return TypeBoxSchemas.buildNonEmptyArrayShape(
+      t,
+      KerberosTestsTypeBoxSchemas.buildTestsPolicyShape(t, KerberosTest),
+    );
   }
 }
 

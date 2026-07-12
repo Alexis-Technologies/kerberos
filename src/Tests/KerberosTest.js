@@ -127,7 +127,10 @@ class KerberosTest {
             resourcesToCheck.push({ resource: resourceData.resource, actions: Array.from(resourceData.actions) });
           }
 
-          const { results } = await kerberosInstance.checkResources({ principal, resources: resourcesToCheck }, effectAsBoolean);
+          const { results } = await kerberosInstance.checkResources(
+            { principal, resources: resourcesToCheck },
+            effectAsBoolean,
+          );
 
           const resultsByResourceId = new Map();
           for (const result of results) resultsByResourceId.set(result.resource.id, result);
@@ -136,7 +139,7 @@ class KerberosTest {
             const result = resultsByResourceId.get(resourceData.resource.id);
             assert.ok(
               result,
-              `No result returned for resource "${resourceData.resource.name}" (id: "${resourceData.resource.id}")!`
+              `No result returned for resource "${resourceData.resource.name}" (id: "${resourceData.resource.id}")!`,
             );
 
             const resourceName = resourceData.resource.name;
@@ -145,12 +148,12 @@ class KerberosTest {
               const effect = result.actions[action];
               assert.ok(
                 effect !== undefined,
-                `Action "${action}" not found in the checked resources response for resource "${resourceName}"!`
+                `Action "${action}" not found in the checked resources response for resource "${resourceName}"!`,
               );
               assert.strictEqual(
                 effect,
                 expectedEffect,
-                `Action "${action}" effect for resource "${resourceName}" is not matched! Expected: ${expectedEffect} but got: ${effect}`
+                `Action "${action}" effect for resource "${resourceName}" is not matched! Expected: ${expectedEffect} but got: ${effect}`,
               );
             }
           }

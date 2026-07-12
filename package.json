@@ -20,7 +20,9 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "test:types": "tsd",
-    "lint": "eslint src -c eslint.config.js"
+    "lint": "oxlint src test",
+    "format": "oxfmt src test",
+    "format:check": "oxfmt src test --check"
   },
   "tsd": {
     "directory": "test"
@@ -49,27 +51,16 @@
   },
   "homepage": "https://alexis.dev",
   "devDependencies": {
-    "@eslint/js": "^9.13.0",
     "@jsep-plugin/new": "^1.0.4",
     "@jsep-plugin/object": "^1.2.2",
     "@jsep-plugin/ternary": "^1.1.4",
     "@sinclair/typebox": "^0.34.48",
-    "@stylistic/eslint-plugin-js": "^2.10.1",
     "ajv": "^8.18.0",
-    "eslint": "^9.14.0",
-    "eslint-config-prettier": "^9.1.0",
-    "eslint-plugin-import": "^2.31.0",
-    "eslint-plugin-jest": "^28.8.3",
-    "eslint-plugin-node": "^11.1.0",
-    "eslint-plugin-prettier": "^5.2.1",
-    "eslint-plugin-promise": "^7.1.0",
-    "eslint-plugin-unicorn": "^56.0.0",
-    "globals": "^15.11.0",
     "jsep": "^1.4.0",
     "keyv": "^5.6.0",
-    "neostandard": "^0.11.7",
+    "oxfmt": "^0.58.0",
+    "oxlint": "^1.73.0",
     "pino": "^10.3.1",
-    "prettier": "^3.3.3",
     "tsd": "^0.31.2",
     "typescript": "^5.8.3",
     "zod": "^4.1.1"

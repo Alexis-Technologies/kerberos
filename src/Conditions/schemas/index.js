@@ -36,11 +36,10 @@ class ConditionsZodSchemas extends ZodSchemas {
             all: z.array(matchShape).nonempty().optional(),
             none: z.array(matchShape).nonempty().optional(),
           })
-          .refine(
-            (value) => value.any !== undefined || value.all !== undefined || value.none !== undefined,
-            { message: 'A condition match must define at least one of "any", "all", or "none".' }
-          ),
-      ])
+          .refine((value) => value.any !== undefined || value.all !== undefined || value.none !== undefined, {
+            message: 'A condition match must define at least one of "any", "all", or "none".',
+          }),
+      ]),
     );
     return matchShape;
   }
@@ -68,8 +67,8 @@ class ConditionsJsonSchemas extends JsonSchemas {
           variables: JsonSchemas.buildUnknownRecordShape(),
           V: JsonSchemas.buildUnknownRecordShape(),
         },
-        []
-      )
+        [],
+      ),
     );
   }
 
@@ -100,11 +99,7 @@ class ConditionsJsonSchemas extends JsonSchemas {
             none: JsonSchemas.buildNonEmptyArrayShape(self),
           },
           additionalProperties: true,
-          anyOf: [
-            { required: ['any'] },
-            { required: ['all'] },
-            { required: ['none'] },
-          ],
+          anyOf: [{ required: ['any'] }, { required: ['all'] }, { required: ['none'] }],
         },
       ],
     };
@@ -115,7 +110,7 @@ class ConditionsJsonSchemas extends JsonSchemas {
       {
         match: ConditionsJsonSchemas.buildConditionMatchShape(),
       },
-      ['match']
+      ['match'],
     );
   }
 }
@@ -145,7 +140,7 @@ class ConditionsTypeBoxSchemas extends TypeBoxSchemas {
         t.Object({ any: TypeBoxSchemas.buildNonEmptyArrayShape(t, Self) }),
         t.Object({ all: TypeBoxSchemas.buildNonEmptyArrayShape(t, Self) }),
         t.Object({ none: TypeBoxSchemas.buildNonEmptyArrayShape(t, Self) }),
-      ])
+      ]),
     );
   }
 

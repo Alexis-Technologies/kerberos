@@ -316,7 +316,10 @@ describe('Kerberos', () => {
       const results = await kerberos.checkResources({ principal, resources });
       // UUID v4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
       const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-      assert.ok(uuidRegex.test(results.kerberosCallId), `kerberosCallId should be valid UUID format, got: ${results.kerberosCallId}`);
+      assert.ok(
+        uuidRegex.test(results.kerberosCallId),
+        `kerberosCallId should be valid UUID format, got: ${results.kerberosCallId}`,
+      );
     });
 
     it('should generate unique kerberosCallId for each request', async () => {
@@ -751,7 +754,10 @@ describe('Kerberos', () => {
   });
 
   describe('scoped principal policy lookup', () => {
-    const kerberos = new Kerberos([expensePolicy, sallyPrincipalPolicy, sallyScopedViewOverridePolicy], [commonRolesPolicy]);
+    const kerberos = new Kerberos(
+      [expensePolicy, sallyPrincipalPolicy, sallyScopedViewOverridePolicy],
+      [commonRolesPolicy],
+    );
 
     it('should use the base principal policy when request scope is not provided', async () => {
       const isAllowed = await kerberos.isAllowed({
@@ -831,7 +837,10 @@ describe('Kerberos', () => {
   });
 
   describe('mixed principal, role and resource policies', () => {
-    const kerberos = new Kerberos([expensePolicy, sallyPrincipalPolicy, userRolePolicy, managerRolePolicy], [commonRolesPolicy]);
+    const kerberos = new Kerberos(
+      [expensePolicy, sallyPrincipalPolicy, userRolePolicy, managerRolePolicy],
+      [commonRolesPolicy],
+    );
 
     it('should let principal policies override role denies and resource fallback', async () => {
       const isAllowed = await kerberos.isAllowed({
