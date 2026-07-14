@@ -8,27 +8,9 @@ const { createLoggerWriter } = require('./logging.js');
 const { createCacheReader } = require('./caching/cache.js');
 const { createSafeExprCodec } = require('./caching/codec.js');
 const { createAjvAdapter, parseWithValidation, registerAjvKeywords } = require('./validation');
-
-// Import crypto for Node.js environment
-let nodeCrypto;
-try {
-  nodeCrypto = require('crypto');
-} catch (error) {
-  // Ignore error, will fall back to browser crypto or manual generation
-}
-
-let nodePerformance;
-try {
-  ({ performance: nodePerformance } = require('node:perf_hooks'));
-} catch (error) {
-  // Ignore error, will fall back to global performance or Date.now
-}
-
-function getNow() {
-  if (nodePerformance?.now) return nodePerformance.now();
-  if (globalThis?.performance?.now) return globalThis.performance.now();
-  return Date.now();
-}
+// Platform runtime: bundlers swap this for `./runtime/browser.js` via the
+// package.json `browser` field map when targeting the browser.
+const { generateCallId, getNow } = require('./runtime/node.js');
 
 function createEmptyPolicyResult() {
   return { effects: new Map(), outputs: new Map(), meta: { actions: {}, effectiveDerivedRoles: [] } };
@@ -45,17 +27,7 @@ class Kerberos {
    * @returns {string}
    */
   static generateCallId() {
-    // Try Node.js crypto.randomUUID first
-    if (nodeCrypto?.randomUUID) return nodeCrypto.randomUUID();
-    // Try the global Web Crypto (browser / modern Node). `globalThis` is always
-    // declared, so this never throws ReferenceError when `window` is undefined.
-    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
-    // Fall back to pseudo UUID v4-like generator
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
-      const r = (Math.random() * 16) | 0;
-      const v = c === 'x' ? r : (r & 0x3) | 0x8;
-      return v.toString(16);
-    });
+    return generateCallId();
   }
 
   /**

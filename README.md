@@ -66,6 +66,18 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
 npm install @alexify/kerberos
 ```
 
+### Browser usage
+
+The package ships two entrypoints: a Node.js entry (`index.js`, uses `node:crypto` / `node:perf_hooks` directly) and a browser entry (`browser.js`) declared via the package.json `browser` field and the `browser` condition in `exports`. Browser bundlers pick the browser build automatically — **no configuration needed** for webpack 5, Vite, esbuild (`platform: 'browser'`), Parcel or Bun. Rollup users need [`@rollup/plugin-node-resolve`](https://github.com/rollup/plugins/tree/master/packages/node-resolve) with `browser: true`.
+
+The browser build contains **zero Node.js builtins** — the only platform-specific code (`generateCallId`, `getNow`) is swapped to a browser implementation backed by `globalThis.crypto.randomUUID` and `globalThis.performance`.
+
+Notes:
+
+- In insecure contexts (plain HTTP), where `crypto.randomUUID` is unavailable, call IDs fall back to a `Math.random`-based pseudo UUID. Call IDs are **correlation identifiers, not security tokens**, so this is safe.
+- The package is CommonJS, so browser usage requires a bundler (no bare `<script>` tag).
+- Node.js itself ignores the `browser` field entirely — server-side usage (with or without a bundler) always resolves the Node entry.
+
 ## Usage
 
 ```javascript

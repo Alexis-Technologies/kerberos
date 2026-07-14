@@ -5,6 +5,30 @@ All notable changes to **`@alexify/kerberos`** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Browser/server entrypoint split** (pino-style). New root `browser.js` entry
+  plus a package.json `browser` field (object map) and a `browser` condition in
+  `exports`: browser bundlers (webpack, Vite, esbuild `platform: browser`,
+  Rollup node-resolve with `browser: true`, Parcel, Bun) now automatically pick
+  a build with **zero Node.js builtins**.
+- New `src/runtime/node.js` / `src/runtime/browser.js` platform modules holding
+  the only platform-specific code (`generateCallId`, `getNow`). The Node
+  runtime uses `node:crypto` / `node:perf_hooks` directly; the browser runtime
+  uses `globalThis.crypto.randomUUID` (with a pseudo-UUID fallback for insecure
+  contexts) and `globalThis.performance` (falling back to `Date.now`).
+- `engines.node >= 18` — documents the already-implicit runtime floor.
+
+### Changed
+
+- Removed the try/catch `require('crypto')` / `require('node:perf_hooks')`
+  feature detection from `src/Kerberos.js` — each platform entry now targets
+  its runtime directly. Node behavior is unchanged; browser bundles get
+  smaller and webpack 5 browser builds no longer need `resolve.fallback`
+  workarounds.
+
 ## [2.0.1] - 2026-06-01
 
 ### Fixed

@@ -3,10 +3,15 @@
   "version": "2.0.1",
   "description": "Fast and low overhead authorization framework for JavaScript runtime",
   "main": "index.js",
+  "browser": {
+    "./index.js": "./browser.js",
+    "./src/runtime/node.js": "./src/runtime/browser.js"
+  },
   "types": "index.d.ts",
   "exports": {
     ".": {
       "types": "./index.d.ts",
+      "browser": "./browser.js",
       "default": "./index.js"
     },
     "./tests": {
@@ -65,6 +70,9 @@
     "typescript": "^5.8.3",
     "zod": "^4.1.1"
   },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "publishConfig": {
     "access": "public"
   },
@@ -76,6 +84,7 @@
   "files": [
     "index.js",
     "index.d.ts",
+    "browser.js",
     "tests.js",
     "tests.d.ts",
     "src/",

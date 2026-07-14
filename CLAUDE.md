@@ -35,6 +35,10 @@ Every DSL concept (`Conditions`, `Constants`, `DerivedRoles`, `Outputs`, `Princi
 
 `src/index.js` merges every module's `index.js` into the single package export. When adding a new DSL concept or policy field, follow this same four-file pattern rather than inlining logic elsewhere.
 
+### Platform runtime split (`src/runtime/`)
+
+`src/runtime/node.js` and `src/runtime/browser.js` are the **only** platform-specific files in the package — both export the identical `{ generateCallId, getNow }` interface. The Node variant uses `node:crypto` / `node:perf_hooks` directly (no try/catch feature detection); the browser variant uses `globalThis.crypto?.randomUUID` (pseudo-UUID fallback for insecure contexts) and `globalThis.performance` (falling back to `Date.now`), reading globals at call time so fallback branches stay testable. `src/Kerberos.js` requires `./runtime/node.js`; browser bundlers swap it via the package.json `browser` field object map (`"./index.js" → "./browser.js"`, `"./src/runtime/node.js" → "./src/runtime/browser.js"`) plus the `browser` condition in `exports`. Invariants: everything else in `src/` must stay platform-neutral (no Node builtins); any new Node builtin usage goes into `src/runtime/node.js` with a matching browser counterpart; renaming runtime files requires updating the `browser` map keys in `package.json` (a mismatch fails loudly at bundle time thanks to the `node:` prefix). Root `browser.js` intentionally mirrors `index.js` — do not deduplicate them.
+
 ### Request evaluation flow (`src/Kerberos.js`)
 
 `Kerberos` is the sole runtime engine. Policies passed to the constructor are parsed (via `Kerberos.parsePolicy`) and stored in four private `Map`s keyed by scope-aware cache keys: `#resourcePolicies`, `#principalPolicies`, `#rolePolicies`, `#derivedRoles`.
