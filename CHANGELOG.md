@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its runtime directly. Node behavior is unchanged; browser bundles get
   smaller and webpack 5 browser builds no longer need `resolve.fallback`
   workarounds.
+- **Tooling: migrated linting/formatting from ESLint (neostandard) + Prettier
+  to [Oxlint](https://oxc.rs/docs/guide/usage/linter) + Oxfmt** (`.oxlintrc.json` / `.oxfmtrc.json`). `pnpm lint` now runs
+  `oxlint src test` (test files are linted too, previously only `src/`), and new
+  `pnpm format` / `pnpm format:check` scripts run Oxfmt. The whole codebase was
+  reformatted to `printWidth: 120` with trailing commas; inline suppressions
+  renamed to `oxlint-disable-*`. Dev-only change — no runtime impact.
 
 ## [2.0.1] - 2026-06-01
 
