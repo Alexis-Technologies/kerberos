@@ -5,6 +5,7 @@ const { DerivedRoles } = require('./DerivedRoles/index.js');
 const { ALL_ACTIONS, Effect, JsonSchemas, TypeBoxSchemas, ZodSchemas } = require('./schemas');
 const { KerberosJsonSchemas, KerberosTypeBoxSchemas, KerberosZodSchemas } = require('./schemas/kerberos.js');
 const { createLoggerWriter } = require('./logging.js');
+const { createTelemetryWriter } = require('./telemetry.js');
 const { createCacheReader } = require('./caching/cache.js');
 const { createSafeExprCodec } = require('./caching/codec.js');
 const { createAjvAdapter, parseWithValidation, registerAjvKeywords } = require('./validation');
@@ -169,6 +170,8 @@ class Kerberos {
 
   #logger = createLoggerWriter(false);
 
+  #telemetry = createTelemetryWriter(null);
+
   #cache = createCacheReader(null);
 
   /** @type {((json: unknown) => unknown) | null} */
@@ -204,8 +207,9 @@ class Kerberos {
   constructor(
     policies,
     derivedRoles,
-    { logger, cache, codec, z, ajv, typebox, getCallId } = {
+    { logger, telemetry, cache, codec, z, ajv, typebox, getCallId } = {
       logger: false,
+      telemetry: null,
       cache: null,
       codec: null,
       z: null,
@@ -273,6 +277,7 @@ class Kerberos {
     this.#derivedRoles = this.#getDerivedRolesMap(derivedRoles);
 
     this.#logger = createLoggerWriter(logger);
+    this.#telemetry = createTelemetryWriter(telemetry);
     this.#cache = createCacheReader(cache);
 
     if (codec?.deserialize) {
@@ -672,46 +677,53 @@ class Kerberos {
     const callId = this.#getCallId();
     const reqId = args?.reqId;
 
-    try {
-      this.#logMethodStart(reqKind, callId, reqId);
+    return this.#telemetry.withRequestSpan(reqKind, callId, reqId, async (otel) => {
+      try {
+        this.#logMethodStart(reqKind, callId, reqId);
 
-      const parsedArgs = Kerberos.parseIsAllowedArgs(args, {
-        schema: this.#isAllowedArgsValidator,
-        z: this.#z,
-        ajv: this.#ajv,
-        typebox: this.#typebox,
-      });
-
-      const req = Kerberos.parseRequest(
-        {
-          principal: parsedArgs.principal,
-          resource: parsedArgs.resource,
-          actions: [parsedArgs.action],
-          reqId: parsedArgs.reqId,
-          callId,
-          includeMeta: parsedArgs.includeMeta,
-        },
-        {
-          schema: this.#requestValidator,
+        const parsedArgs = Kerberos.parseIsAllowedArgs(args, {
+          schema: this.#isAllowedArgsValidator,
           z: this.#z,
           ajv: this.#ajv,
           typebox: this.#typebox,
-        },
-      );
+        });
 
-      const { effects, outputs, meta } = await this.#evaluatePolicySources(req);
-      const isAllowed = effects.get(parsedArgs.action) === Effect.Allow || effects.get(ALL_ACTIONS) === Effect.Allow;
+        const req = Kerberos.parseRequest(
+          {
+            principal: parsedArgs.principal,
+            resource: parsedArgs.resource,
+            actions: [parsedArgs.action],
+            reqId: parsedArgs.reqId,
+            callId,
+            includeMeta: parsedArgs.includeMeta,
+          },
+          {
+            schema: this.#requestValidator,
+            z: this.#z,
+            ajv: this.#ajv,
+            typebox: this.#typebox,
+          },
+        );
 
-      this.#log([{ req, result: { effects, outputs, meta } }], reqKind, callId);
+        const { effects, outputs, meta } = await this.#evaluatePolicySources(req);
+        const isAllowed = effects.get(parsedArgs.action) === Effect.Allow || effects.get(ALL_ACTIONS) === Effect.Allow;
 
-      return isAllowed;
-    } catch (error) {
-      this.#logMethodError(reqKind, callId, reqId, error);
-      if (this.#logger.enabled) return false;
-      throw error;
-    } finally {
-      this.#logMethodFinish(reqKind, callId, reqId, getNow() - startedAt);
-    }
+        const input = [{ req, result: { effects, outputs, meta } }];
+        this.#log(input, reqKind, callId);
+        this.#telemetry.recordDecisions(otel, input, reqKind);
+
+        return isAllowed;
+      } catch (error) {
+        this.#logMethodError(reqKind, callId, reqId, error);
+        this.#telemetry.recordError(otel, error);
+        if (this.#logger.enabled) return false;
+        throw error;
+      } finally {
+        const duration = getNow() - startedAt;
+        this.#logMethodFinish(reqKind, callId, reqId, duration);
+        this.#telemetry.endRequest(otel, reqKind, duration);
+      }
+    });
   }
 
   /**
@@ -727,60 +739,66 @@ class Kerberos {
     const callId = this.#getCallId();
     const reqId = args?.reqId;
 
-    try {
-      this.#logMethodStart(reqKind, callId, reqId);
+    return this.#telemetry.withRequestSpan(reqKind, callId, reqId, async (otel) => {
+      try {
+        this.#logMethodStart(reqKind, callId, reqId);
 
-      const results = [];
-      const inputForLog = [];
-      const parsedArgs = Kerberos.parseCheckResourcesArgs(args, {
-        schema: this.#checkResourcesArgsValidator,
-        z: this.#z,
-        ajv: this.#ajv,
-        typebox: this.#typebox,
-      });
+        const results = [];
+        const inputForLog = [];
+        const parsedArgs = Kerberos.parseCheckResourcesArgs(args, {
+          schema: this.#checkResourcesArgsValidator,
+          z: this.#z,
+          ajv: this.#ajv,
+          typebox: this.#typebox,
+        });
 
-      for (const { resource, actions } of parsedArgs.resources) {
-        const req = Kerberos.parseRequest(
-          {
-            principal: parsedArgs.principal,
-            resource,
-            actions,
-            reqId: parsedArgs.reqId,
-            callId,
-            includeMeta: parsedArgs.includeMeta,
-          },
-          {
-            schema: this.#requestValidator,
-            z: this.#z,
-            ajv: this.#ajv,
-            typebox: this.#typebox,
-          },
-        );
+        for (const { resource, actions } of parsedArgs.resources) {
+          const req = Kerberos.parseRequest(
+            {
+              principal: parsedArgs.principal,
+              resource,
+              actions,
+              reqId: parsedArgs.reqId,
+              callId,
+              includeMeta: parsedArgs.includeMeta,
+            },
+            {
+              schema: this.#requestValidator,
+              z: this.#z,
+              ajv: this.#ajv,
+              typebox: this.#typebox,
+            },
+          );
 
-        const { effects, outputs, meta } = await this.#evaluatePolicySources(req, effectAsBoolean);
+          const { effects, outputs, meta } = await this.#evaluatePolicySources(req, effectAsBoolean);
 
-        const result = {
-          resource: this.#buildResponseResource(resource),
-          actions: Object.fromEntries([...effects.entries()]),
-          outputs: [...outputs.values()],
-        };
-        if (req.includeMeta) result.meta = meta;
-        results.push(result);
-        inputForLog.push({ req, result: { effects, outputs, meta } });
+          const result = {
+            resource: this.#buildResponseResource(resource),
+            actions: Object.fromEntries([...effects.entries()]),
+            outputs: [...outputs.values()],
+          };
+          if (req.includeMeta) result.meta = meta;
+          results.push(result);
+          inputForLog.push({ req, result: { effects, outputs, meta } });
+        }
+
+        this.#log(inputForLog, reqKind, callId);
+        this.#telemetry.recordDecisions(otel, inputForLog, reqKind);
+
+        const response = { results, kerberosCallId: callId };
+        if (parsedArgs.reqId) response.reqId = parsedArgs.reqId;
+        return response;
+      } catch (error) {
+        this.#logMethodError(reqKind, callId, reqId, error);
+        this.#telemetry.recordError(otel, error);
+        if (this.#logger.enabled) return { results: [], kerberosCallId: callId, reqId };
+        throw error;
+      } finally {
+        const duration = getNow() - startedAt;
+        this.#logMethodFinish(reqKind, callId, reqId, duration);
+        this.#telemetry.endRequest(otel, reqKind, duration);
       }
-
-      this.#log(inputForLog, reqKind, callId);
-
-      const response = { results, kerberosCallId: callId };
-      if (parsedArgs.reqId) response.reqId = parsedArgs.reqId;
-      return response;
-    } catch (error) {
-      this.#logMethodError(reqKind, callId, reqId, error);
-      if (this.#logger.enabled) return { results: [], kerberosCallId: callId, reqId };
-      throw error;
-    } finally {
-      this.#logMethodFinish(reqKind, callId, reqId, getNow() - startedAt);
-    }
+    });
   }
 }
 

@@ -34,6 +34,7 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
 - [x] Metadata;
 - [x] Pluggable schema validation (Zod, JSON Schema + Ajv, TypeBox + Ajv);
 - [x] Caching / storing dynamic policies (cache-agnostic, with a safe AST-based serialization codec);
+- [x] OpenTelemetry (traces + metrics, zero-dependency delegation);
 
 ---
 **_P.S. We are tying to keep the API as close as possible to Cerbos. If you are familiar with Cerbos, you will feel at home with Kerberos.js._**
@@ -52,6 +53,7 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
   - [Mixed Policy Evaluation](#mixed-policy-evaluation)
 - [Configuration Options](#configuration-options)
   - [Using Pino for Production Logging](#using-pino-for-production-logging)
+- [OpenTelemetry](#opentelemetry)
 - [Schema Validation](#schema-validation)
   - [Zod](#using-zod) · [JSON Schema + Ajv](#using-json-schema--ajv) · [TypeBox + Ajv](#using-typebox--ajv) · [Explicit Builders](#using-explicit-builders)
 - [Outputs](#outputs)
@@ -398,6 +400,7 @@ The Kerberos constructor accepts an optional third parameter with configuration 
 ```javascript
 const kerberos = new Kerberos(policies, derivedRoles, {
   logger: true, // Legacy console audit logging with summary + table + debug(json)
+  telemetry, // Optional: OpenTelemetry traces + metrics ({ api } or { tracer, meter })
   cache, // Optional: any cache solution exposing get(key) (keyv, cacheable, ...)
   codec, // Optional: custom (de)serialization codec for dynamic policies
   z, // Optional: validate with Zod
@@ -409,6 +412,7 @@ const kerberos = new Kerberos(policies, derivedRoles, {
 
 ### Options:
 
+- **`telemetry`** (KerberosTelemetryOptions): Enable OpenTelemetry traces and metrics. Pass `{ api }` (the `@opentelemetry/api` module) or `{ tracer, meter }` instances — see [OpenTelemetry](#opentelemetry).
 - **`logger`** (boolean | KerberosLogger): Enable audit logging.
   - `true` keeps the legacy console behavior with `group + summary + table + debug(json)`
   - `false` or omitted disables logging
@@ -445,6 +449,43 @@ const kerberos = new Kerberos(policies, derivedRoles, {
 With `Pino`, Kerberos emits structured audit entries that include `callId`, `reqId`, `reqKind`, `principalId`, `resourceId`, `action`, `effect`, `outputs`, and `meta`. This mode is better suited for production ingestion than the default console table output.
 
 It also emits lifecycle logs such as `IsAllowed.start`, `IsAllowed.error`, `IsAllowed.finish`, `CheckResources.start`, and `CheckResources.finish`. When an error happens with logging enabled, Kerberos logs that error and returns a fallback response instead of throwing.
+
+## OpenTelemetry
+
+Kerberos.js ships native OpenTelemetry support (traces + metrics) following the same delegating philosophy as `logger` and `cache`: **the package never depends on `@opentelemetry/api`** (not even as a peer dependency). You pass either the api module or pre-created instances:
+
+```javascript
+import * as api from '@opentelemetry/api';
+import { Kerberos } from '@alexify/kerberos';
+
+// Preferred: pass the api module — Kerberos derives its own tracer/meter with
+// the correct instrumentation scope ('@alexify/kerberos').
+const kerberos = new Kerberos(policies, derivedRoles, { telemetry: { api } });
+
+// Escape hatch: pre-created instances (either may be omitted).
+const kerberos2 = new Kerberos(policies, derivedRoles, {
+  telemetry: { tracer: myTracer, meter: myMeter },
+});
+```
+
+Works out of the box with any registered SDK (e.g. `NodeSDK` from `@opentelemetry/sdk-node`); with no SDK registered, everything no-ops.
+
+**Spans** — one per public call: `Kerberos.isAllowed` (decision attributes on the span) and `Kerberos.checkResources` (one `kerberos.decision` event per resource × action). The span is started **active**, so spans created inside — e.g. an auto-instrumented Redis cache behind the `cache` option — nest correctly. Attributes include `kerberos.call_id`, `kerberos.req_id`, `kerberos.resource.kind`, `kerberos.action`, `kerberos.allowed` / `kerberos.effect`, `kerberos.matched_policy` / `kerberos.matched_scope`, and identity attributes `kerberos.principal.id` / `kerberos.resource.id`. On errors the span gets `ERROR` status plus an exception event — without changing the error contract (the `logger`-controlled fallback/rethrow behavior is untouched).
+
+**Metrics** — two instruments:
+
+| Instrument | Type | Unit | Attributes |
+| ---------- | ---- | ---- | ---------- |
+| `kerberos.decisions` | Counter | `{decision}` | `kerberos.effect`, `kerberos.resource.kind` |
+| `kerberos.request.duration` | Histogram | `ms` | `kerberos.req_kind`, `error` |
+
+> Metric attributes deliberately exclude actions and principals to keep cardinality bounded — they assume a bounded set of resource kinds.
+
+Notes:
+
+- **Identity attributes are on by default** (parity with audit logs). Set `telemetry: { includeIdentity: false }` to strip `kerberos.principal.id` / `kerberos.resource.id` from spans and events when traces are exported to backends where identity data is unwanted.
+- Telemetry failures (a broken tracer, exporter bugs) are swallowed internally — they can never affect authorization results.
+- `@opentelemetry/api` is browser-compatible, so telemetry works in browser builds too.
 
 ## Schema Validation
 

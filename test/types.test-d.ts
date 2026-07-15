@@ -1,4 +1,11 @@
-import { Effect, Kerberos, type KerberosDerivedRoles, type KerberosPolicy } from '../index.js';
+import {
+  Effect,
+  Kerberos,
+  type KerberosDerivedRoles,
+  type KerberosPolicy,
+  type KerberosTelemetryApi,
+  type KerberosTelemetryOptions,
+} from '../index.js';
 
 const policy = {
   resourcePolicy: {
@@ -61,6 +68,19 @@ const mutableDerivedRoles: KerberosDerivedRoles = {
 };
 
 new Kerberos([mutablePolicy], [mutableDerivedRoles]);
+
+// telemetry option accepts the api-module shape and the instances shape
+declare const otelApi: KerberosTelemetryApi;
+const telemetryApiMode: KerberosTelemetryOptions = { api: otelApi, includeIdentity: false };
+const telemetryInstancesMode: KerberosTelemetryOptions = {
+  tracer: { startSpan: (name: string) => ({ end: () => {} }) },
+  meter: {
+    createCounter: () => ({ add: () => {} }),
+    createHistogram: () => ({ record: () => {} }),
+  },
+};
+new Kerberos([mutablePolicy], [mutableDerivedRoles], { telemetry: telemetryApiMode });
+new Kerberos([mutablePolicy], [mutableDerivedRoles], { telemetry: telemetryInstancesMode });
 
 // isAllowed accepts optional reqId
 declare const kerberos: Kerberos;

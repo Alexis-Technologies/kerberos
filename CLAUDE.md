@@ -68,6 +68,10 @@ Because remote-stored policies must be JSON (no live functions), `codec.js` (`cr
 
 `logger` option accepts `true` (legacy `console.group`/`table`/`debug` output), a custom console-like object, or a structured logger (e.g. Pino, detected via `info`/`debug` methods) which receives one structured audit entry per evaluated action. When logging is enabled, runtime/validation errors are caught and converted to fallback results (`isAllowed` → `false`, `checkResources` → empty results) instead of being thrown; when disabled, errors propagate to the caller.
 
+### OpenTelemetry (`src/telemetry.js`)
+
+Same delegation pattern as logger/cache/codec: the `telemetry` option accepts `{ api }` (the `@opentelemetry/api` module — Kerberos derives tracer/meter with the `@alexify/kerberos` scope) or `{ tracer, meter }` instances; the package never depends on `@opentelemetry/api`. `createTelemetryWriter` mirrors `createLoggerWriter` (factory + no-op disabled writer); the writer contract is `{ enabled, withRequestSpan, recordDecisions, recordError, endRequest }`, hooked into `isAllowed`/`checkResources` alongside the existing `#log`/`#logMethod*` call sites. Invariants: `SPAN_STATUS_ERROR = 2` is hardcoded because OTel status codes are spec-frozen (avoids needing the api module for constants); every writer method swallows its own failures — telemetry must never affect authorization results or the logger-controlled swallow-vs-rethrow error contract; the module has zero imports and must stay platform-neutral. `@opentelemetry/*` packages are devDependencies only (test usage, like `pino`).
+
 ### Testing DSL (`src/Tests/`)
 
 `KerberosTest`/`KerberosTests` (exported only from the `@alexify/kerberos/tests` subpath, not the main entry) implement a Cerbos-style declarative test runner: a JSON-ish fixture of `principals`/`resources`/`tests` is run against a live `Kerberos` instance and asserted with `node:test`. `Tests/Mocks/` provides named principal/resource fixture helpers. Use this pattern (see `README.md` "Testing" section) rather than hand-rolling policy assertions when adding policy-behavior tests.

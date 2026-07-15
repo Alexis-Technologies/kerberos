@@ -436,6 +436,56 @@ export type CacheLike = {
 };
 
 /**
+ * Minimal structural OpenTelemetry contracts. Kerberos never depends on
+ * `@opentelemetry/api` (not even as a peer dependency) — following the same
+ * delegating philosophy as `logger` and `cache`, the consumer passes either
+ * the api module or pre-created tracer/meter instances.
+ */
+export type KerberosSpan = {
+  setAttribute?(key: string, value: unknown): unknown;
+  addEvent?(name: string, attributes?: Record<string, unknown>): unknown;
+  recordException?(error: unknown): void;
+  setStatus?(status: { code: number; message?: string }): unknown;
+  end(): void;
+};
+export type KerberosTracer = {
+  startSpan?(name: string, options?: unknown): KerberosSpan;
+  startActiveSpan?<T>(name: string, options: unknown, fn: (span: KerberosSpan) => T): T;
+};
+export type KerberosCounter = { add(value: number, attributes?: Record<string, unknown>): void };
+export type KerberosHistogram = { record(value: number, attributes?: Record<string, unknown>): void };
+export type KerberosMeter = {
+  createCounter(name: string, options?: unknown): KerberosCounter;
+  createHistogram(name: string, options?: unknown): KerberosHistogram;
+};
+export type KerberosTelemetryApi = {
+  trace?: { getTracer(name: string, version?: string): KerberosTracer };
+  metrics?: { getMeter(name: string, version?: string): KerberosMeter };
+};
+
+/**
+ * OpenTelemetry integration options.
+ *
+ * Two usage modes (controlled by which fields you supply):
+ *
+ * 1. `{ api }` — pass the `@opentelemetry/api` module itself; Kerberos derives
+ *    its own tracer and meter with the correct instrumentation scope
+ *    (`@alexify/kerberos`). Preferred.
+ * 2. `{ tracer, meter }` — pre-created instances (either may be omitted for
+ *    tracer-only / meter-only setups).
+ *
+ * `includeIdentity` (default `true`) controls whether `kerberos.principal.id`
+ * and `kerberos.resource.id` are recorded on spans/events — set to `false`
+ * when traces are exported to backends where identity data is unwanted.
+ */
+export type KerberosTelemetryOptions = {
+  api?: KerberosTelemetryApi;
+  tracer?: KerberosTracer;
+  meter?: KerberosMeter;
+  includeIdentity?: boolean;
+};
+
+/**
  * Pluggable codec used to (de)serialize dynamic policy documents stored in a
  * remote cache.
  *
@@ -503,6 +553,7 @@ export function deserializePolicy(json: unknown, codec: PolicyCodec): unknown;
 
 export type KerberosOptions = ValidationOptions & {
   logger?: KerberosLogger | boolean;
+  telemetry?: KerberosTelemetryOptions;
   cache?: CacheLike;
   codec?: PolicyCodec;
   getCallId?: () => string;

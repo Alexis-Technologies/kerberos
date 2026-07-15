@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Native OpenTelemetry support (traces + metrics)** via the new `telemetry`
+  constructor option, following the same zero-dependency delegation philosophy
+  as `logger`/`cache`: pass `{ api }` (the `@opentelemetry/api` module — Kerberos
+  derives its own tracer/meter with the `@alexify/kerberos` instrumentation
+  scope) or pre-created `{ tracer, meter }` instances. One span per
+  `isAllowed`/`checkResources` call (started **active**, so auto-instrumented
+  cache spans nest under it), per-decision `kerberos.decision` events, `ERROR`
+  span status + exception events on failures, plus two metrics:
+  `kerberos.decisions` counter and `kerberos.request.duration` histogram.
+  Identity attributes (`kerberos.principal.id`, `kerberos.resource.id`) are on
+  by default and can be stripped with `telemetry.includeIdentity: false`.
+  Telemetry failures never affect authorization results, and the
+  logger-controlled error contract (fallback vs rethrow) is unchanged. New
+  structural types (`KerberosTelemetryOptions`, `KerberosTracer`,
+  `KerberosMeter`, …) are exported from `index.d.ts`.
+
 - **Browser/server entrypoint split** (pino-style). New root `browser.js` entry
   plus a package.json `browser` field (object map) and a `browser` condition in
   `exports`: browser bundlers (webpack, Vite, esbuild `platform: browser`,
