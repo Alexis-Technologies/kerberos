@@ -922,32 +922,37 @@ class Kerberos {
         // Validation stays synchronous and up-front: a malformed resource
         // entry fails the whole request (programming error), before any
         // evaluation starts.
-        const reqs = parsedArgs.resources.map(({ resource, actions }) =>
-          this.#parseValidated('Invalid request', () =>
-            Kerberos.parseRequest(
-              {
-                principal: parsedArgs.principal,
-                resource,
-                actions,
-                reqId: parsedArgs.reqId,
-                callId,
-                includeMeta: parsedArgs.includeMeta,
-              },
-              {
-                schema: this.#requestValidator,
-                z: this.#z,
-                ajv: this.#ajv,
-                typebox: this.#typebox,
-              },
+        const reqs = [];
+        for (const { resource, actions } of parsedArgs.resources) {
+          reqs.push(
+            this.#parseValidated('Invalid request', () =>
+              Kerberos.parseRequest(
+                {
+                  principal: parsedArgs.principal,
+                  resource,
+                  actions,
+                  reqId: parsedArgs.reqId,
+                  callId,
+                  includeMeta: parsedArgs.includeMeta,
+                },
+                {
+                  schema: this.#requestValidator,
+                  z: this.#z,
+                  ajv: this.#ajv,
+                  typebox: this.#typebox,
+                },
+              ),
             ),
-          ),
-        );
+          );
+        }
 
         // Resources evaluate concurrently; allSettled keeps result order and
         // guarantees one rejected resource never fails the others. A rejected
         // resource yields a fail-closed result (all its actions DENY) plus an
         // error log/telemetry record, isolating failures at resource level.
-        const settled = await Promise.allSettled(reqs.map((req) => this.#evaluatePolicySources(req)));
+        const promises = [];
+        for (const req of reqs) promises.push(this.#evaluatePolicySources(req));
+        const settled = await Promise.allSettled(promises);
 
         const results = [];
         const inputForLog = [];
