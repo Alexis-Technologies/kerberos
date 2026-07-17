@@ -1245,11 +1245,11 @@ pnpm bench
 
 Apple Silicon (M-series), Node v24:
 
-| Scenario | ops/sec |
-| -------- | ------: |
+| Scenario |  ops/sec |
+| -------- |---------:|
 | `isAllowed` — simple role match | ~320,000 |
-| `isAllowed` — derived roles + variables + condition | ~290,000 |
-| `checkResources` — 10 resources × 3 actions | ~41,000 |
+| `isAllowed` — derived roles + variables + condition | ~300,000 |
+| `checkResources` — 10 resources × 3 actions |  ~41,000 |
 | `isAllowed` — cache-backed dynamic policy (`$expr`, in-memory Map) | ~150,000 |
 
 `checkResources` evaluates resources **concurrently** (`Promise.allSettled`): with a remote policy store, N resources cost one parallel wave of lookups instead of N sequential round-trips (measured ~8x faster with a 2ms-latency cache and 10 resources), and one failing resource never fails the batch — it fail-closes to `EFFECT_DENY` for its actions only.
