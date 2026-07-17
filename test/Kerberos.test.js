@@ -737,6 +737,11 @@ describe('Kerberos', () => {
               },
             },
             effectiveDerivedRoles: ['OWNER'],
+            resolution: [
+              { source: 'principal', id: 'sally', version: 'default', scopesSearched: [''], matchedScope: '' },
+              { source: 'role', id: 'USER', version: 'default', scopesSearched: [''], matchedScope: null },
+              { source: 'resource', id: 'expense', version: 'default', scopesSearched: [''], matchedScope: '' },
+            ],
           },
         },
       ]);
@@ -811,6 +816,9 @@ describe('Kerberos', () => {
             actions: {
               view: {
                 matchedPolicy: 'role.USER.vdefault',
+                // Decision tracing: the allowlist rule matched but its
+                // condition failed — previously this deny was unexplained.
+                reason: 'condition-not-met',
               },
               create: {
                 matchedPolicy: 'role.USER.vdefault',
@@ -818,6 +826,10 @@ describe('Kerberos', () => {
               },
             },
             effectiveDerivedRoles: [],
+            resolution: [
+              { source: 'principal', id: 'sally', version: 'default', scopesSearched: [''], matchedScope: null },
+              { source: 'role', id: 'USER', version: 'default', scopesSearched: [''], matchedScope: '' },
+            ],
           },
         },
       ]);

@@ -134,12 +134,23 @@ class ConditionsTypeBoxSchemas extends TypeBoxSchemas {
   }
 
   static buildConditionMatchShape(t) {
+    // A single object with three optional strategies plus an at-least-one
+    // constraint — the same encoding as the Zod and JSON Schema backends. The
+    // previous union of single-key objects allowed a multi-strategy match like
+    // `{ all: [...], none: [...] }` to validate against just one branch,
+    // silently ignoring the other strategies (the exact anti-pattern the Zod
+    // backend documents and avoids).
     return t.Recursive((Self) =>
       t.Union([
         ConditionsTypeBoxSchemas.buildConditionSingleMatchExpr(t),
-        t.Object({ any: TypeBoxSchemas.buildNonEmptyArrayShape(t, Self) }),
-        t.Object({ all: TypeBoxSchemas.buildNonEmptyArrayShape(t, Self) }),
-        t.Object({ none: TypeBoxSchemas.buildNonEmptyArrayShape(t, Self) }),
+        t.Composite([
+          t.Object({
+            any: t.Optional(TypeBoxSchemas.buildNonEmptyArrayShape(t, Self)),
+            all: t.Optional(TypeBoxSchemas.buildNonEmptyArrayShape(t, Self)),
+            none: t.Optional(TypeBoxSchemas.buildNonEmptyArrayShape(t, Self)),
+          }),
+          t.Union([t.Object({ any: t.Unknown() }), t.Object({ all: t.Unknown() }), t.Object({ none: t.Unknown() })]),
+        ]),
       ]),
     );
   }

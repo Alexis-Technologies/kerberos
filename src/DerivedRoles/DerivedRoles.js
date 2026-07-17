@@ -1,8 +1,7 @@
 const { parseDerivedRolesShape } = require('./validation');
 
-const { Variables } = require('../Variables');
 const { Conditions } = require('../Conditions');
-const { Constants } = require('../Constants');
+const { parseConstants, parseVariables } = require('../policyParsers.js');
 
 /**
  * Represents a derived roles definition set.
@@ -20,13 +19,15 @@ class DerivedRoles {
   }
 
   static parseConstants(constants, options = {}) {
-    return constants instanceof Constants ? constants : new Constants(constants, options);
+    return parseConstants(constants, options);
   }
 
   static parseVariables(variables, options = {}) {
-    return variables instanceof Variables ? variables : new Variables(variables, options);
+    return parseVariables(variables, options);
   }
 
+  // Unlike policy rules, a derived-role definition's condition is required, so
+  // this intentionally does not share the null-passthrough of policyParsers.
   static parseConditions(conditions, options = {}) {
     return conditions instanceof Conditions ? conditions : new Conditions(conditions, options);
   }

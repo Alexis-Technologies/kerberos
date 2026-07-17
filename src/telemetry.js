@@ -54,6 +54,7 @@ function createDisabledTelemetryWriter() {
     },
     recordDecisions() {},
     recordError() {},
+    recordCacheRequest() {},
     endRequest() {},
   };
 }
@@ -85,6 +86,7 @@ function createTelemetryWriter(telemetry) {
 
   let decisionsCounter = null;
   let durationHistogram = null;
+  let cacheRequestsCounter = null;
   if (hasMethod(meter, 'createCounter') && hasMethod(meter, 'createHistogram')) {
     try {
       decisionsCounter = meter.createCounter('kerberos.decisions', {
@@ -95,9 +97,14 @@ function createTelemetryWriter(telemetry) {
         unit: 'ms',
         description: 'Duration of Kerberos isAllowed/checkResources calls',
       });
+      cacheRequestsCounter = meter.createCounter('kerberos.cache.requests', {
+        unit: '{request}',
+        description: 'Dynamic-policy cache lookups by result (hit/miss/error)',
+      });
     } catch {
       decisionsCounter = null;
       durationHistogram = null;
+      cacheRequestsCounter = null;
     }
   }
 
@@ -221,6 +228,18 @@ function createTelemetryWriter(telemetry) {
         handle.error = true;
         handle.span?.recordException?.(error);
         handle.span?.setStatus?.({ code: SPAN_STATUS_ERROR, message: error?.message });
+      } catch {
+        // Telemetry must never break authorization.
+      }
+    },
+
+    /**
+     * Counts a dynamic-policy cache lookup by outcome (`hit`/`miss`/`error`).
+     * Not tied to a span — works in meter-only configurations too.
+     */
+    recordCacheRequest(result) {
+      try {
+        cacheRequestsCounter?.add(1, { 'kerberos.cache.result': result });
       } catch {
         // Telemetry must never break authorization.
       }

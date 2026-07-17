@@ -298,16 +298,20 @@ describe('Kerberos logger support', () => {
     assert.strictEqual(auditEntries[0].msg, 'Kerberos.js authorization decision for sally on expense1');
   });
 
-  it('should log structured method errors with pino and return fallback result', async () => {
+  it('should log structured method errors with pino and rethrow validation errors', async () => {
     const collector = createPinoCollector('debug');
     const kerberos = createKerberosWithLogger(collector.logger, { z });
 
-    const result = await kerberos.isAllowed({
-      principal: principalsPolicy.sally,
-      resource: resourcesPolicy.expense1,
-    });
-
-    assert.strictEqual(result, false);
+    // Malformed arguments are programming errors: they always throw
+    // (KerberosValidationError), regardless of logger presence or `onError`.
+    await assert.rejects(
+      () =>
+        kerberos.isAllowed({
+          principal: principalsPolicy.sally,
+          resource: resourcesPolicy.expense1,
+        }),
+      { name: 'KerberosValidationError' },
+    );
 
     await collector.flush();
 

@@ -2,11 +2,12 @@ const { ResourcePolicy } = require('./ResourcePolicy/index.js');
 const { PrincipalPolicy } = require('./PrincipalPolicy/index.js');
 const { RolePolicy } = require('./RolePolicy/index.js');
 const { DerivedRoles } = require('./DerivedRoles/index.js');
-const { ALL_ACTIONS, Effect, JsonSchemas, TypeBoxSchemas, ZodSchemas } = require('./schemas');
+const { ALL_ACTIONS, DEFAULT_VERSION, Effect, JsonSchemas, TypeBoxSchemas, ZodSchemas } = require('./schemas');
 const { KerberosJsonSchemas, KerberosTypeBoxSchemas, KerberosZodSchemas } = require('./schemas/kerberos.js');
 const { createLoggerWriter } = require('./logging.js');
 const { createTelemetryWriter } = require('./telemetry.js');
 const { createCacheReader } = require('./caching/cache.js');
+const { KerberosCodecError, KerberosValidationError } = require('./errors.js');
 const { createSafeExprCodec } = require('./caching/codec.js');
 const { createAjvAdapter, parseWithValidation, registerAjvKeywords } = require('./validation');
 // Platform runtime: bundlers swap this for `./runtime/browser.js` via the
@@ -199,6 +200,26 @@ class Kerberos {
 
   #getCallId = null;
 
+  #onError = 'throw';
+
+  // Per-instance memo of scope search chains: requests repeatedly resolve the
+  // same scopes, and rebuilding the chain does string split/join work 2+N
+  // times per request (once per role). Bounded so unbounded caller-supplied
+  // scopes cannot grow memory; beyond the cap chains are computed uncached.
+  #scopeChains = new Map();
+
+  static #MAX_CACHED_SCOPE_CHAINS = 1000;
+
+  #getScopeChain(scope) {
+    const normalized = Kerberos.normalizeScope(scope);
+    let chain = this.#scopeChains.get(normalized);
+    if (!chain) {
+      chain = Kerberos.getScopeSearchChain(normalized);
+      if (this.#scopeChains.size < Kerberos.#MAX_CACHED_SCOPE_CHAINS) this.#scopeChains.set(normalized, chain);
+    }
+    return chain;
+  }
+
   /**
    * @param {unknown[]} policies
    * @param {unknown[]} derivedRoles
@@ -207,11 +228,13 @@ class Kerberos {
   constructor(
     policies,
     derivedRoles,
-    { logger, telemetry, cache, codec, z, ajv, typebox, getCallId } = {
+    { logger, telemetry, cache, cacheRetry, codec, onError, z, ajv, typebox, getCallId } = {
       logger: false,
       telemetry: null,
       cache: null,
+      cacheRetry: null,
       codec: null,
+      onError: 'throw',
       z: null,
       ajv: null,
       typebox: null,
@@ -219,6 +242,11 @@ class Kerberos {
     },
   ) {
     this.#getCallId = Kerberos.generateCallId;
+
+    if (onError !== undefined && onError !== null && onError !== 'throw' && onError !== 'deny') {
+      throw new TypeError(`Invalid onError option "${onError}" — expected 'throw' or 'deny'`);
+    }
+    this.#onError = onError ?? 'throw';
 
     this.#ajv = ajv ?? null;
     this.#typebox = typebox ?? null;
@@ -278,12 +306,17 @@ class Kerberos {
 
     this.#logger = createLoggerWriter(logger);
     this.#telemetry = createTelemetryWriter(telemetry);
-    this.#cache = createCacheReader(cache);
+    this.#cache = createCacheReader(cache, cacheRetry);
 
     if (codec?.deserialize) {
       this.#codecDeserialize = (value) => codec.deserialize(value);
     } else if (codec?.jsep) {
-      const builtinCodec = createSafeExprCodec({ jsep: codec.jsep });
+      const builtinCodec = createSafeExprCodec({
+        jsep: codec.jsep,
+        maxCachedExprs: codec.maxCachedExprs,
+        maxExprLength: codec.maxExprLength,
+        maxDepth: codec.maxDepth,
+      });
       this.#codecDeserialize = (value) => builtinCodec.deserialize(value);
     }
 
@@ -302,12 +335,55 @@ class Kerberos {
    * @param {(shape: unknown) => unknown} build
    * @returns {Promise<unknown>}
    */
+  // Guarded observability signals for cache lookups: a debug log entry plus
+  // the kerberos.cache.requests counter with result hit/miss/error.
+  #recordCacheResult(key, result) {
+    this.#telemetry.recordCacheRequest(result);
+    try {
+      this.#logger.debug(
+        { timestamp: new Date().toISOString(), event: `Cache.${result}`, key },
+        `Kerberos.js cache ${result} for ${key}`,
+      );
+    } catch {
+      // Audit logging must never break authorization.
+    }
+  }
+
   async #resolveFromCache(key, build) {
     if (!this.#cache.enabled) return null;
-    const value = await this.#cache.get(key);
-    if (value === undefined || value === null) return null;
-    const shape = this.#codecDeserialize ? this.#codecDeserialize(value) : value;
-    return build(shape);
+    let value;
+    try {
+      // A transient backend failure surfaces here as KerberosCacheError (after
+      // the reader's retry loop) and propagates per the `onError` semantics.
+      value = await this.#cache.get(key);
+    } catch (error) {
+      this.#recordCacheResult(key, 'error');
+      throw error;
+    }
+    if (value === undefined || value === null) {
+      this.#recordCacheResult(key, 'miss');
+      return null;
+    }
+    try {
+      const shape = this.#codecDeserialize ? this.#codecDeserialize(value) : value;
+      const built = build(shape);
+      this.#recordCacheResult(key, 'hit');
+      return built;
+    } catch (error) {
+      // A corrupt/malformed entry is deterministic (retrying cannot help), so
+      // it is logged and treated as a cache miss instead of failing the
+      // request — the affected policy simply does not resolve.
+      this.#recordCacheResult(key, 'error');
+      this.#logMethodError(
+        'CacheDeserialize',
+        null,
+        null,
+        new KerberosCodecError(`Failed to deserialize cached policy for key "${key}": ${error.message}`, {
+          cause: error,
+        }),
+      );
+      return null;
+    }
   }
 
   #getPoliciesMaps(policies) {
@@ -327,26 +403,25 @@ class Kerberos {
       // Normalize the scope into the storage key so the documented base-scope
       // alias (`'.'` ≡ `''`) is reachable: lookups resolve via the normalized
       // scope chain, so an un-normalized `'.'` key would never be selected.
+      // Duplicate keys throw: silently letting the last policy win could drop
+      // a deny rule — a privilege-escalation hazard, not a convenience.
       if (handledPolicy instanceof PrincipalPolicy) {
-        principalPolicies.set(
-          `${handledPolicy.principal}.${handledPolicy.version}.${Kerberos.normalizeScope(handledPolicy.scope)}`,
-          handledPolicy,
-        );
+        const key = `${handledPolicy.principal}.${handledPolicy.version}.${Kerberos.normalizeScope(handledPolicy.scope)}`;
+        if (principalPolicies.has(key)) throw new Error(`Duplicate principal policy "${key}"`);
+        principalPolicies.set(key, handledPolicy);
         continue;
       }
 
       if (handledPolicy instanceof RolePolicy) {
-        rolePolicies.set(
-          `${handledPolicy.role}.${handledPolicy.version}.${Kerberos.normalizeScope(handledPolicy.scope)}`,
-          handledPolicy,
-        );
+        const key = `${handledPolicy.role}.${handledPolicy.version}.${Kerberos.normalizeScope(handledPolicy.scope)}`;
+        if (rolePolicies.has(key)) throw new Error(`Duplicate role policy "${key}"`);
+        rolePolicies.set(key, handledPolicy);
         continue;
       }
 
-      resourcePolicies.set(
-        `${handledPolicy.kind}.${handledPolicy.version}.${Kerberos.normalizeScope(handledPolicy.scope)}`,
-        handledPolicy,
-      );
+      const key = `${handledPolicy.kind}.${handledPolicy.version}.${Kerberos.normalizeScope(handledPolicy.scope)}`;
+      if (resourcePolicies.has(key)) throw new Error(`Duplicate resource policy "${key}"`);
+      resourcePolicies.set(key, handledPolicy);
     }
     return { resourcePolicies, principalPolicies, rolePolicies };
   }
@@ -361,6 +436,9 @@ class Kerberos {
         ajv: this.#ajv,
         typebox: this.#typebox,
       });
+      if (derivedRolesMap.has(handledRole.name)) {
+        throw new Error(`Duplicate derived roles definition "${handledRole.name}"`);
+      }
       derivedRolesMap.set(handledRole.name, handledRole);
     }
     return derivedRolesMap;
@@ -384,157 +462,197 @@ class Kerberos {
     return importedRoles;
   }
 
+  // Every logger call is guarded: a throwing user logger must never affect
+  // authorization control flow (an ALLOW decision was previously flipped to
+  // DENY when logger.write threw after the decision was computed). Mirrors
+  // the swallow pattern used by the telemetry writer.
+  // Wraps argument/request parsing so validation failures surface as typed
+  // KerberosValidationError, which ALWAYS propagates to the caller regardless
+  // of the `onError` option — a malformed request is a programming error, not
+  // an authorization deny.
+  #parseValidated(label, parse) {
+    try {
+      return parse();
+    } catch (error) {
+      if (error instanceof KerberosValidationError) throw error;
+      throw new KerberosValidationError(`${label}: ${error.message}`, { cause: error });
+    }
+  }
+
   #log(input, reqKind, callId) {
-    this.#logger.write(input, reqKind, callId);
+    try {
+      this.#logger.write(input, reqKind, callId);
+    } catch {
+      // Audit logging must never break authorization.
+    }
   }
 
   #logMethodStart(reqKind, callId, reqId) {
-    this.#logger.debug(
-      {
-        callId,
-        reqId,
-        timestamp: new Date().toISOString(),
-        reqKind,
-        event: `${reqKind}.start`,
-      },
-      `Kerberos.js ${reqKind} start!`,
-    );
+    try {
+      this.#logger.debug(
+        {
+          callId,
+          reqId,
+          timestamp: new Date().toISOString(),
+          reqKind,
+          event: `${reqKind}.start`,
+        },
+        `Kerberos.js ${reqKind} start!`,
+      );
+    } catch {
+      // Audit logging must never break authorization.
+    }
   }
 
   #logMethodError(reqKind, callId, reqId, error) {
-    this.#logger.error(
-      {
-        callId,
-        reqId,
-        timestamp: new Date().toISOString(),
-        reqKind,
-        event: `${reqKind}.error`,
-        errorName: error?.name,
-        errorMessage: error?.message,
-        stack: error?.stack,
-      },
-      `Kerberos.js ${reqKind} error!`,
-    );
+    try {
+      this.#logger.error(
+        {
+          callId,
+          reqId,
+          timestamp: new Date().toISOString(),
+          reqKind,
+          event: `${reqKind}.error`,
+          errorName: error?.name,
+          errorMessage: error?.message,
+          stack: error?.stack,
+        },
+        `Kerberos.js ${reqKind} error!`,
+      );
+    } catch {
+      // Audit logging must never break authorization.
+    }
   }
 
   #logMethodFinish(reqKind, callId, reqId, duration) {
-    this.#logger.debug(
-      {
-        callId,
-        reqId,
-        timestamp: new Date().toISOString(),
-        reqKind,
-        event: `${reqKind}.finish`,
-        duration,
-      },
-      `Kerberos.js ${reqKind} finish!`,
+    try {
+      this.#logger.debug(
+        {
+          callId,
+          reqId,
+          timestamp: new Date().toISOString(),
+          reqKind,
+          event: `${reqKind}.finish`,
+          duration,
+        },
+        `Kerberos.js ${reqKind} finish!`,
+      );
+    } catch {
+      // Audit logging must never break authorization.
+    }
+  }
+
+  /**
+   * Unified policy resolver: walks the scope search chain over the in-memory
+   * map first, then (on a full miss) over the cache. All three policy sources
+   * differ only by map, cache key prefix, lookup id and constructor.
+   *
+   * When a `trace` array is provided (decision tracing, gated on
+   * `includeMeta`), every resolution attempt is recorded with the scopes that
+   * were searched and where the policy was found (or that it wasn't).
+   */
+  async #resolvePolicy(source, map, id, version, scope, Constructor, trace) {
+    const scopeSearchChain = this.#getScopeChain(scope);
+
+    for (const searchScope of scopeSearchChain) {
+      const policy = map.get(`${id}.${version}.${searchScope}`);
+      if (policy) {
+        trace?.push({ source, id, version, scopesSearched: scopeSearchChain, matchedScope: searchScope });
+        return policy;
+      }
+    }
+
+    if (this.#cache.enabled) {
+      for (const searchScope of scopeSearchChain) {
+        const policy = await this.#resolveFromCache(
+          `${source}:${id}:${version}:${searchScope}`,
+          (shape) => new Constructor(shape, this.#policyOptions()),
+        );
+        if (policy) {
+          trace?.push({
+            source,
+            id,
+            version,
+            scopesSearched: scopeSearchChain,
+            matchedScope: searchScope,
+            origin: 'cache',
+          });
+          return policy;
+        }
+      }
+    }
+
+    trace?.push({ source, id, version, scopesSearched: scopeSearchChain, matchedScope: null });
+    return null;
+  }
+
+  #getResourcePolicy(req, trace) {
+    const version = req.R.policyVersion ?? DEFAULT_VERSION;
+    return this.#resolvePolicy(
+      'resource',
+      this.#resourcePolicies,
+      req.R.kind,
+      version,
+      req.R.scope,
+      ResourcePolicy,
+      trace,
     );
   }
 
-  async #getResourcePolicy(req) {
-    const scopeSearchChain = Kerberos.getScopeSearchChain(req.R.scope);
-    const version = req.R.policyVersion ?? 'default';
-
-    for (const scope of scopeSearchChain) {
-      const policy = this.#resourcePolicies.get(`${req.R.kind}.${version}.${scope}`);
-      if (policy) return policy;
-    }
-
-    if (this.#cache.enabled) {
-      for (const scope of scopeSearchChain) {
-        const policy = await this.#resolveFromCache(
-          `resource:${req.R.kind}:${version}:${scope}`,
-          (shape) => new ResourcePolicy(shape, this.#policyOptions()),
-        );
-        if (policy) return policy;
-      }
-    }
-
-    return null;
+  #getPrincipalPolicy(req, trace) {
+    const version = req.P.policyVersion ?? DEFAULT_VERSION;
+    return this.#resolvePolicy(
+      'principal',
+      this.#principalPolicies,
+      req.P.id,
+      version,
+      req.P.scope,
+      PrincipalPolicy,
+      trace,
+    );
   }
 
-  async #getPrincipalPolicy(req) {
-    const scopeSearchChain = Kerberos.getScopeSearchChain(req.P.scope);
-    const version = req.P.policyVersion ?? 'default';
-
-    for (const scope of scopeSearchChain) {
-      const policy = this.#principalPolicies.get(`${req.P.id}.${version}.${scope}`);
-      if (policy) return policy;
-    }
-
-    if (this.#cache.enabled) {
-      for (const scope of scopeSearchChain) {
-        const policy = await this.#resolveFromCache(
-          `principal:${req.P.id}:${version}:${scope}`,
-          (shape) => new PrincipalPolicy(shape, this.#policyOptions()),
-        );
-        if (policy) return policy;
-      }
-    }
-
-    return null;
+  #getRolePolicyByName(role, req, trace) {
+    const version = req.P.policyVersion ?? DEFAULT_VERSION;
+    return this.#resolvePolicy('role', this.#rolePolicies, role, version, req.P.scope, RolePolicy, trace);
   }
 
-  async #getRolePolicyByName(role, req) {
-    const scopeSearchChain = Kerberos.getScopeSearchChain(req.P.scope);
-    const version = req.P.policyVersion ?? 'default';
-
-    for (const scope of scopeSearchChain) {
-      const policy = this.#rolePolicies.get(`${role}.${version}.${scope}`);
-      if (policy) return policy;
-    }
-
-    if (this.#cache.enabled) {
-      for (const scope of scopeSearchChain) {
-        const policy = await this.#resolveFromCache(
-          `role:${role}:${version}:${scope}`,
-          (shape) => new RolePolicy(shape, this.#policyOptions()),
-        );
-        if (policy) return policy;
-      }
-    }
-
-    return null;
-  }
-
-  async #getRolePolicies(req) {
+  async #getRolePolicies(req, trace) {
     const policies = [];
     const seenRoles = new Set();
 
     for (const role of req.P.roles) {
       if (seenRoles.has(role)) continue;
       seenRoles.add(role);
-      const policy = await this.#getRolePolicyByName(role, req);
+      const policy = await this.#getRolePolicyByName(role, req, trace);
       if (policy) policies.push(policy);
     }
 
     return policies;
   }
 
-  async #evaluateRolePolicy(policy, req, effectAsBoolean = false, memo = new Map(), stack = new Set()) {
-    const policyKey = `${policy.role}.${policy.version}.${policy.scope ?? ''}|${req.actions.join(',')}`;
+  async #evaluateRolePolicy(policy, req, memo = new Map(), stack = new Set(), actionsKey = req.actions.join(',')) {
+    const policyKey = `${policy.role}.${policy.version}.${policy.scope ?? ''}|${actionsKey}`;
     if (memo.has(policyKey)) return memo.get(policyKey);
     if (stack.has(policyKey)) throw new Error(`Circular role policy inheritance detected for role "${policy.role}"`);
 
     stack.add(policyKey);
 
-    const allowValue = !effectAsBoolean ? Effect.Allow : true;
-    const denyValue = !effectAsBoolean ? Effect.Deny : false;
-    const result = policy.check(req, effectAsBoolean);
+    const result = policy.check(req);
 
     for (const parentRole of policy.parentRoles) {
       const parentPolicy = await this.#getRolePolicyByName(parentRole, req);
       if (!parentPolicy) continue;
 
-      const parentResult = await this.#evaluateRolePolicy(parentPolicy, req, effectAsBoolean, memo, stack);
+      const parentResult = await this.#evaluateRolePolicy(parentPolicy, req, memo, stack, actionsKey);
       for (const [src, output] of parentResult.outputs.entries()) result.outputs.set(src, output);
 
       for (const action of req.actions) {
         if (!result.effects.has(action)) continue;
-        if (result.effects.get(action) === denyValue) continue;
+        if (result.effects.get(action) === Effect.Deny) continue;
 
-        if (!parentResult.effects.has(action) || parentResult.effects.get(action) !== allowValue) {
-          result.effects.set(action, denyValue);
+        if (!parentResult.effects.has(action) || parentResult.effects.get(action) !== Effect.Allow) {
+          result.effects.set(action, Effect.Deny);
           if (parentResult.meta.actions[action]) result.meta.actions[action] = parentResult.meta.actions[action];
         }
       }
@@ -545,32 +663,31 @@ class Kerberos {
     return result;
   }
 
-  async #evaluateRolePolicies(req, effectAsBoolean = false) {
-    const rolePolicies = await this.#getRolePolicies(req);
-    if (!rolePolicies.length) return createEmptyPolicyResult();
+  async #evaluateRolePolicies(req, trace) {
+    const rolePolicies = await this.#getRolePolicies(req, trace);
+    if (!rolePolicies.length) return { ...createEmptyPolicyResult(), hadPolicies: false };
 
-    const allowValue = !effectAsBoolean ? Effect.Allow : true;
-    const denyValue = !effectAsBoolean ? Effect.Deny : false;
     const effects = new Map();
     const outputs = new Map();
     const actionsMeta = {};
     const memo = new Map();
+    const actionsKey = req.actions.join(',');
 
     for (const policy of rolePolicies) {
-      const result = await this.#evaluateRolePolicy(policy, req, effectAsBoolean, memo);
+      const result = await this.#evaluateRolePolicy(policy, req, memo, new Set(), actionsKey);
       for (const [src, output] of result.outputs.entries()) outputs.set(src, output);
 
       for (const action of req.actions) {
         if (!result.effects.has(action)) continue;
 
-        if (result.effects.get(action) === denyValue) {
-          effects.set(action, denyValue);
+        if (result.effects.get(action) === Effect.Deny) {
+          effects.set(action, Effect.Deny);
           if (result.meta.actions[action]) actionsMeta[action] = result.meta.actions[action];
           continue;
         }
 
         if (!effects.has(action)) {
-          effects.set(action, allowValue);
+          effects.set(action, Effect.Allow);
           if (result.meta.actions[action]) actionsMeta[action] = result.meta.actions[action];
         }
       }
@@ -583,12 +700,26 @@ class Kerberos {
         actions: actionsMeta,
         effectiveDerivedRoles: [],
       },
+      hadPolicies: true,
     };
   }
 
-  async #evaluatePolicySources(req, effectAsBoolean = false) {
-    const principalPolicy = await this.#getPrincipalPolicy(req);
-    const principalResult = principalPolicy ? principalPolicy.check(req, effectAsBoolean) : createEmptyPolicyResult();
+  /**
+   * Evaluates all policy sources for a request. Effects are always canonical
+   * `EFFECT_ALLOW`/`EFFECT_DENY` strings — the `effectAsBoolean` response
+   * format is applied at the response boundary by `checkResources`.
+   *
+   * When `req.includeMeta` is set, decision tracing is enabled: `meta` gains a
+   * `resolution` array describing every policy lookup (scopes searched, where
+   * a policy matched), and unresolved actions get a `reason`
+   * (`'policy-miss'` — no policy produced a decision; policy-level checks add
+   * `'rule-miss'` / `'condition-not-met'`).
+   */
+  async #evaluatePolicySources(req) {
+    const trace = req.includeMeta ? [] : null;
+
+    const principalPolicy = await this.#getPrincipalPolicy(req, trace);
+    const principalResult = principalPolicy ? principalPolicy.check(req) : createEmptyPolicyResult();
 
     const unresolvedActions = [];
     for (const action of req.actions) {
@@ -600,7 +731,7 @@ class Kerberos {
     const roleUnresolvedActions = [];
     if (unresolvedActions.length) {
       const roleReq = unresolvedActions.length === req.actions.length ? req : { ...req, actions: unresolvedActions };
-      roleResult = await this.#evaluateRolePolicies(roleReq, effectAsBoolean);
+      roleResult = await this.#evaluateRolePolicies(roleReq, trace);
 
       for (const action of unresolvedActions) {
         if (!roleResult.effects.has(action)) roleUnresolvedActions.push(action);
@@ -608,12 +739,12 @@ class Kerberos {
     }
 
     if (roleUnresolvedActions.length) {
-      const resourcePolicy = await this.#getResourcePolicy(req);
+      const resourcePolicy = await this.#getResourcePolicy(req, trace);
       if (resourcePolicy) {
         const resourceReq =
           roleUnresolvedActions.length === req.actions.length ? req : { ...req, actions: roleUnresolvedActions };
         const importedDerivedRoles = await this.#getImportedDerivedRoles(resourcePolicy, req);
-        resourceResult = resourcePolicy.check(resourceReq, importedDerivedRoles, effectAsBoolean);
+        resourceResult = resourcePolicy.check(resourceReq, importedDerivedRoles);
       }
     }
 
@@ -638,8 +769,17 @@ class Kerberos {
         continue;
       }
 
-      effects.set(action, !effectAsBoolean ? Effect.Deny : false);
+      // No policy source produced a decision for this action → default DENY.
+      // With tracing on, record WHY: no applicable policy existed at all.
+      effects.set(action, Effect.Deny);
+      if (trace) actionsMeta[action] = { reason: 'policy-miss' };
     }
+
+    const meta = {
+      actions: actionsMeta,
+      effectiveDerivedRoles: resourceResult.meta.effectiveDerivedRoles ?? [],
+    };
+    if (trace) meta.resolution = trace;
 
     return {
       effects,
@@ -648,10 +788,7 @@ class Kerberos {
         ...roleResult.outputs.entries(),
         ...resourceResult.outputs.entries(),
       ]),
-      meta: {
-        actions: actionsMeta,
-        effectiveDerivedRoles: resourceResult.meta.effectiveDerivedRoles ?? [],
-      },
+      meta,
     };
   }
 
@@ -665,6 +802,46 @@ class Kerberos {
     return responseResource;
   }
 
+  // Response-boundary effect formatting: internals always work with canonical
+  // EFFECT_ALLOW/EFFECT_DENY strings; `effectAsBoolean` converts here, once.
+  #effectsToResponse(effects, effectAsBoolean) {
+    const actions = {};
+    for (const [action, effect] of effects) {
+      actions[action] = effectAsBoolean ? effect === Effect.Allow : effect;
+    }
+    return actions;
+  }
+
+  /**
+   * Shared request lifecycle for the public methods: telemetry span, start /
+   * error / finish audit events, `onError` semantics and duration timing.
+   * `denyFallback(callId)` builds the method-specific fail-closed result used
+   * when `onError: 'deny'` is configured.
+   */
+  async #runRequest(reqKind, reqId, handler, denyFallback) {
+    const startedAt = getNow();
+    const callId = this.#getCallId();
+
+    return this.#telemetry.withRequestSpan(reqKind, callId, reqId, async (otel) => {
+      try {
+        this.#logMethodStart(reqKind, callId, reqId);
+        return await handler(callId, otel);
+      } catch (error) {
+        this.#logMethodError(reqKind, callId, reqId, error);
+        this.#telemetry.recordError(otel, error);
+        // Malformed arguments are programming errors and always propagate;
+        // evaluation-phase errors follow the configured `onError` semantics.
+        if (error instanceof KerberosValidationError) throw error;
+        if (this.#onError === 'deny') return denyFallback(callId);
+        throw error;
+      } finally {
+        const duration = getNow() - startedAt;
+        this.#logMethodFinish(reqKind, callId, reqId, duration);
+        this.#telemetry.endRequest(otel, reqKind, duration);
+      }
+    });
+  }
+
   /**
    * Evaluates a single action against a resource.
    *
@@ -673,36 +850,37 @@ class Kerberos {
    */
   async isAllowed(args) {
     const reqKind = 'IsAllowed';
-    const startedAt = getNow();
-    const callId = this.#getCallId();
-    const reqId = args?.reqId;
 
-    return this.#telemetry.withRequestSpan(reqKind, callId, reqId, async (otel) => {
-      try {
-        this.#logMethodStart(reqKind, callId, reqId);
-
-        const parsedArgs = Kerberos.parseIsAllowedArgs(args, {
-          schema: this.#isAllowedArgsValidator,
-          z: this.#z,
-          ajv: this.#ajv,
-          typebox: this.#typebox,
-        });
-
-        const req = Kerberos.parseRequest(
-          {
-            principal: parsedArgs.principal,
-            resource: parsedArgs.resource,
-            actions: [parsedArgs.action],
-            reqId: parsedArgs.reqId,
-            callId,
-            includeMeta: parsedArgs.includeMeta,
-          },
-          {
-            schema: this.#requestValidator,
+    return this.#runRequest(
+      reqKind,
+      args?.reqId,
+      async (callId, otel) => {
+        const parsedArgs = this.#parseValidated('Invalid isAllowed arguments', () =>
+          Kerberos.parseIsAllowedArgs(args, {
+            schema: this.#isAllowedArgsValidator,
             z: this.#z,
             ajv: this.#ajv,
             typebox: this.#typebox,
-          },
+          }),
+        );
+
+        const req = this.#parseValidated('Invalid request', () =>
+          Kerberos.parseRequest(
+            {
+              principal: parsedArgs.principal,
+              resource: parsedArgs.resource,
+              actions: [parsedArgs.action],
+              reqId: parsedArgs.reqId,
+              callId,
+              includeMeta: parsedArgs.includeMeta,
+            },
+            {
+              schema: this.#requestValidator,
+              z: this.#z,
+              ajv: this.#ajv,
+              typebox: this.#typebox,
+            },
+          ),
         );
 
         const { effects, outputs, meta } = await this.#evaluatePolicySources(req);
@@ -713,17 +891,9 @@ class Kerberos {
         this.#telemetry.recordDecisions(otel, input, reqKind);
 
         return isAllowed;
-      } catch (error) {
-        this.#logMethodError(reqKind, callId, reqId, error);
-        this.#telemetry.recordError(otel, error);
-        if (this.#logger.enabled) return false;
-        throw error;
-      } finally {
-        const duration = getNow() - startedAt;
-        this.#logMethodFinish(reqKind, callId, reqId, duration);
-        this.#telemetry.endRequest(otel, reqKind, duration);
-      }
-    });
+      },
+      () => false,
+    );
   }
 
   /**
@@ -735,46 +905,75 @@ class Kerberos {
    */
   async checkResources(args, effectAsBoolean = false) {
     const reqKind = 'CheckResources';
-    const startedAt = getNow();
-    const callId = this.#getCallId();
-    const reqId = args?.reqId;
 
-    return this.#telemetry.withRequestSpan(reqKind, callId, reqId, async (otel) => {
-      try {
-        this.#logMethodStart(reqKind, callId, reqId);
+    return this.#runRequest(
+      reqKind,
+      args?.reqId,
+      async (callId, otel) => {
+        const parsedArgs = this.#parseValidated('Invalid checkResources arguments', () =>
+          Kerberos.parseCheckResourcesArgs(args, {
+            schema: this.#checkResourcesArgsValidator,
+            z: this.#z,
+            ajv: this.#ajv,
+            typebox: this.#typebox,
+          }),
+        );
+
+        // Validation stays synchronous and up-front: a malformed resource
+        // entry fails the whole request (programming error), before any
+        // evaluation starts.
+        const reqs = parsedArgs.resources.map(({ resource, actions }) =>
+          this.#parseValidated('Invalid request', () =>
+            Kerberos.parseRequest(
+              {
+                principal: parsedArgs.principal,
+                resource,
+                actions,
+                reqId: parsedArgs.reqId,
+                callId,
+                includeMeta: parsedArgs.includeMeta,
+              },
+              {
+                schema: this.#requestValidator,
+                z: this.#z,
+                ajv: this.#ajv,
+                typebox: this.#typebox,
+              },
+            ),
+          ),
+        );
+
+        // Resources evaluate concurrently; allSettled keeps result order and
+        // guarantees one rejected resource never fails the others. A rejected
+        // resource yields a fail-closed result (all its actions DENY) plus an
+        // error log/telemetry record, isolating failures at resource level.
+        const settled = await Promise.allSettled(reqs.map((req) => this.#evaluatePolicySources(req)));
 
         const results = [];
         const inputForLog = [];
-        const parsedArgs = Kerberos.parseCheckResourcesArgs(args, {
-          schema: this.#checkResourcesArgsValidator,
-          z: this.#z,
-          ajv: this.#ajv,
-          typebox: this.#typebox,
-        });
+        for (let i = 0; i < settled.length; i++) {
+          const req = reqs[i];
+          const { resource } = parsedArgs.resources[i];
 
-        for (const { resource, actions } of parsedArgs.resources) {
-          const req = Kerberos.parseRequest(
-            {
-              principal: parsedArgs.principal,
-              resource,
-              actions,
-              reqId: parsedArgs.reqId,
-              callId,
-              includeMeta: parsedArgs.includeMeta,
-            },
-            {
-              schema: this.#requestValidator,
-              z: this.#z,
-              ajv: this.#ajv,
-              typebox: this.#typebox,
-            },
-          );
+          if (settled[i].status === 'rejected') {
+            const error = settled[i].reason;
+            this.#logMethodError(reqKind, callId, parsedArgs.reqId, error);
+            this.#telemetry.recordError(otel, error);
 
-          const { effects, outputs, meta } = await this.#evaluatePolicySources(req, effectAsBoolean);
+            const deniedActions = {};
+            for (const action of req.actions) deniedActions[action] = effectAsBoolean ? false : Effect.Deny;
+            results.push({
+              resource: this.#buildResponseResource(resource),
+              actions: deniedActions,
+              outputs: [],
+            });
+            continue;
+          }
 
+          const { effects, outputs, meta } = settled[i].value;
           const result = {
             resource: this.#buildResponseResource(resource),
-            actions: Object.fromEntries([...effects.entries()]),
+            actions: this.#effectsToResponse(effects, effectAsBoolean),
             outputs: [...outputs.values()],
           };
           if (req.includeMeta) result.meta = meta;
@@ -788,17 +987,9 @@ class Kerberos {
         const response = { results, kerberosCallId: callId };
         if (parsedArgs.reqId) response.reqId = parsedArgs.reqId;
         return response;
-      } catch (error) {
-        this.#logMethodError(reqKind, callId, reqId, error);
-        this.#telemetry.recordError(otel, error);
-        if (this.#logger.enabled) return { results: [], kerberosCallId: callId, reqId };
-        throw error;
-      } finally {
-        const duration = getNow() - startedAt;
-        this.#logMethodFinish(reqKind, callId, reqId, duration);
-        this.#telemetry.endRequest(otel, reqKind, duration);
-      }
-    });
+      },
+      (callId) => ({ results: [], kerberosCallId: callId, reqId: args?.reqId }),
+    );
   }
 }
 

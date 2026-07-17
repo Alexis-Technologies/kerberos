@@ -100,6 +100,8 @@ export type KerberosTestExpectedItemSchema = {
   principal: PrincipalMock | string;
   resource: ResourceMock | string;
   actions: Record<string, Effect | boolean>;
+  /** Optional: deep-compared against the checkResources response outputs for this resource. */
+  outputs?: unknown[];
 };
 export type KerberosTestSchema = {
   name: string;

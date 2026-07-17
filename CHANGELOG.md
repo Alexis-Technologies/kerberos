@@ -9,6 +9,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`onError: 'throw' | 'deny'` option** (default `'throw'`) — error semantics
+  are no longer coupled to logger presence. Malformed arguments always throw
+  the new typed `KerberosValidationError` regardless of this option.
+- **Typed errors**: `KerberosCacheError`, `KerberosCodecError`,
+  `KerberosValidationError` exported from the main entry.
+- **`cacheRetry: { attempts }` option** (default 3 attempts) — transient
+  `cache.get` failures are retried; exhausted retries surface as
+  `KerberosCacheError`. Corrupt cache entries (deserialize/constructor
+  failures) are logged and treated as a cache miss instead of failing the
+  request.
+- **Configurable safe-codec limits**: `codec: { jsep, maxCachedExprs?,
+  maxExprLength?, maxDepth? }` (defaults: 1000 cached ASTs with FIFO eviction,
+  4 KB expressions, depth 32) — a compromised policy store can no longer grow
+  the AST cache without bound or overflow the stack with deep nesting.
+- CI (GitHub Actions): lint + format check + tests with c8 coverage + type
+  tests on Node 18/20/22.
+- **Decision tracing** (`includeMeta: true`): denied actions now carry a
+  `reason` (`'policy-miss'` / `'rule-miss'` / `'condition-not-met'`) and `meta`
+  gains a `resolution` array recording every policy lookup (scopes searched,
+  where the policy matched, memory vs cache origin) — "why was this denied" is
+  now answerable from the response.
+- **Cache observability**: debug log events + `kerberos.cache.requests` OTel
+  counter with `result: hit|miss|error`.
+- **Benchmarks**: zero-dependency `pnpm bench` harness; results documented in
+  the README "Benchmarks" section.
+- `SECURITY.md` with the threat model and the opt-in safety-layers philosophy.
+- Test DSL: expected entries now support an optional `outputs` array asserted
+  against the `checkResources` response.
+- New exported constants: `ALL_ROLES`, `ALL_RESOURCES`, `DEFAULT_VERSION`,
+  `BASE_SCOPE` (plus `ALL_ACTIONS` and `createCacheReader` are now typed).
+
+### Performance
+
+- **`checkResources` evaluates resources concurrently** via
+  `Promise.allSettled`: N cache-backed resources cost one parallel wave of
+  lookups instead of N sequential round-trips (~8x faster with a 2ms-latency
+  store and 10 resources). A rejected resource fail-closes (all its actions
+  `EFFECT_DENY`) without failing the batch.
+- Scope search chains are memoized per instance (bounded); role-policy memo
+  keys are computed once per evaluation instead of per inheritance node; the
+  response effect map is built directly instead of double-allocating via
+  `Object.fromEntries`.
+- Internal evaluation now always works with canonical effect strings —
+  `effectAsBoolean` is applied once at the response boundary instead of being
+  threaded through every policy class (audit logs now always contain canonical
+  `EFFECT_*` values).
+
+### Changed
+
+- **BREAKING (bug fix): logger no longer changes error semantics.** Previously
+  errors were silently converted to DENY when a logger was enabled and thrown
+  otherwise; a throwing logger could even flip a computed ALLOW to DENY. All
+  logger calls are now internally guarded (a broken logger can never affect
+  authorization results), and failure behavior is controlled solely by
+  `onError`. To restore the old fail-closed behavior, pass `onError: 'deny'`.
+- **BREAKING (security fix): duplicate policy keys now throw at construction.**
+  Two policies with the same kind/principal/role + version + scope previously
+  last-wins overwrote each other, which could silently drop a deny rule.
+  Duplicate derived-roles definition names also throw.
+- `pnpm-lock.yaml` is no longer published in the npm tarball.
+
 - **Native OpenTelemetry support (traces + metrics)** via the new `telemetry`
   constructor option, following the same zero-dependency delegation philosophy
   as `logger`/`cache`: pass `{ api }` (the `@opentelemetry/api` module — Kerberos

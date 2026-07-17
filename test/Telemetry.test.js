@@ -167,10 +167,14 @@ describe('Telemetry', () => {
   });
 
   describe('error paths', () => {
-    it('should set ERROR status and still return the fallback when logging is enabled', async () => {
+    it("should set ERROR status and still return the fallback when onError is 'deny'", async () => {
       const { exporter, tracer } = createTraceSetup();
       const { reader, exporter: metricExporter, meter } = createMetricSetup();
-      const kerberos = new Kerberos(policies, [], { logger: silentLogger, telemetry: { tracer, meter } });
+      const kerberos = new Kerberos(policies, [], {
+        logger: silentLogger,
+        onError: 'deny',
+        telemetry: { tracer, meter },
+      });
 
       const result = await kerberos.isAllowed({});
       assert.equal(result, false);
@@ -187,7 +191,7 @@ describe('Telemetry', () => {
       assert.equal(durationPoint.attributes['kerberos.req_kind'], 'IsAllowed');
     });
 
-    it('should set ERROR status and still end the span when logging is disabled (rethrow)', async () => {
+    it("should set ERROR status and still end the span with the default onError: 'throw'", async () => {
       const { exporter, tracer } = createTraceSetup();
       const kerberos = new Kerberos(policies, [], { telemetry: { tracer } });
 

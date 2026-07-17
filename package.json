@@ -24,7 +24,9 @@
   },
   "scripts": {
     "test": "node --test test/*.test.js",
+    "test:coverage": "c8 --include 'src/**' --reporter text --reporter lcov node --test test/*.test.js",
     "test:types": "tsd",
+    "bench": "node bench/bench.js",
     "lint": "oxlint src test",
     "format": "oxfmt src test",
     "format:check": "oxfmt src test --check"
@@ -65,6 +67,7 @@
     "@opentelemetry/sdk-trace-base": "^2.9.0",
     "@sinclair/typebox": "^0.34.48",
     "ajv": "^8.18.0",
+    "c8": "^12.0.0",
     "jsep": "^1.4.0",
     "keyv": "^5.6.0",
     "oxfmt": "^0.58.0",
@@ -95,7 +98,6 @@
     "LICENSE",
     "README.md",
     "CHANGELOG.md",
-    "package.json",
-    "pnpm-lock.yaml"
+    "package.json"
   ]
 }

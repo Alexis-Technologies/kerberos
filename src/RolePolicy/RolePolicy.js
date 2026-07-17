@@ -1,32 +1,31 @@
-const { Outputs } = require('../Outputs');
 const { parseRolePolicyShape } = require('./validation');
 
-const { ALL_ACTIONS, Effect } = require('../schemas');
-const { Variables } = require('../Variables');
-const { Conditions } = require('../Conditions');
-const { Constants } = require('../Constants');
+const { ALL_ACTIONS, ALL_RESOURCES, Effect } = require('../schemas');
+const { parseConditions, parseConstants, parseOutputs, parseVariables } = require('../policyParsers.js');
 
+/**
+ * Represents a Cerbos-style role policy: an allowlist bound to a single role,
+ * targeting resource + allowActions, with parentRoles inheritance.
+ */
 class RolePolicy {
   static parseShape(shape, options = {}) {
     return parseRolePolicyShape(shape, options);
   }
 
   static parseConstants(constants, options = {}) {
-    return constants instanceof Constants ? constants : new Constants(constants, options);
+    return parseConstants(constants, options);
   }
 
   static parseVariables(variables, options = {}) {
-    return variables instanceof Variables ? variables : new Variables(variables, options);
+    return parseVariables(variables, options);
   }
 
   static parseConditions(conditions, options = {}) {
-    if (!conditions) return undefined;
-    return conditions instanceof Conditions ? conditions : new Conditions(conditions, options);
+    return parseConditions(conditions, options);
   }
 
   static parseOutputs(outputs, options = {}) {
-    if (!outputs) return undefined;
-    return outputs instanceof Outputs ? outputs : new Outputs(outputs, options);
+    return parseOutputs(outputs, options);
   }
 
   #shape = null;
@@ -78,7 +77,12 @@ class RolePolicy {
     return this.#shape;
   }
 
-  check(req, effectAsBoolean = false) {
+  /**
+   * Evaluates a request. Effects are always canonical
+   * `EFFECT_ALLOW`/`EFFECT_DENY` strings — the `effectAsBoolean` response
+   * format is applied at the response boundary.
+   */
+  check(req) {
     const effects = new Map();
     const outputs = new Map();
     const metaSrcPrefix = `role.${this.role}.v${this.version}`;
@@ -99,10 +103,12 @@ class RolePolicy {
       let matchedResource = false;
       let matchedRule = null;
       let isAllowed = false;
+      // Decision-trace input: did an allowlisted rule fail only its condition?
+      let conditionFailed = false;
 
       for (let i = 0; i < rules.length; i++) {
         const rule = rules[i];
-        if (rule.resource !== ALL_ACTIONS && rule.resource !== reqWithVariables.R.kind) continue;
+        if (rule.resource !== ALL_RESOURCES && rule.resource !== reqWithVariables.R.kind) continue;
 
         matchedResource = true;
         if (!rule.allowActions.includes(ALL_ACTIONS) && !rule.allowActions.includes(action)) continue;
@@ -115,7 +121,10 @@ class RolePolicy {
           if (output) outputs.set(output.src, output);
         }
 
-        if (!isConditionFulfilled) continue;
+        if (!isConditionFulfilled) {
+          conditionFailed = true;
+          continue;
+        }
 
         isAllowed = true;
         matchedRule = metaSrc;
@@ -124,15 +133,19 @@ class RolePolicy {
       if (isAllowed) {
         meta.actions[action] = { matchedPolicy: metaSrcBase, matchedRule };
         if (this.scope) meta.actions[action].matchedScope = this.scope;
-        effects.set(action, !effectAsBoolean ? Effect.Allow : true);
+        effects.set(action, Effect.Allow);
         continue;
       }
 
       if (!matchedResource) continue;
 
-      meta.actions[action] = { matchedPolicy: metaSrcBase };
+      // Allowlist deny — record WHY for decision tracing.
+      meta.actions[action] = {
+        matchedPolicy: metaSrcBase,
+        reason: conditionFailed ? 'condition-not-met' : 'rule-miss',
+      };
       if (this.scope) meta.actions[action].matchedScope = this.scope;
-      effects.set(action, !effectAsBoolean ? Effect.Deny : false);
+      effects.set(action, Effect.Deny);
     }
 
     return { effects, outputs, meta };

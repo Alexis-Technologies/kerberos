@@ -159,20 +159,35 @@ const ALLOWED_GLOBALS = { Math, Date };
 
 const DEFAULT_ROOTS = ['P', 'R', 'V', 'C'];
 
+// Safe-by-default resource limits for expressions loaded from a remote store.
+// All three are overridable via createSafeExprCodec options (set a limit to
+// Infinity to disable it) — a compromised or misbehaving store must not be able
+// to exhaust memory (unbounded AST cache) or the call stack (deep nesting).
+const DEFAULT_LIMITS = Object.freeze({
+  maxCachedExprs: 1000,
+  maxExprLength: 4096,
+  maxDepth: 32,
+});
+
 // AST cache keyed by jsep instance so different instances (different plugins /
 // operators) get their own namespace. WeakMap ensures the cache is GC-able.
 const astCacheByJsep = new WeakMap();
 
 /**
  * Parses an expression once and caches the resulting AST keyed by both the
- * jsep instance and the expression string.
+ * jsep instance and the expression string. The cache is bounded (FIFO
+ * eviction) and expressions are rejected beyond the length/depth limits.
  *
  * @param {string} expr
  * @param {Function} jsepInstance  - a pre-configured jsep callable
+ * @param {{ maxCachedExprs: number, maxExprLength: number, maxDepth: number }} [limits]
  * @returns {Record<string, unknown>}
  */
-function parseExpr(expr, jsepInstance) {
+function parseExpr(expr, jsepInstance, limits = DEFAULT_LIMITS) {
   if (typeof expr !== 'string') throw new KerberosExprError('Expression must be a string');
+  if (expr.length > limits.maxExprLength) {
+    throw new KerberosExprError(`Expression exceeds the maximum length of ${limits.maxExprLength} characters`);
+  }
 
   let cache = astCacheByJsep.get(jsepInstance);
   if (!cache) {
@@ -188,7 +203,11 @@ function parseExpr(expr, jsepInstance) {
   } catch (error) {
     throw new KerberosExprError(`Failed to parse expression: ${error.message}`);
   }
-  validateNode(ast);
+  validateNode(ast, limits.maxDepth);
+
+  // FIFO eviction keeps the cache bounded; Map preserves insertion order, so
+  // the first key is the oldest entry.
+  if (cache.size >= limits.maxCachedExprs) cache.delete(cache.keys().next().value);
   cache.set(expr, ast);
   return ast;
 }
@@ -205,69 +224,72 @@ function parseExpr(expr, jsepInstance) {
 const NODE_VALIDATORS = createDispatch({
   Literal() {},
   Identifier() {},
-  MemberExpression(node) {
-    validateNode(node.object);
-    if (node.computed) validateNode(node.property);
+  MemberExpression(node, maxDepth, depth) {
+    validateNode(node.object, maxDepth, depth + 1);
+    if (node.computed) validateNode(node.property, maxDepth, depth + 1);
   },
-  BinaryExpression(node) {
+  BinaryExpression(node, maxDepth, depth) {
     if (!ALLOWED_BINARY_OPS.has(node.operator)) {
       throw new KerberosExprError(`Operator "${node.operator}" is not allowed`);
     }
-    validateNode(node.left);
-    validateNode(node.right);
+    validateNode(node.left, maxDepth, depth + 1);
+    validateNode(node.right, maxDepth, depth + 1);
   },
-  UnaryExpression(node) {
+  UnaryExpression(node, maxDepth, depth) {
     if (!ALLOWED_UNARY_OPS.has(node.operator)) {
       throw new KerberosExprError(`Unary operator "${node.operator}" is not allowed`);
     }
-    validateNode(node.argument);
+    validateNode(node.argument, maxDepth, depth + 1);
   },
-  ConditionalExpression(node) {
-    validateNode(node.test);
-    validateNode(node.consequent);
-    validateNode(node.alternate);
+  ConditionalExpression(node, maxDepth, depth) {
+    validateNode(node.test, maxDepth, depth + 1);
+    validateNode(node.consequent, maxDepth, depth + 1);
+    validateNode(node.alternate, maxDepth, depth + 1);
   },
-  ArrayExpression(node) {
-    for (const element of node.elements) validateNode(element);
+  ArrayExpression(node, maxDepth, depth) {
+    for (const element of node.elements) validateNode(element, maxDepth, depth + 1);
   },
-  ObjectExpression(node) {
+  ObjectExpression(node, maxDepth, depth) {
     for (const property of node.properties) {
-      if (property.computed) validateNode(property.key);
-      validateNode(property.shorthand ? property.key : property.value);
+      if (property.computed) validateNode(property.key, maxDepth, depth + 1);
+      validateNode(property.shorthand ? property.key : property.value, maxDepth, depth + 1);
     }
   },
-  CallExpression(node) {
+  CallExpression(node, maxDepth, depth) {
     if (node.callee.type === 'Identifier') {
       if (!Object.prototype.hasOwnProperty.call(GLOBAL_FUNCTIONS, node.callee.name)) {
         throw new KerberosExprError(`Function "${node.callee.name}" is not allowed`);
       }
     } else if (node.callee.type === 'MemberExpression') {
-      validateNode(node.callee);
+      validateNode(node.callee, maxDepth, depth + 1);
     } else {
       throw new KerberosExprError('Only whitelisted function or method calls are allowed');
     }
-    for (const argument of node.arguments) validateNode(argument);
+    for (const argument of node.arguments) validateNode(argument, maxDepth, depth + 1);
   },
-  NewExpression(node) {
+  NewExpression(node, maxDepth, depth) {
     if (
       node.callee.type !== 'Identifier' ||
       !Object.prototype.hasOwnProperty.call(ALLOWED_CONSTRUCTORS, node.callee.name)
     ) {
       throw new KerberosExprError('Only whitelisted constructors are allowed (Date)');
     }
-    for (const argument of node.arguments) validateNode(argument);
+    for (const argument of node.arguments) validateNode(argument, maxDepth, depth + 1);
   },
   Compound() {
     throw new KerberosExprError('Compound expressions (e.g. "a, b", "a in b") are not allowed');
   },
 });
 
-function validateNode(node) {
+function validateNode(node, maxDepth = DEFAULT_LIMITS.maxDepth, depth = 0) {
   if (!node || typeof node !== 'object') throw new KerberosExprError('Invalid expression node');
+  if (depth > maxDepth) {
+    throw new KerberosExprError(`Expression exceeds the maximum nesting depth of ${maxDepth}`);
+  }
 
   const validator = NODE_VALIDATORS[node.type];
   if (!validator) throw new KerberosExprError(`Unsupported expression node: ${node.type}`);
-  validator(node);
+  validator(node, maxDepth, depth);
 }
 
 function safeKey(key) {
@@ -502,7 +524,7 @@ function deepTransform(value, handlers) {
  *   deserialize: (jsonSafe: unknown) => unknown,
  * }}
  */
-function createSafeExprCodec({ jsep, roots } = {}) {
+function createSafeExprCodec({ jsep, roots, maxCachedExprs, maxExprLength, maxDepth } = {}) {
   if (!jsep || typeof jsep !== 'function') {
     throw new KerberosExprError(
       'createSafeExprCodec({ jsep }) requires a pre-configured jsep instance. ' +
@@ -514,9 +536,14 @@ function createSafeExprCodec({ jsep, roots } = {}) {
   }
 
   const config = { roots: new Set(roots || DEFAULT_ROOTS) };
+  const limits = {
+    maxCachedExprs: maxCachedExprs ?? DEFAULT_LIMITS.maxCachedExprs,
+    maxExprLength: maxExprLength ?? DEFAULT_LIMITS.maxExprLength,
+    maxDepth: maxDepth ?? DEFAULT_LIMITS.maxDepth,
+  };
 
   function compileExpr(expr) {
-    const ast = parseExpr(expr, jsep);
+    const ast = parseExpr(expr, jsep, limits);
     return (ctx) => evalNode(ast, ctx, config);
   }
 
@@ -528,7 +555,7 @@ function createSafeExprCodec({ jsep, roots } = {}) {
   const serializeHandlers = {
     expr: (descriptor) => {
       // Full validation: parse and check AST via the provided jsep instance.
-      parseExpr(descriptor.$expr, jsep);
+      parseExpr(descriptor.$expr, jsep, limits);
       return { $expr: descriptor.$expr };
     },
     func: () => {

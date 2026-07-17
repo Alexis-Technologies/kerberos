@@ -340,4 +340,41 @@ describe('Caching / Storing policies', () => {
       assert.strictEqual(b(ctx), true);
     });
   });
+
+  describe('resource limits (configurable, safe defaults)', () => {
+    it('rejects expressions longer than maxExprLength', () => {
+      const limited = createSafeExprCodec({ jsep, maxExprLength: 32 });
+      assert.throws(() => limited.compileExpr(`P.id == '${'x'.repeat(64)}'`), KerberosExprError);
+      // Under the limit still works.
+      assert.strictEqual(limited.compileExpr("P.id == 'u1'")({ P: { id: 'u1' } }), true);
+    });
+
+    it('rejects expressions nested deeper than maxDepth', () => {
+      const limited = createSafeExprCodec({ jsep, maxDepth: 4 });
+      assert.throws(() => limited.compileExpr(`${'!'.repeat(20)}P.flag`), KerberosExprError);
+    });
+
+    it('accepts deeper nesting when maxDepth is raised', () => {
+      const relaxed = createSafeExprCodec({ jsep, maxDepth: 128 });
+      // 40 negations (even count) of a falsy value evaluate back to false.
+      const fn = relaxed.compileExpr(`${'!'.repeat(40)}P.flag`);
+      assert.strictEqual(fn({ P: { flag: false } }), false);
+      assert.strictEqual(fn({ P: { flag: true } }), true);
+    });
+
+    it('bounds the AST cache size with FIFO eviction (no unbounded growth)', () => {
+      const bounded = createSafeExprCodec({ jsep, maxCachedExprs: 5 });
+      for (let i = 0; i < 50; i++) {
+        bounded.compileExpr(`P.id == 'user-${i}'`);
+      }
+      // No assertion on internals possible (cache is module-private); the
+      // behavioral guarantee is that evaluation still works after churn.
+      assert.strictEqual(bounded.compileExpr("P.id == 'user-49'")({ P: { id: 'user-49' } }), true);
+    });
+
+    it('applies the default limits without configuration', () => {
+      const fresh = createSafeExprCodec({ jsep });
+      assert.throws(() => fresh.compileExpr(`P.id == '${'x'.repeat(5000)}'`), KerberosExprError);
+    });
+  });
 });

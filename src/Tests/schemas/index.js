@@ -31,6 +31,7 @@ class KerberosTestZodSchemas extends ZodSchemas {
       principal: z.union([z.string(), z.instanceof(PrincipalMock)]),
       resource: z.union([z.string(), z.instanceof(ResourceMock)]),
       actions: z.record(z.string(), z.union([z.nativeEnum(Effect), z.boolean()])),
+      outputs: z.array(z.unknown()).optional(),
     });
   }
 
@@ -93,6 +94,7 @@ class KerberosTestJsonSchemas extends JsonSchemas {
         actions: JsonSchemas.buildRecordShape({
           anyOf: [{ enum: Object.values(Effect) }, { type: 'boolean' }],
         }),
+        outputs: { type: 'array' },
       },
       ['principal', 'resource', 'actions'],
     );
@@ -130,6 +132,7 @@ class KerberosTestTypeBoxSchemas extends TypeBoxSchemas {
       principal: t.Union([t.String(), TypeBoxSchemas.buildInstanceOfShape(t, PrincipalMock)]),
       resource: t.Union([t.String(), TypeBoxSchemas.buildInstanceOfShape(t, ResourceMock)]),
       actions: t.Record(t.String(), t.Union([t.Literal(Effect.Allow), t.Literal(Effect.Deny), t.Boolean()])),
+      outputs: t.Optional(t.Array(t.Unknown())),
     });
   }
 

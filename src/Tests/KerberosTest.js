@@ -107,6 +107,7 @@ class KerberosTest {
             resource,
             actions: new Set(),
             expectedActions: {},
+            expectedOutputs: null,
           });
         }
 
@@ -115,6 +116,9 @@ class KerberosTest {
           resourceData.actions.add(action);
           resourceData.expectedActions[action] = effect;
         }
+        // Optional Cerbos-style outputs assertion: when `outputs` is present in
+        // an expected entry, the runner deep-compares the response outputs.
+        if (expectedItem.outputs !== undefined) resourceData.expectedOutputs = expectedItem.outputs;
       }
 
       // For each principal, call checkResources once with all resources
@@ -154,6 +158,14 @@ class KerberosTest {
                 effect,
                 expectedEffect,
                 `Action "${action}" effect for resource "${resourceName}" is not matched! Expected: ${expectedEffect} but got: ${effect}`,
+              );
+            }
+
+            if (resourceData.expectedOutputs !== null) {
+              assert.deepStrictEqual(
+                result.outputs,
+                resourceData.expectedOutputs,
+                `Outputs for resource "${resourceName}" did not match the expected outputs!`,
               );
             }
           }

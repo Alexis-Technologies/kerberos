@@ -1,6 +1,15 @@
 const { KERBEROS_TYPE_KEYWORD, KERBEROS_INSTANCE_OF_KEYWORD } = require('../validation/keywords.js');
 
+// Wildcard tokens. Both are '*' on the wire, but they are semantically
+// distinct (an action wildcard vs a role/resource wildcard) — use the matching
+// constant so call sites document which meaning is intended.
 const ALL_ACTIONS = '*';
+const ALL_ROLES = '*';
+const ALL_RESOURCES = '*';
+
+// Policy selection defaults.
+const DEFAULT_VERSION = 'default';
+const BASE_SCOPE = '';
 
 const Effect = {
   Allow: 'EFFECT_ALLOW',
@@ -242,6 +251,10 @@ class TypeBoxSchemas {
 
 module.exports = {
   ALL_ACTIONS,
+  ALL_RESOURCES,
+  ALL_ROLES,
+  BASE_SCOPE,
+  DEFAULT_VERSION,
   Effect,
   JsonSchemas,
   TypeBoxSchemas,
