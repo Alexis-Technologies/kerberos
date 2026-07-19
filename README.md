@@ -35,6 +35,7 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
 - [x] Pluggable schema validation (Zod, JSON Schema + Ajv, TypeBox + Ajv);
 - [x] Caching / storing dynamic policies (cache-agnostic, with a safe AST-based serialization codec);
 - [x] OpenTelemetry (traces + metrics, zero-dependency delegation);
+- [x] ReBAC — relation-backed derived roles + a built-in in-process "Zanzibar-lite" resolver inspired by SpiceDB (`@alexify/kerberos/relations`);
 
 ---
 **_P.S. We are tying to keep the API as close as possible to Cerbos. If you are familiar with Cerbos, you will feel at home with Kerberos.js._**
@@ -60,6 +61,7 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
 - [Scopes and Policy Versions](#scopes-and-policy-versions)
 - [Metadata](#metadata)
 - [Caching / Storing Policies](#caching--storing-policies)
+- [ReBAC (Relations)](#rebac-relations)
 - [Testing](#testing)
 - [Benchmarks](#benchmarks)
 
@@ -1109,6 +1111,148 @@ To skip deserialization entirely (e.g. your cached documents are already plain J
 const kerberos = new Kerberos([], [], { cache }); // values passed as-is to policy constructors
 ```
 
+## ReBAC (Relations)
+
+Kerberos supports **relationship-based access control** (ReBAC) — "Google Drive-style" authorization where access flows through relationships (`viewer of the parent folder`, `member of the team that owns the document`) instead of attributes alone. The design is heavily inspired by [SpiceDB](https://github.com/authzed/spicedb) (the mature open-source implementation of Google's Zanzibar), adapted to the Kerberos philosophy: **in-process, zero-infra**, static data blazing fast, dynamic data through the same read-only `cache` fallback used for policies.
+
+It comes in two layers:
+
+1. **The `relations` engine option** — a delegation contract like `logger`/`cache`/`codec`. ANY object with a `check` method works, including a resolver backed by the join tables your database already has.
+2. **The built-in "Zanzibar-lite" resolver** — `createRelationResolver` from the **`@alexify/kerberos/relations`** subpath (kept out of the main entry so non-ReBAC browser bundles do not grow).
+
+### Relation-backed derived roles
+
+A derived-role definition may declare a `relation` instead of a `condition`. When the engine resolves derived roles for a resource policy (its only async phase), it asks the configured `relations` resolver whether the principal holds that relation/permission on the request's resource — and the role activates like any other derived role:
+
+```javascript
+const derivedRoles = {
+  name: 'doc_roles',
+  definitions: [
+    // Classic (condition-backed) definitions still work unchanged:
+    { name: 'OWNER', parentRoles: ['USER'], condition: { match: ({ P, R }) => R.attr.ownerId === P.id } },
+    // Relation-backed: activates when relations.check grants `view`.
+    // `parentRoles` and `condition` become optional synchronous gates.
+    { name: 'DOC_VIEWER', relation: 'view' },
+  ],
+};
+
+const policy = {
+  resourcePolicy: {
+    version: 'default',
+    resource: 'document',
+    importDerivedRoles: ['doc_roles'],
+    rules: [{ actions: ['view'], effect: 'EFFECT_ALLOW', derivedRoles: ['DOC_VIEWER', 'OWNER'] }],
+  },
+};
+```
+
+The delegation contract (bring your own resolver — e.g. SQL joins over your own tables):
+
+```javascript
+const kerberos = new Kerberos([policy], [derivedRoles], {
+  relations: {
+    // Required. `memo` is a request-scoped Map shared across a whole
+    // checkResources batch — use it to share subproblems if you want.
+    async check({ principal, resource, relation }, { memo }) {
+      return db.hasRelation(principal.id, resource.kind, resource.id, relation);
+    },
+    // Optional batch fast path — called first when present.
+    async list({ principal, resource, relations }, { memo }) {
+      return db.grantedRelations(principal.id, resource.kind, resource.id, relations); // Set<string>
+    },
+  },
+});
+```
+
+Resolver failures follow the [`onError`](#configuration-options) semantics, per-resource isolation in `checkResources` applies as usual, and with `includeMeta` every relation resolution is visible in `meta.resolution` as `{ source: 'relations', name, relation, matched }`.
+
+### The built-in Zanzibar-lite resolver
+
+```javascript
+import { createRelationResolver } from '@alexify/kerberos/relations';
+
+const relations = createRelationResolver({
+  schema: {
+    relationSchema: {
+      caveats: {
+        // ABAC-on-ReBAC: a named condition evaluated against { P, ctx }.
+        valid_ip: { match: ({ P, ctx }) => ctx.allowed_ips.includes(P.attr.ip) },
+      },
+      definitions: {
+        user: {},
+        group: { relations: { member: ['user', 'group#member'] } }, // nested groups
+        folder: {
+          relations: { parent: ['folder'], viewer: ['user', 'group#member'] },
+          permissions: { view: { anyOf: ['viewer', { via: 'parent', permission: 'view' }] } }, // recursive!
+        },
+        document: {
+          relations: {
+            parent: ['folder'],
+            owner: ['user'],
+            editor: ['user', { type: 'user', caveat: 'valid_ip' }], // caveated subjects
+            viewer: ['user', 'user:*', 'group#member'],             // incl. the wildcard
+          },
+          permissions: {
+            edit: { anyOf: ['owner', 'editor'] },                                  // union (+)
+            view: { anyOf: ['edit', 'viewer', { via: 'parent', permission: 'view' }] }, // arrow (->)
+            audit: { allOf: ['viewer', 'auditor'] },                               // intersection (&)
+            read_only: { exclude: { base: 'viewer', subtract: ['editor'] } },      // exclusion (-)
+            review_all: { via: 'parent', permission: 'view', all: true },          // intersection arrow (.all)
+          },
+        },
+      },
+    },
+  },
+  // Static tuples: canonical SpiceDB strings or objects (with caveat context).
+  tuples: [
+    'document:readme#owner@user:olga',
+    'document:readme#viewer@group:eng#member',
+    'group:eng#member@user:sara',
+    'document:readme#parent@folder:docs',
+    { resource: 'document:readme', relation: 'editor', subject: 'user:cara', caveat: { name: 'valid_ip', context: { allowed_ips: ['10.0.0.1'] } } },
+  ],
+});
+
+// Standalone SpiceDB-flavoured API:
+await relations.check({ resource: 'document:readme', permission: 'view', subject: 'user:sara' }); // true
+await relations.lookupSubjects({ resource: 'document:readme', permission: 'view' }); // who can view?
+await relations.lookupResources({ subject: 'user:sara', permission: 'view', resourceType: 'document' }); // what can sara view?
+
+// And it IS a `relations` resolver:
+const kerberos = new Kerberos([policy], [derivedRoles], { relations });
+```
+
+What it borrows from SpiceDB (see [`src/Relations/`](./src/Relations)):
+
+- the **userset-rewrite algebra** (`union` / `intersection` / `exclusion` / arrows incl. `.all`, wildcard subjects `user:*`, subject relations `group#member`) with fail-fast schema compilation (unknown references, relation↔permission collisions and invalid arrows throw at construction);
+- the **recursive check** with short-circuiting (union stops at the first ALLOW, intersection at the first DENY, exclusion is base-first and order-sensitive);
+- **per-request memoization** of subproblems (`(resource#relation@subject)`), shared across a whole `checkResources` batch; concurrent identical document reads coalesce (the in-process analog of SpiceDB's singleflight);
+- **depth limiting instead of cycle tracking** (`maxDepth`, default 50) — visited-sets are semantically unsound under exclusions, so cyclic relationship data throws a typed `KerberosRelationsError`;
+- **caveats** (ABAC-on-ReBAC): named conditions bound to tuples with write-time context; at check time the written context takes precedence over the check-time `context` argument, and the condition sees `{ P, ctx }`. Caveats are ordinary Kerberos `Conditions` — for JSON/cache-stored schemas author them as `{ match: { $expr: '...' } }` and pass a codec built with `createSafeExprCodec({ jsep, roots: ['P', 'ctx'] })` (same eval-free guarantees as dynamic policies). A throwing or false caveat fails closed. There is deliberately no CEL and no partial evaluation (`CONDITIONAL` results) — in-process, the full context is available at check time;
+- **reverse lookups**: `lookupSubjects` walks the permission tree forward and expands groups (wildcards come back as `'user:*'`, or `{ subject: 'user:*', exclusions: [...] }` under exclusions; caveated tuples are treated as present — an upper bound); `lookupResources` uses compile-time reachability entrypoints plus candidate verification for intersection/exclusion/caveat paths (the LookupResources2 pattern).
+
+### Dynamic tuples (cache-backed)
+
+Exactly like dynamic policies, tuples can live in your cache/store — Kerberos **only reads**; storage, TTL, invalidation and multi-host sync are the backend's job (keyv → cacheable → qified works here too):
+
+- **Forward documents** (required): key **`rel:<resourceType>:<id>:<relation>`** → JSON array of subject entries:
+
+  ```json
+  ["user:emilia", "group:eng#member", { "subject": "user:bob", "caveat": { "name": "valid_ip", "context": { "allowed_ips": ["10.0.0.1"] } } }]
+  ```
+
+- **Reverse documents** (opt-in, only needed for `lookupResources` over cache-backed tuples): key **`rel:rev:<subjectKey>`** (e.g. `rel:rev:user:emilia`, `rel:rev:group:eng#member`) → JSON array of `{ "resource": "document:readme", "relation": "viewer" }` entries. Enable with `reverseIndex: true`; without it `lookupResources` throws a typed error when a cache is configured (`check`/`list`/`lookupSubjects` never need reverse documents).
+
+Static tuples always win per `(resource, relation)` key — the cache is only consulted on a static miss, and sources for the same key are never merged. Corrupt documents are logged and treated as empty (fail-closed); entries the schema does not admit are skipped. Transient cache failures retry per `cacheRetry` and then surface as `KerberosCacheError`.
+
+### Consistency (honest limitations)
+
+This is deliberately **not** full Zanzibar. The hard part of Zanzibar is distributed consistency — ZedTokens/zookies, snapshot reads, the [New Enemy Problem](https://authzed.com/docs/spicedb/concepts/consistency) — and an in-process engine sidesteps it rather than solving it:
+
+- checks always read the **current** in-memory state plus whatever your cache returns *right now*;
+- the staleness window for dynamic tuples equals your cache-invalidation window (e.g. qified pub/sub propagation). Until an invalidation propagates, a just-revoked subject may still pass on another host — if that window matters for your threat model, put revocation-sensitive checks behind static tuples, shorten TTLs, or use a centralized authorization service (SpiceDB) instead;
+- there are no per-request consistency levels and no revision tokens.
+
 ## Testing
 
 ```javascript
@@ -1251,6 +1395,9 @@ Apple Silicon (M-series), Node v24:
 | `isAllowed` — derived roles + variables + condition | ~300,000 |
 | `checkResources` — 10 resources × 3 actions |  ~41,000 |
 | `isAllowed` — cache-backed dynamic policy (`$expr`, in-memory Map) | ~150,000 |
+| `relations.check` — direct tuple (flat) | ~820,000 |
+| `relations.check` — deep walk (3 arrows + nested groups) | ~110,000 |
+| `isAllowed` — relation-backed derived role (deep walk) |  ~76,000 |
 
 `checkResources` evaluates resources **concurrently** (`Promise.allSettled`): with a remote policy store, N resources cost one parallel wave of lookups instead of N sequential round-trips (measured ~8x faster with a 2ms-latency cache and 10 resources), and one failing resource never fails the batch — it fail-closes to `EFFECT_DENY` for its actions only.
 

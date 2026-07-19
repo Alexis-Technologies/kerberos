@@ -33,8 +33,22 @@ class KerberosValidationError extends Error {
   }
 }
 
+/**
+ * Thrown for ReBAC relation errors: invalid relation schemas (unknown
+ * references, name collisions, malformed expressions — fail-fast at
+ * construction) and runtime guard violations (exceeding `maxDepth`, missing
+ * reverse-index contract).
+ */
+class KerberosRelationsError extends Error {
+  constructor(message, options) {
+    super(message, options);
+    this.name = 'KerberosRelationsError';
+  }
+}
+
 module.exports = {
   KerberosCacheError,
   KerberosCodecError,
+  KerberosRelationsError,
   KerberosValidationError,
 };

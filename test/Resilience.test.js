@@ -249,7 +249,10 @@ describe('Resilience', () => {
     });
 
     it('should throw on duplicate derived roles definitions', () => {
-      const derived = { name: 'common_roles', definitions: [{ name: 'OWNER', parentRoles: ['USER'] }] };
+      const derived = {
+        name: 'common_roles',
+        definitions: [{ name: 'OWNER', parentRoles: ['USER'], condition: { match: () => true } }],
+      };
       assert.throws(() => new Kerberos(policies, [derived, derived]), /Duplicate derived roles definition/);
     });
   });

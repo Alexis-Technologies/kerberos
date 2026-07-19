@@ -202,6 +202,9 @@ class Kerberos {
 
   #onError = 'throw';
 
+  /** @type {{ check: Function, list?: Function } | null} */
+  #relations = null;
+
   // Per-instance memo of scope search chains: requests repeatedly resolve the
   // same scopes, and rebuilding the chain does string split/join work 2+N
   // times per request (once per role). Bounded so unbounded caller-supplied
@@ -228,13 +231,14 @@ class Kerberos {
   constructor(
     policies,
     derivedRoles,
-    { logger, telemetry, cache, cacheRetry, codec, onError, z, ajv, typebox, getCallId } = {
+    { logger, telemetry, cache, cacheRetry, codec, onError, relations, z, ajv, typebox, getCallId } = {
       logger: false,
       telemetry: null,
       cache: null,
       cacheRetry: null,
       codec: null,
       onError: 'throw',
+      relations: null,
       z: null,
       ajv: null,
       typebox: null,
@@ -247,6 +251,16 @@ class Kerberos {
       throw new TypeError(`Invalid onError option "${onError}" — expected 'throw' or 'deny'`);
     }
     this.#onError = onError ?? 'throw';
+
+    // ReBAC delegation seam: any object with `check` (and optionally `list`)
+    // works — a SQL/ORM-backed resolver or the built-in Zanzibar-lite one from
+    // `@alexify/kerberos/relations`.
+    if (relations !== undefined && relations !== null) {
+      if (typeof relations.check !== 'function') {
+        throw new TypeError('Invalid relations option — expected an object with a check(args, options) method');
+      }
+      this.#relations = relations;
+    }
 
     this.#ajv = ajv ?? null;
     this.#typebox = typebox ?? null;
@@ -444,8 +458,9 @@ class Kerberos {
     return derivedRolesMap;
   }
 
-  async #getImportedDerivedRoles(policy, req) {
+  async #getImportedDerivedRoles(policy, req, relationsMemo, trace) {
     const importedRoles = new Set();
+    const relationCandidates = [];
     for (const name of policy.importDerivedRoles) {
       let role = this.#derivedRoles.get(name);
       if (!role) {
@@ -456,10 +471,86 @@ class Kerberos {
       }
       if (!role) continue;
       const derivedRoles = role.get(req);
-      if (!derivedRoles) continue;
-      for (const derivedRole of derivedRoles) importedRoles.add(derivedRole);
+      if (derivedRoles) for (const derivedRole of derivedRoles) importedRoles.add(derivedRole);
+      for (const candidate of role.getRelationCandidates(req)) relationCandidates.push(candidate);
     }
+
+    if (relationCandidates.length) {
+      if (this.#relations) {
+        const granted = await this.#resolveRelationCandidates(relationCandidates, req, relationsMemo, trace);
+        for (const name of granted) importedRoles.add(name);
+      } else if (trace) {
+        // Relation-backed definitions without a configured `relations`
+        // resolver can never activate — surface that in the decision trace
+        // instead of denying silently.
+        for (const candidate of relationCandidates) {
+          trace.push({
+            source: 'relations',
+            name: candidate.name,
+            relation: candidate.relation,
+            matched: false,
+            reason: 'no-relations-resolver',
+          });
+        }
+      }
+    }
+
     return importedRoles;
+  }
+
+  /**
+   * Resolves relation-backed derived-role candidates through the configured
+   * `relations` resolver: list-first (one batched call), falling back to
+   * parallel `check` calls. The per-request `memo` is shared across every
+   * resolution in the request (and across all resources of a batch), so a
+   * resolver that honors it evaluates each subproblem once.
+   */
+  async #resolveRelationCandidates(candidates, req, memo, trace) {
+    // Several derived roles may point at the same relation — resolve each
+    // relation once.
+    const relationNames = [];
+    const seenRelations = new Set();
+    for (const candidate of candidates) {
+      if (seenRelations.has(candidate.relation)) continue;
+      seenRelations.add(candidate.relation);
+      relationNames.push(candidate.relation);
+    }
+
+    let granted;
+    if (typeof this.#relations.list === 'function') {
+      const listed = await this.#relations.list(
+        { principal: req.P, resource: req.R, relations: relationNames },
+        { memo },
+      );
+      granted = listed instanceof Set ? listed : new Set(listed ?? []);
+    } else {
+      // Parallel checks; allSettled so one rejection never leaves siblings
+      // unawaited. A failure still surfaces after all settle (per the onError
+      // semantics) — a resolver error must not silently read as "not granted".
+      const checks = [];
+      for (const relation of relationNames) {
+        checks.push(this.#relations.check({ principal: req.P, resource: req.R, relation }, { memo }));
+      }
+      const settled = await Promise.allSettled(checks);
+      granted = new Set();
+      let firstError = null;
+      for (let i = 0; i < settled.length; i++) {
+        if (settled[i].status === 'rejected') {
+          if (!firstError) firstError = settled[i].reason;
+          continue;
+        }
+        if (settled[i].value === true) granted.add(relationNames[i]);
+      }
+      if (firstError) throw firstError instanceof Error ? firstError : new Error(String(firstError));
+    }
+
+    const grantedRoles = [];
+    for (const candidate of candidates) {
+      const matched = granted.has(candidate.relation);
+      trace?.push({ source: 'relations', name: candidate.name, relation: candidate.relation, matched });
+      if (matched) grantedRoles.push(candidate.name);
+    }
+    return grantedRoles;
   }
 
   // Every logger call is guarded: a throwing user logger must never affect
@@ -715,7 +806,7 @@ class Kerberos {
    * (`'policy-miss'` — no policy produced a decision; policy-level checks add
    * `'rule-miss'` / `'condition-not-met'`).
    */
-  async #evaluatePolicySources(req) {
+  async #evaluatePolicySources(req, relationsMemo) {
     const trace = req.includeMeta ? [] : null;
 
     const principalPolicy = await this.#getPrincipalPolicy(req, trace);
@@ -743,7 +834,7 @@ class Kerberos {
       if (resourcePolicy) {
         const resourceReq =
           roleUnresolvedActions.length === req.actions.length ? req : { ...req, actions: roleUnresolvedActions };
-        const importedDerivedRoles = await this.#getImportedDerivedRoles(resourcePolicy, req);
+        const importedDerivedRoles = await this.#getImportedDerivedRoles(resourcePolicy, req, relationsMemo, trace);
         resourceResult = resourcePolicy.check(resourceReq, importedDerivedRoles);
       }
     }
@@ -883,7 +974,8 @@ class Kerberos {
           ),
         );
 
-        const { effects, outputs, meta } = await this.#evaluatePolicySources(req);
+        const relationsMemo = this.#relations ? new Map() : null;
+        const { effects, outputs, meta } = await this.#evaluatePolicySources(req, relationsMemo);
         const isAllowed = effects.get(parsedArgs.action) === Effect.Allow || effects.get(ALL_ACTIONS) === Effect.Allow;
 
         const input = [{ req, result: { effects, outputs, meta } }];
@@ -950,8 +1042,12 @@ class Kerberos {
         // guarantees one rejected resource never fails the others. A rejected
         // resource yields a fail-closed result (all its actions DENY) plus an
         // error log/telemetry record, isolating failures at resource level.
+        // One relations memo for the whole batch: the principal is the same,
+        // so relation subproblems (e.g. group membership chains) resolved for
+        // one resource are reused by the others.
+        const relationsMemo = this.#relations ? new Map() : null;
         const promises = [];
-        for (const req of reqs) promises.push(this.#evaluatePolicySources(req));
+        for (const req of reqs) promises.push(this.#evaluatePolicySources(req, relationsMemo));
         const settled = await Promise.allSettled(promises);
 
         const results = [];

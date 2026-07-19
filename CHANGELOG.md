@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **ReBAC (relationship-based access control)**, inspired by SpiceDB/Zanzibar:
+  - **`relations` engine option** — a delegation contract
+    (`{ check, list? }`) like `logger`/`cache`/`codec`; any resolver works,
+    including one backed by your own SQL join tables. Derived-role definitions
+    gain an optional **`relation:`** field: the role activates when the
+    resolver grants that relation/permission on the request's resource
+    (`parentRoles`/`condition` become optional synchronous gates). Resolution
+    happens on the engine's existing async derived-roles phase — list-first,
+    parallel `check` fallback, one shared request memo across a whole
+    `checkResources` batch, `onError` semantics and per-resource isolation
+    apply, and `includeMeta` traces every resolution as
+    `{ source: 'relations', name, relation, matched }`.
+  - **Built-in in-process "Zanzibar-lite" resolver** on the new
+    **`@alexify/kerberos/relations` subpath** (kept out of the main entry so
+    non-ReBAC bundles do not grow): a JSON relation-schema DSL compiled to
+    SpiceDB's userset-rewrite algebra (union `anyOf` / intersection `allOf` /
+    exclusion `exclude` / arrows `{ via, permission }` incl. `.all`, wildcard
+    subjects `user:*`, subject relations `group#member`, fail-fast compile
+    checks), static tuples indexed in both directions (zero IO) plus dynamic
+    tuples via the same read-only cache fallback as policies
+    (`rel:<type>:<id>:<relation>` documents; opt-in `rel:rev:<subject>`
+    reverse documents with `reverseIndex: true`), **caveats** (ABAC-on-ReBAC:
+    named conditions with write-time context precedence, `{ $expr }` support
+    through the eval-free codec), recursive `check` with short-circuiting,
+    per-request memoization and a SpiceDB-style `maxDepth` guard (default 50),
+    and **reverse APIs** — `lookupSubjects` (group-expanding, with
+    wildcard-exclusion entries) and `lookupResources` (reachability
+    entrypoints + candidate verification). New typed `KerberosRelationsError`.
+  - Deliberately **not** implemented (documented in README/SECURITY.md):
+    ZedTokens/consistency levels (freshness is delegated to the cache
+    invalidation layer), CEL, partial caveat evaluation, cursors/streaming.
 - **`onError: 'throw' | 'deny'` option** (default `'throw'`) — error semantics
   are no longer coupled to logger presence. Malformed arguments always throw
   the new typed `KerberosValidationError` regardless of this option.
@@ -68,6 +99,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Two policies with the same kind/principal/role + version + scope previously
   last-wins overwrote each other, which could silently drop a deny rule.
   Duplicate derived-roles definition names also throw.
+- **Derived-role definitions without a `condition` (and without a `relation`)
+  now throw at construction** instead of crashing later during evaluation —
+  every definition must be either condition-backed or relation-backed.
 - `pnpm-lock.yaml` is no longer published in the npm tarball.
 
 - **Native OpenTelemetry support (traces + metrics)** via the new `telemetry`

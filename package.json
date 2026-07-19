@@ -17,6 +17,10 @@
     "./tests": {
       "types": "./tests.d.ts",
       "default": "./tests.js"
+    },
+    "./relations": {
+      "types": "./relations.d.ts",
+      "default": "./relations.js"
     }
   },
   "directories": {
@@ -94,6 +98,8 @@
     "browser.js",
     "tests.js",
     "tests.d.ts",
+    "relations.js",
+    "relations.d.ts",
     "src/",
     "LICENSE",
     "README.md",

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Kerberos.js (`@alexify/kerberos`) is a zero-dependency (~6 KB), in-process authorization engine for JavaScript — a lightweight, embeddable alternative to Cerbos. It evaluates `resourcePolicy` / `principalPolicy` / `rolePolicy` documents against `(principal, resource, action)` requests and returns `EFFECT_ALLOW` / `EFFECT_DENY`, with optional derived roles, conditions, variables, constants, outputs, scopes, schema validation, audit logging, and cache-backed dynamic policies. Runs in Node.js and the browser.
+Kerberos.js (`@alexify/kerberos`) is a zero-dependency (~6 KB), in-process authorization engine for JavaScript — a lightweight, embeddable alternative to Cerbos. It evaluates `resourcePolicy` / `principalPolicy` / `rolePolicy` documents against `(principal, resource, action)` requests and returns `EFFECT_ALLOW` / `EFFECT_DENY`, with optional derived roles, conditions, variables, constants, outputs, scopes, schema validation, audit logging, cache-backed dynamic policies, and ReBAC (relation-backed derived roles + a built-in SpiceDB-inspired Zanzibar-lite resolver on the `/relations` subpath). Runs in Node.js and the browser.
 
 Package manager is **pnpm** (`packageManager: pnpm@11.5.0`). CommonJS throughout (`require`/`module.exports`), no build/transpile step — `src/` ships as-is.
 
@@ -15,10 +15,13 @@ pnpm test              # run all tests: node --test test/*.test.js
 node --test test/Kerberos.test.js          # run a single test file
 node --test --test-name-pattern="scope"    # filter tests by name
 pnpm test:types        # type-check test/types.test-d.ts against index.d.ts via tsd
-pnpm lint              # eslint src -c eslint.config.js (neostandard config)
+pnpm test:coverage     # c8 coverage over src/
+pnpm lint              # oxlint src test
+pnpm format            # oxfmt src test (format:check for CI)
+pnpm bench             # ops/sec benchmark harness (bench/bench.js)
 ```
 
-There is also `oxlint`/`oxfmt` config (`.oxlintrc.json`, `.oxfmtrc.json`) but no npm scripts wire them up yet — `pnpm lint` (ESLint/neostandard) is the enforced linter, and `pre-commit` (see `package.json`) runs `lint` then `test` on commit.
+Linting/formatting is **oxlint/oxfmt** (`.oxlintrc.json`, `.oxfmtrc.json`; the `correctness` category is intentionally off). `pre-commit` (see `package.json`) runs `lint` then `test` on commit; CI (`.github/workflows/ci.yml`) runs lint + format check + coverage + type tests on Node 18/20/22.
 
 Style: 2-space indent, single quotes, semicolons, 120-char lines (see `.editorconfig`, `.oxfmtrc.json`).
 
@@ -72,10 +75,17 @@ Because remote-stored policies must be JSON (no live functions), `codec.js` (`cr
 
 Same delegation pattern as logger/cache/codec: the `telemetry` option accepts `{ api }` (the `@opentelemetry/api` module — Kerberos derives tracer/meter with the `@alexify/kerberos` scope) or `{ tracer, meter }` instances; the package never depends on `@opentelemetry/api`. `createTelemetryWriter` mirrors `createLoggerWriter` (factory + no-op disabled writer); the writer contract is `{ enabled, withRequestSpan, recordDecisions, recordError, endRequest }`, hooked into `isAllowed`/`checkResources` alongside the existing `#log`/`#logMethod*` call sites. Invariants: `SPAN_STATUS_ERROR = 2` is hardcoded because OTel status codes are spec-frozen (avoids needing the api module for constants); every writer method swallows its own failures — telemetry must never affect authorization results or the logger-controlled swallow-vs-rethrow error contract; the module has zero imports and must stay platform-neutral. `@opentelemetry/*` packages are devDependencies only (test usage, like `pino`).
 
+### ReBAC / Relations (`src/Relations/`)
+
+Two layers, both SpiceDB-inspired (see the "borrow vs skip" notes in `README.md` "ReBAC (Relations)"):
+
+1. **Engine seam** (`relations` constructor option, main entry): a delegation contract `{ check({principal, resource, relation}, {memo}), list?({...relations[]}, {memo}) }` — any resolver works. Derived-role definitions gain an optional `relation:` field (then `parentRoles`/`condition` become optional sync gates — `DerivedRoles.getRelationCandidates`); the engine resolves candidates on its only async phase (`#getImportedDerivedRoles` → `#resolveRelationCandidates`): list-first, `Promise.allSettled` check fallback (a rejection still surfaces per `onError` after all settle), one `relationsMemo` Map per public call shared across the whole `checkResources` batch, `{ source: 'relations', ... }` decision-trace entries under `includeMeta`.
+2. **Built-in resolver** (`createRelationResolver`, exported ONLY from the `@alexify/kerberos/relations` subpath — CJS doesn't tree-shake, keep it out of the main entry): `RelationSchema.js` compiles the JSON schema DSL into SpiceDB's userset-rewrite algebra (`{kind: 'ref'|'arrow'|'union'|'intersection'|'exclusion'}` nodes) with fail-fast reference checks; `RelationResolver.js` holds the tuple indexes (static forward+reverse Maps; cache fallback docs `rel:<type>:<id>:<relation>`, opt-in reverse docs `rel:rev:<subjectKey>` behind `reverseIndex: true`), the recursive check (per-request memo of completed values + `maxDepth` guard, deliberately NO visited-set — SpiceDB semantics, unsound under exclusion; document reads memoize the *promise* as an in-process singleflight), caveat evaluation (`{ P, ctx }` only — no `R`, which is what keeps memoized subproblems batch-shareable; written context beats check-time context; fail-closed), and the reverse APIs (`lookupSubjects` collect-walk with wildcard-exclusion sets; `lookupResources` via reachability analysis + candidate verification for intersection/exclusion/caveat paths). Static tuples are validated against the schema at construction (throw); cached doc entries the schema doesn't admit are skipped, corrupt docs count as empty. Caveat `{ $expr }` conditions require a codec built with roots `['P', 'ctx']`. Typed error: `KerberosRelationsError`.
+
 ### Testing DSL (`src/Tests/`)
 
 `KerberosTest`/`KerberosTests` (exported only from the `@alexify/kerberos/tests` subpath, not the main entry) implement a Cerbos-style declarative test runner: a JSON-ish fixture of `principals`/`resources`/`tests` is run against a live `Kerberos` instance and asserted with `node:test`. `Tests/Mocks/` provides named principal/resource fixture helpers. Use this pattern (see `README.md` "Testing" section) rather than hand-rolling policy assertions when adding policy-behavior tests.
 
 ### Public exports
 
-The full package surface is assembled in `src/index.js` (main entry) and `tests.js` (dev-only `/tests` subpath) — check both when adding a new export, and update `index.d.ts` / `tests.d.ts` in the repo root accordingly, since types are hand-maintained (not generated).
+The full package surface is assembled in `src/index.js` (main entry), `tests.js` (dev-only `/tests` subpath) and `relations.js` (`/relations` subpath) — check all three when adding a new export, and update `index.d.ts` / `tests.d.ts` / `relations.d.ts` in the repo root accordingly, since types are hand-maintained (not generated).

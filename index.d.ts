@@ -213,11 +213,24 @@ export class MetadataTypeBoxSchemas {
   static buildShape(typebox: TypeBoxLike): unknown;
 }
 
-type DerivedRolesDefinition = {
+/** Classic condition-backed definition: parentRoles and condition required. */
+type ConditionDerivedRolesDefinition = {
   name: string;
   parentRoles: NonEmptyArray<string>;
   condition: ConditionsSchema | Conditions;
 };
+/**
+ * Relation-backed (ReBAC) definition: the role activates when the configured
+ * `relations` resolver grants the named relation/permission on the request's
+ * resource. `parentRoles` and `condition` become optional synchronous gates.
+ */
+type RelationDerivedRolesDefinition = {
+  name: string;
+  relation: string;
+  parentRoles?: NonEmptyArray<string>;
+  condition?: ConditionsSchema | Conditions;
+};
+type DerivedRolesDefinition = ConditionDerivedRolesDefinition | RelationDerivedRolesDefinition;
 export type DerivedRolesSchema = {
   name: string;
   description?: string;
@@ -228,6 +241,7 @@ export type DerivedRolesSchema = {
 export class DerivedRoles {
   constructor(schema: DerivedRolesSchema, options?: ValidationOptions);
   get(req: BaseRequest): Set<string>;
+  getRelationCandidates(req: BaseRequest): Array<{ name: string; relation: string }>;
 }
 export class DerivedRolesZodSchemas {
   static buildShape(z: unknown): unknown;
@@ -410,17 +424,30 @@ export type KerberosAuditLogEntry = {
  */
 export type KerberosDecisionReason = 'policy-miss' | 'rule-miss' | 'condition-not-met';
 
-/** One policy-lookup record in the decision trace (`meta.resolution`). */
-export type KerberosResolutionTraceEntry = {
-  source: 'principal' | 'role' | 'resource';
-  id: string;
-  version: string;
-  scopesSearched: string[];
-  /** Scope the policy was found at, or null when no policy matched. */
-  matchedScope: string | null;
-  /** Present when the policy was resolved from the cache instead of memory. */
-  origin?: 'cache';
+/** Relation-resolution record in the decision trace (`meta.resolution`). */
+export type KerberosRelationsTraceEntry = {
+  source: 'relations';
+  /** Derived role name backed by the relation. */
+  name: string;
+  relation: string;
+  matched: boolean;
+  /** Present when a relation-backed role could not resolve at all. */
+  reason?: 'no-relations-resolver';
 };
+
+/** One policy-lookup record in the decision trace (`meta.resolution`). */
+export type KerberosResolutionTraceEntry =
+  | {
+      source: 'principal' | 'role' | 'resource';
+      id: string;
+      version: string;
+      scopesSearched: string[];
+      /** Scope the policy was found at, or null when no policy matched. */
+      matchedScope: string | null;
+      /** Present when the policy was resolved from the cache instead of memory. */
+      origin?: 'cache';
+    }
+  | KerberosRelationsTraceEntry;
 export type KerberosMethodLogEntry = {
   event: string;
   reqKind: string;
@@ -555,6 +582,15 @@ export class KerberosValidationError extends Error {
 }
 
 /**
+ * Thrown for ReBAC relation errors: invalid relation schemas (fail-fast at
+ * construction) and runtime guard violations (`maxDepth`, missing
+ * reverse-index contract).
+ */
+export class KerberosRelationsError extends Error {
+  name: 'KerberosRelationsError';
+}
+
+/**
  * Creates the built-in security-first policy codec.
  *
  * Requires a pre-configured `jsep` instance (analogous to how `ajv` is
@@ -603,6 +639,25 @@ export function serializePolicy(shape: unknown, options?: { jsep?: (expr: string
  */
 export function deserializePolicy(json: unknown, codec: PolicyCodec): unknown;
 
+/**
+ * ReBAC delegation contract for the `relations` option. Any object with a
+ * `check` method works — a SQL/ORM-backed resolver of your join tables, or the
+ * built-in Zanzibar-lite resolver from `@alexify/kerberos/relations`. `list`
+ * is an optional batch fast path (called first when present). The `memo` Map
+ * is request-scoped and shared across all resources of a `checkResources`
+ * batch — resolvers may use it to share subproblems.
+ */
+export type KerberosRelationsResolver = {
+  check(
+    args: { principal: RequestPrincipal; resource: RequestResource; relation: string },
+    opts?: { memo?: Map<string, unknown> | null },
+  ): boolean | Promise<boolean>;
+  list?(
+    args: { principal: RequestPrincipal; resource: RequestResource; relations: string[] },
+    opts?: { memo?: Map<string, unknown> | null },
+  ): Set<string> | string[] | Promise<Set<string> | string[]>;
+};
+
 export type KerberosOptions = ValidationOptions & {
   logger?: KerberosLogger | boolean;
   telemetry?: KerberosTelemetryOptions;
@@ -610,6 +665,8 @@ export type KerberosOptions = ValidationOptions & {
   /** Retry policy for transient cache.get failures. Default { attempts: 3 }; attempts: 1 disables retrying. */
   cacheRetry?: { attempts?: number } | null;
   codec?: PolicyCodec;
+  /** ReBAC resolver used for relation-backed derived roles. */
+  relations?: KerberosRelationsResolver | null;
   /**
    * Evaluation-phase error handling. `'throw'` (default) propagates errors to
    * the caller; `'deny'` converts them to fail-closed results (`isAllowed` →

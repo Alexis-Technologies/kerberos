@@ -141,6 +141,72 @@ async function main() {
     );
   }
 
+  // ReBAC scenarios: the built-in Zanzibar-lite resolver over static tuples.
+  const { createRelationResolver } = require('../src/Relations/index.js');
+  const relationSchema = {
+    relationSchema: {
+      definitions: {
+        user: {},
+        group: { relations: { member: ['user', 'group#member'] } },
+        folder: {
+          relations: { parent: ['folder'], viewer: ['user', 'group#member'] },
+          permissions: { view: { anyOf: ['viewer', { via: 'parent', permission: 'view' }] } },
+        },
+        document: {
+          relations: { parent: ['folder'], owner: ['user'], viewer: ['user', 'group#member'] },
+          permissions: {
+            edit: { anyOf: ['owner'] },
+            view: { anyOf: ['edit', 'viewer', { via: 'parent', permission: 'view' }] },
+          },
+        },
+      },
+    },
+  };
+  const relationTuples = [
+    'document:doc1#owner@user:sally',
+    'document:doc1#parent@folder:f3',
+    'folder:f3#parent@folder:f2',
+    'folder:f2#parent@folder:f1',
+    'folder:f1#viewer@group:eng#member',
+    'group:eng#member@group:leads#member',
+    'group:leads#member@user:deep',
+  ];
+  const relations = createRelationResolver({ schema: relationSchema, tuples: relationTuples });
+
+  results.push(
+    await bench('relations.check — direct tuple (flat)', () =>
+      relations.check({ resource: 'document:doc1', permission: 'edit', subject: 'user:sally' }),
+    ),
+  );
+  results.push(
+    await bench('relations.check — deep walk (3 arrows + nested groups)', () =>
+      relations.check({ resource: 'document:doc1', permission: 'view', subject: 'user:deep' }),
+    ),
+  );
+
+  const relationDerivedRoles = {
+    name: 'doc_roles',
+    definitions: [{ name: 'DOC_VIEWER', relation: 'view' }],
+  };
+  const relationPolicy = {
+    resourcePolicy: {
+      version: 'default',
+      resource: 'document',
+      importDerivedRoles: ['doc_roles'],
+      rules: [{ actions: ['view'], effect: Effect.Allow, derivedRoles: ['DOC_VIEWER'] }],
+    },
+  };
+  const rebacKerberos = new Kerberos([relationPolicy], [relationDerivedRoles], { relations });
+  results.push(
+    await bench('isAllowed — relation-backed derived role (deep walk)', () =>
+      rebacKerberos.isAllowed({
+        principal: { id: 'deep', roles: ['USER'] },
+        action: 'view',
+        resource: { id: 'doc1', kind: 'document' },
+      }),
+    ),
+  );
+
   return results;
 }
 

@@ -38,6 +38,22 @@ deliberately different from a networked authorization server:
 - **Call IDs are correlation identifiers, not security tokens.** In insecure
   browser contexts (plain HTTP) where `crypto.randomUUID` is unavailable, IDs
   fall back to a `Math.random`-based pseudo UUID.
+- **Relation tuples from a store are data.** The built-in ReBAC resolver
+  (`@alexify/kerberos/relations`) applies the same model as dynamic policies:
+  cached relation documents are plain JSON, entries not admitted by the
+  compiled relation schema are skipped fail-closed, corrupt documents are
+  treated as empty, and recursion is bounded by a configurable `maxDepth`.
+  Caveat conditions authored as `{ "$expr": "..." }` go through the same
+  eval-free codec interpreter (scoped to `{P, ctx}` roots); a throwing caveat
+  fails closed. An attacker who can write tuples can still grant or deny
+  relations — protect the store accordingly.
+- **In-process ReBAC has no Zanzibar consistency.** There are no revision
+  tokens (zookies) or per-request consistency levels: the staleness window for
+  cache-backed tuples equals your cache-invalidation window, so a just-revoked
+  relation may briefly still pass on another host (the "new enemy" scenario).
+  If that window matters for your threat model, keep revocation-sensitive
+  relationships in static tuples, shorten TTLs/invalidation latency, or use a
+  centralized authorization service.
 
 ## Philosophy: opt-in safety layers
 
