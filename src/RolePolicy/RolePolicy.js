@@ -45,6 +45,9 @@ class RolePolicy {
           ...rule,
           condition: RolePolicy.parseConditions(rule.condition, options),
           output: RolePolicy.parseOutputs(rule.output, options),
+          // See ResourcePolicy's `actionsSet` — same rationale: static per
+          // policy, scanned on every check() call.
+          allowActionsSet: new Set(rule.allowActions),
         });
       }
       this.#shape.rolePolicy.rules = rules;
@@ -111,7 +114,7 @@ class RolePolicy {
         if (rule.resource !== ALL_RESOURCES && rule.resource !== reqWithVariables.R.kind) continue;
 
         matchedResource = true;
-        if (!rule.allowActions.includes(ALL_ACTIONS) && !rule.allowActions.includes(action)) continue;
+        if (!rule.allowActionsSet.has(ALL_ACTIONS) && !rule.allowActionsSet.has(action)) continue;
 
         const isConditionFulfilled = rule.condition ? rule.condition.isFulfilled(reqWithVariables) : true;
         const metaSrc = `${metaSrcBase}#${rule.name || `UNNAMED_RULE_${i + 1}`}`;

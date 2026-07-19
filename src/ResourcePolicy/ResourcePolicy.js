@@ -61,6 +61,12 @@ class ResourcePolicy {
           ...rule,
           condition: ResourcePolicy.parseConditions(rule.condition, options),
           output: ResourcePolicy.parseOutputs(rule.output, options),
+          // `rule.actions` is static per policy but scanned on every check()
+          // call (once per rule per requested action); precomputing the Set
+          // once here turns the repeated `includes` linear scans into O(1)
+          // lookups on the hot path, same rationale as the `principalRoles`
+          // Set below.
+          actionsSet: new Set(rule.actions),
         });
       }
       this.#shape.resourcePolicy.rules = rules;
@@ -142,7 +148,7 @@ class ResourcePolicy {
       for (let i = 0; i < rules.length; i++) {
         const rule = rules[i];
         // Checking if the rule applies to the action
-        if (!rule.actions.includes(ALL_ACTIONS) && !rule.actions.includes(action)) continue;
+        if (!rule.actionsSet.has(ALL_ACTIONS) && !rule.actionsSet.has(action)) continue;
 
         // Checking if the roles match (`*` is the wildcard role and matches any principal)
         let rolesMatch = false;
