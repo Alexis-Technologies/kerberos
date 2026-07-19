@@ -91,6 +91,16 @@ class RelationsZodSchemas extends ZodSchemas {
     });
   }
 
+  static buildListArgs(z) {
+    return z.object({
+      resource: z.union([z.string(), ZodSchemas.buildRequestResource(z)]),
+      subject: z.string().optional(),
+      principal: ZodSchemas.buildRequestPrincipal(z).optional(),
+      relations: z.array(z.string()).nonempty(),
+      context: z.record(z.string(), z.unknown()).optional(),
+    });
+  }
+
   static buildLookupSubjectsArgs(z) {
     return z.object({
       resource: z.union([z.string(), ZodSchemas.buildRequestResource(z)]),
@@ -244,6 +254,19 @@ class RelationsJsonSchemas extends JsonSchemas {
     );
   }
 
+  static buildListArgs() {
+    return JsonSchemas.buildObjectShape(
+      {
+        resource: { anyOf: [{ type: 'string' }, JsonSchemas.buildRequestResource()] },
+        subject: { type: 'string' },
+        principal: JsonSchemas.buildRequestPrincipal(),
+        relations: JsonSchemas.buildNonEmptyArrayShape({ type: 'string' }),
+        context: JsonSchemas.buildUnknownRecordShape(),
+      },
+      ['resource', 'relations'],
+    );
+  }
+
   static buildLookupSubjectsArgs() {
     return JsonSchemas.buildObjectShape(
       {
@@ -354,6 +377,16 @@ class RelationsTypeBoxSchemas extends TypeBoxSchemas {
       principal: t.Optional(TypeBoxSchemas.buildRequestPrincipal(t)),
       permission: t.Optional(t.String()),
       relation: t.Optional(t.String()),
+      context: t.Optional(TypeBoxSchemas.buildUnknownRecordShape(t)),
+    });
+  }
+
+  static buildListArgs(t) {
+    return t.Object({
+      resource: t.Union([t.String(), TypeBoxSchemas.buildRequestResource(t)]),
+      subject: t.Optional(t.String()),
+      principal: t.Optional(TypeBoxSchemas.buildRequestPrincipal(t)),
+      relations: TypeBoxSchemas.buildNonEmptyArrayShape(t, t.String()),
       context: t.Optional(TypeBoxSchemas.buildUnknownRecordShape(t)),
     });
   }

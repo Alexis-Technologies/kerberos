@@ -51,6 +51,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Deliberately **not** implemented (documented in README/SECURITY.md):
     ZedTokens/consistency levels (freshness is delegated to the cache
     invalidation layer), CEL, partial caveat evaluation, cursors/streaming.
+  - **Code-review hardening** (second-pass review of the unreleased module):
+    session-memo entries are scoped by resolver instance + principal/context
+    object identity (sharing one memo across principals, contexts or resolver
+    instances is safe by construction); **data errors are never read as
+    answers** — corrupt tuple/reverse documents throw `KerberosCodecError`
+    and a caveat whose condition throws raises `KerberosRelationsError`
+    (silently treating them as empty/not-matched would widen access in
+    exclusion subtract positions); exclusion in `lookupSubjects` no longer
+    mutates the memoized base set; subject-relation refs must reference
+    relations (permissions rejected at compile — keeps `check` and
+    `lookupResources` consistent); `|` is a reserved name character
+    (admission-key delimiter); compiled refs/rewrite nodes are frozen and
+    schema introspection getters return copies; `list()` validates its
+    arguments through the configured backend; object-form resource/principal
+    ids are sanitized (no `:`/`#`, no literal `*` principal id); caveats
+    always receive a copied context; argument errors are recorded on
+    telemetry spans; `lookupSubjects` omits concrete subjects covered by an
+    unexcluded wildcard.
 - **`onError: 'throw' | 'deny'` option** (default `'throw'`) — error semantics
   are no longer coupled to logger presence. Malformed arguments always throw
   the new typed `KerberosValidationError` regardless of this option.
@@ -91,6 +109,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EFFECT_DENY`) without failing the batch.
 - Scope search chains are memoized per instance (bounded); role-policy memo
   keys are computed once per evaluation instead of per inheritance node; the
+  rule `actions`/`allowActions` are precompiled into non-enumerable Sets at
+  policy construction (O(1) hot-path membership instead of repeated
+  `includes` scans, invisible in serialized shapes); the
   response effect map is built directly instead of double-allocating via
   `Object.fromEntries`.
 - Internal evaluation now always works with canonical effect strings —

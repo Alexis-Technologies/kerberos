@@ -6,14 +6,17 @@ const { KerberosRelationsError } = require('../errors.js');
 // Characters reserved by the tuple/reference grammar. Names (definition,
 // relation, permission, caveat) must never contain them, so string references
 // like `document:readme#viewer@user:emilia` always parse unambiguously.
-const RESERVED_NAME_CHARS = /[\s:#@*]/;
+// `|` is reserved too: it is the field delimiter of admission keys
+// (`buildAdmissionKey`) and arrow-edge keys — allowing it in names would make
+// those encodings ambiguous ((`a`,`b|c`) vs (`a|b`,`c`) collide).
+const RESERVED_NAME_CHARS = /[\s:#@*|]/;
 
 const SUBJECT_WILDCARD_ID = '*';
 
 function assertName(kind, name) {
   if (typeof name !== 'string' || !name.length || RESERVED_NAME_CHARS.test(name)) {
     throw new KerberosRelationsError(
-      `Invalid ${kind} name "${name}" — names must be non-empty and must not contain whitespace, ":", "#", "@" or "*"`,
+      `Invalid ${kind} name "${name}" — names must be non-empty and must not contain whitespace, ":", "#", "@", "*" or "|"`,
     );
   }
   return name;
@@ -32,6 +35,20 @@ function assertName(kind, name) {
  */
 function buildAdmissionKey(type, relation, wildcard, caveat) {
   return `${type}|${relation ?? ''}|${wildcard ? '*' : ''}|${caveat ?? ''}`;
+}
+
+// Deep-freezes a compiled rewrite node (children/base/subtract arrays included).
+function freezeRewriteNode(node) {
+  if (node.children) {
+    for (const child of node.children) freezeRewriteNode(child);
+    Object.freeze(node.children);
+  }
+  if (node.base) freezeRewriteNode(node.base);
+  if (node.subtract) {
+    for (const child of node.subtract) freezeRewriteNode(child);
+    Object.freeze(node.subtract);
+  }
+  return Object.freeze(node);
 }
 
 /**
@@ -218,12 +235,19 @@ class RelationSchema {
     return this.#shape;
   }
 
+  // Introspection getters return defensive copies: the compiled schema is an
+  // authorization integrity boundary — handing out the live Maps would let
+  // post-construction mutation bypass every fail-fast compile check.
   get definitions() {
-    return this.#definitions;
+    const copy = new Map();
+    for (const [type, definition] of this.#definitions) {
+      copy.set(type, { relations: new Map(definition.relations), permissions: new Map(definition.permissions) });
+    }
+    return copy;
   }
 
   get caveats() {
-    return this.#caveats;
+    return new Map(this.#caveats);
   }
 
   hasDefinition(type) {
@@ -336,16 +360,20 @@ class RelationSchema {
         const normalizedRefs = [];
         const admission = new Set();
         for (const ref of refs) {
-          const normalized = this.#normalizeSubjectTypeRef(ref, `${type}#${name}`);
+          // Refs and rewrite nodes are frozen at compile time — the compiled
+          // schema is an integrity boundary and must stay immutable. (Freezing
+          // a Set does not disable .add, so the admission Set is documented
+          // read-only instead.)
+          const normalized = Object.freeze(this.#normalizeSubjectTypeRef(ref, `${type}#${name}`));
           normalizedRefs.push(normalized);
           admission.add(
             buildAdmissionKey(normalized.type, normalized.relation, normalized.wildcard, normalized.caveat),
           );
         }
-        compiled.relations.set(name, { refs: normalizedRefs, admission });
+        compiled.relations.set(name, { refs: Object.freeze(normalizedRefs), admission });
       }
       for (const [name, expr] of compiled.permissions) {
-        compiled.permissions.set(name, this.#compilePermissionExpr(type, name, expr));
+        compiled.permissions.set(name, freezeRewriteNode(this.#compilePermissionExpr(type, name, expr)));
       }
     }
   }
@@ -387,8 +415,20 @@ class RelationSchema {
     if (!this.#definitions.has(type)) {
       throw new KerberosRelationsError(`Relation "${where}" references unknown definition "${type}"`);
     }
-    if (relation !== null && !this.isCheckable(type, relation)) {
-      throw new KerberosRelationsError(`Relation "${where}" references unknown subject relation "${type}#${relation}"`);
+    if (relation !== null) {
+      // Subject relations must reference RELATIONS, never permissions: the
+      // reverse index / subject-closure BFS walks stored tuples only and
+      // cannot expand a computed permission — admitting one here would make
+      // check() and lookupResources() disagree (silent false negatives).
+      const target = this.#definitions.get(type);
+      if (!target.relations.has(relation)) {
+        const hint = target.permissions.has(relation)
+          ? ' — subject relations must reference a relation, not a permission'
+          : '';
+        throw new KerberosRelationsError(
+          `Relation "${where}" references unknown subject relation "${type}#${relation}"${hint}`,
+        );
+      }
     }
     if (caveat !== null && !this.#caveats.has(caveat)) {
       throw new KerberosRelationsError(`Relation "${where}" references unknown caveat "${caveat}"`);
@@ -410,6 +450,12 @@ class RelationSchema {
     const where = `${type}#${permName}`;
 
     if (typeof expr === 'string') {
+      if (expr === permName) {
+        // Direct self-reference can never terminate — it would only hit the
+        // runtime depth guard. (Indirect cycles through other permissions are
+        // still only caught at runtime, like in SpiceDB.)
+        throw new KerberosRelationsError(`Permission "${where}" directly references itself`);
+      }
       if (!this.isCheckable(type, expr)) {
         throw new KerberosRelationsError(`Permission "${where}" references unknown relation or permission "${expr}"`);
       }

@@ -41,14 +41,15 @@ class RolePolicy {
     if (this.#shape.rolePolicy.rules?.length) {
       const rules = [];
       for (const rule of this.#shape.rolePolicy.rules) {
-        rules.push({
+        const parsedRule = {
           ...rule,
           condition: RolePolicy.parseConditions(rule.condition, options),
           output: RolePolicy.parseOutputs(rule.output, options),
-          // See ResourcePolicy's `actionsSet` — same rationale: static per
-          // policy, scanned on every check() call.
-          allowActionsSet: new Set(rule.allowActions),
-        });
+        };
+        // See ResourcePolicy's `actionsSet` — same rationale (O(1) hot-path
+        // lookups), non-enumerable so it never leaks into serialized shapes.
+        Object.defineProperty(parsedRule, 'allowActionsSet', { value: new Set(rule.allowActions) });
+        rules.push(parsedRule);
       }
       this.#shape.rolePolicy.rules = rules;
     }

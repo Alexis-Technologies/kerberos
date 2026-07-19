@@ -10,7 +10,7 @@ const { RelationsJsonSchemas, RelationsTypeBoxSchemas, RelationsZodSchemas } = r
 const { createCacheReader } = require('../caching/cache.js');
 const { createLoggerWriter } = require('../logging.js');
 const { createTelemetryWriter } = require('../telemetry.js');
-const { KerberosRelationsError } = require('../errors.js');
+const { KerberosCodecError, KerberosRelationsError } = require('../errors.js');
 const { resolveValidationAdapter } = require('../validation');
 // Platform runtime: bundlers swap this for `./runtime/browser.js` via the
 // package.json `browser` field map when targeting the browser.
@@ -50,6 +50,8 @@ function subjectAdmissionKey(subject, caveat) {
   const isWildcard = subject.relation === null && subject.id === SUBJECT_WILDCARD_ID;
   return buildAdmissionKey(subject.type, subject.relation, isWildcard, caveat ? caveat.name : null);
 }
+
+const RESERVED_REF_CHARS = /[\s:#@*|]/;
 
 // 'user:emilia' | { subject, caveat? } → { subject, caveat }
 function parseDocumentEntry(raw) {
@@ -121,6 +123,13 @@ async function settleAll(promises) {
 
 function emptySubjectSet() {
   return { concrete: new Map(), wildcards: new Map() };
+}
+
+function cloneSubjectSet(set) {
+  const clone = emptySubjectSet();
+  for (const [type, ids] of set.concrete) clone.concrete.set(type, new Set(ids));
+  for (const [type, exclusions] of set.wildcards) clone.wildcards.set(type, new Set(exclusions));
+  return clone;
 }
 
 function addConcrete(set, type, id) {
@@ -228,6 +237,11 @@ function subtractSubjectSets(target, other) {
  * public call + `kerberos.relations.checks` / `kerberos.cache.requests`
  * metrics), guarded so telemetry can never affect resolution.
  */
+// Monotonic id per resolver instance — part of the decision-memo scope key so
+// one caller-provided memo Map can never leak decisions across two resolvers
+// (e.g. two tenants with different schemas but identical type/name strings).
+let resolverSeq = 0;
+
 class RelationResolver {
   /** @type {RelationSchema} */
   #schema;
@@ -239,6 +253,31 @@ class RelationResolver {
   #telemetry;
 
   #includeIdentity = true;
+
+  // Decision-memo scoping (see #createSession): caveat outcomes depend on the
+  // principal and check-time context, so `check|`/`lr|` memo entries are keyed
+  // by identity tokens of the exact principal/context object references. Same
+  // reference → same token → full sharing (the engine reuses one principal
+  // object across a whole checkResources batch); different references →
+  // isolated entries instead of stale reuse.
+  #resolverToken = (resolverSeq += 1);
+
+  // Precomputed outer-memo key for this resolver's shared inner map.
+  #sharedKey = `@@r${this.#resolverToken}`;
+
+  // One-slot cache for the decisions key: the engine reuses the same
+  // principal object (and no context) across every call of a batch, so a
+  // reference-equality hit replaces the token lookups and template build.
+  #lastPrincipal = undefined;
+
+  #lastContext = undefined;
+
+  #lastDecisionsKey = '';
+
+  /** @type {WeakMap<object, number>} */
+  #identityTokens = new WeakMap();
+
+  #identitySeq = 0;
 
   #limits;
 
@@ -261,10 +300,16 @@ class RelationResolver {
   // structure; session memos are request-scoped Maps owned by the caller.
   #reachabilityMemo = new Map();
 
+  // Kinds validated once per resolver (bounded by the schema's type count) so
+  // the hot object-form path skips the reserved-char regex after first sight.
+  #validKinds = new Set();
+
   // Argument validators are resolved ONCE here (mirroring Kerberos'
   // constructor-precompiled validators) instead of re-resolving the backend on
   // every public call.
   #checkArgsValidator = null;
+
+  #listArgsValidator = null;
 
   #lookupSubjectsArgsValidator = null;
 
@@ -321,6 +366,14 @@ class RelationResolver {
       buildJson: () => RelationsJsonSchemas.buildCheckArgs(),
       buildTypeBox: (t) => RelationsTypeBoxSchemas.buildCheckArgs(t),
       buildZod: (zed) => RelationsZodSchemas.buildCheckArgs(zed),
+    });
+    this.#listArgsValidator = resolveValidationAdapter({
+      z,
+      ajv,
+      typebox,
+      buildJson: () => RelationsJsonSchemas.buildListArgs(),
+      buildTypeBox: (t) => RelationsTypeBoxSchemas.buildListArgs(t),
+      buildZod: (zed) => RelationsZodSchemas.buildListArgs(zed),
     });
     this.#lookupSubjectsArgsValidator = resolveValidationAdapter({
       z,
@@ -435,7 +488,11 @@ class RelationResolver {
           waves.push(this.#collectRewriteSubjects(subtracted, resource, session, depth));
         }
         const collected = await settleAll(waves);
-        const result = collected[0];
+        // The base may be an object stored in the session memo (`subjects|…`);
+        // subtractSubjectSets mutates its target in place, so subtract from a
+        // CLONE — otherwise later lookups reusing the memo would read a
+        // corrupted base set.
+        const result = cloneSubjectSet(collected[0]);
         for (let i = 1; i < collected.length; i++) subtractSubjectSets(result, collected[i]);
         return result;
       },
@@ -507,16 +564,18 @@ class RelationResolver {
    * @returns {Promise<boolean>}
    */
   async check(args, opts = {}) {
-    if (!args || typeof args !== 'object') throw new KerberosRelationsError('check requires an arguments object');
-    const parsed = this.#parseArgs(this.#checkArgsValidator, 'Invalid check arguments', args);
-
-    const name = resolveName(parsed, 'check');
-    const resource = this.#normalizeResource(parsed.resource);
-    const subject = this.#normalizeSubject(parsed);
-    this.#assertCheckable(resource.type, name, 'check');
-
+    // Validation runs INSIDE the instrumented scope so argument errors get an
+    // error span and a duration sample too.
     return this.#runInstrumented('RelationsCheck', async (otel) => {
-      const session = createSession(parsed, opts);
+      if (!args || typeof args !== 'object') throw new KerberosRelationsError('check requires an arguments object');
+      const parsed = this.#parseArgs(this.#checkArgsValidator, 'Invalid check arguments', args);
+
+      const name = resolveName(parsed, 'check');
+      const resource = this.#normalizeResource(parsed.resource);
+      const subject = this.#normalizeSubject(parsed);
+      this.#assertCheckable(resource.type, name, 'check');
+
+      const session = this.#createSession(parsed, opts);
       const allowed = await this.#checkInternal(resource, name, subject, session, this.#limits.maxDepth);
       this.#telemetry.recordRelationCheck(allowed);
       this.#setSpanAttributes(otel, resource.type, name, {
@@ -538,18 +597,19 @@ class RelationResolver {
    * @returns {Promise<Set<string>>}
    */
   async list(args, opts = {}) {
-    if (!args || typeof args !== 'object') throw new KerberosRelationsError('list requires an arguments object');
-    const names = args.relations;
-    if (!Array.isArray(names) || !names.length) {
-      throw new KerberosRelationsError('list requires a non-empty "relations" array');
-    }
-
-    const resource = this.#normalizeResource(args.resource);
-    const subject = this.#normalizeSubject(args);
-    for (const name of names) this.#assertCheckable(resource.type, name, 'list');
-
     return this.#runInstrumented('RelationsList', async (otel) => {
-      const session = createSession(args, opts);
+      if (!args || typeof args !== 'object') throw new KerberosRelationsError('list requires an arguments object');
+      const parsed = this.#parseArgs(this.#listArgsValidator, 'Invalid list arguments', args);
+      const names = parsed.relations;
+      if (!Array.isArray(names) || !names.length) {
+        throw new KerberosRelationsError('list requires a non-empty "relations" array');
+      }
+
+      const resource = this.#normalizeResource(parsed.resource);
+      const subject = this.#normalizeSubject(parsed);
+      for (const name of names) this.#assertCheckable(resource.type, name, 'list');
+
+      const session = this.#createSession(parsed, opts);
       const granted = new Set();
       for (const name of names) {
         const allowed = await this.#checkInternal(resource, name, subject, session, this.#limits.maxDepth);
@@ -577,24 +637,30 @@ class RelationResolver {
    * @returns {Promise<Array<string | { subject: string, exclusions: string[] }>>}
    */
   async lookupSubjects(args, opts = {}) {
-    if (!args || typeof args !== 'object') {
-      throw new KerberosRelationsError('lookupSubjects requires an arguments object');
-    }
-    const parsed = this.#parseArgs(this.#lookupSubjectsArgsValidator, 'Invalid lookupSubjects arguments', args);
-
-    const name = resolveName(parsed, 'lookupSubjects');
-    const resource = this.#normalizeResource(parsed.resource);
-    this.#assertCheckable(resource.type, name, 'lookupSubjects');
-
     return this.#runInstrumented('RelationsLookupSubjects', async (otel) => {
-      const session = createSession(parsed, opts);
+      if (!args || typeof args !== 'object') {
+        throw new KerberosRelationsError('lookupSubjects requires an arguments object');
+      }
+      const parsed = this.#parseArgs(this.#lookupSubjectsArgsValidator, 'Invalid lookupSubjects arguments', args);
+
+      const name = resolveName(parsed, 'lookupSubjects');
+      const resource = this.#normalizeResource(parsed.resource);
+      this.#assertCheckable(resource.type, name, 'lookupSubjects');
+
+      const session = this.#createSession(parsed, opts);
       const collected = await this.#collectSubjectsInternal(resource, name, session, this.#limits.maxDepth);
 
       const subjectTypeFilter = typeof parsed.subjectType === 'string' ? parsed.subjectType : null;
       const results = [];
       for (const [type, ids] of collected.concrete) {
         if (subjectTypeFilter && type !== subjectTypeFilter) continue;
-        for (const id of ids) results.push(`${type}:${id}`);
+        const exclusions = collected.wildcards.get(type);
+        for (const id of ids) {
+          // A concrete subject already covered by an unexcluded wildcard of
+          // the same type is redundant in the result.
+          if (exclusions !== undefined && !exclusions.has(id)) continue;
+          results.push(`${type}:${id}`);
+        }
       }
       for (const [type, exclusions] of collected.wildcards) {
         if (subjectTypeFilter && type !== subjectTypeFilter) continue;
@@ -627,26 +693,26 @@ class RelationResolver {
    * @returns {Promise<string[]>}
    */
   async lookupResources(args, opts = {}) {
-    if (!args || typeof args !== 'object') {
-      throw new KerberosRelationsError('lookupResources requires an arguments object');
-    }
-    const parsed = this.#parseArgs(this.#lookupResourcesArgsValidator, 'Invalid lookupResources arguments', args);
-
-    const name = resolveName(parsed, 'lookupResources');
-    const subject = this.#normalizeSubject(parsed);
-    const resourceType = parsed.resourceType;
-    this.#assertCheckable(resourceType, name, 'lookupResources');
-
-    // Cache-backed tuples make the static reverse index incomplete: the
-    // backend must opt in by maintaining `rel:rev:<subject>` documents.
-    if (this.#reader.enabled && !this.#reverseIndex) {
-      throw new KerberosRelationsError(
-        'lookupResources over cache-backed tuples requires reverseIndex: true and backend-maintained "rel:rev:<subject>" reverse documents',
-      );
-    }
-
     return this.#runInstrumented('RelationsLookupResources', async (otel) => {
-      const session = createSession(parsed, opts);
+      if (!args || typeof args !== 'object') {
+        throw new KerberosRelationsError('lookupResources requires an arguments object');
+      }
+      const parsed = this.#parseArgs(this.#lookupResourcesArgsValidator, 'Invalid lookupResources arguments', args);
+
+      const name = resolveName(parsed, 'lookupResources');
+      const subject = this.#normalizeSubject(parsed);
+      const resourceType = parsed.resourceType;
+      this.#assertCheckable(resourceType, name, 'lookupResources');
+
+      // Cache-backed tuples make the static reverse index incomplete: the
+      // backend must opt in by maintaining `rel:rev:<subject>` documents.
+      if (this.#reader.enabled && !this.#reverseIndex) {
+        throw new KerberosRelationsError(
+          'lookupResources over cache-backed tuples requires reverseIndex: true and backend-maintained "rel:rev:<subject>" reverse documents',
+        );
+      }
+
+      const session = this.#createSession(parsed, opts);
       const ids = await this.#lookupResourcesInternal(subject, resourceType, name, session, this.#limits.maxDepth);
       const sortedIds = [...ids].sort();
       const limitedIds =
@@ -717,12 +783,37 @@ class RelationResolver {
     }
   }
 
+  // Object-form resources bypass the string-reference grammar, so their parts
+  // are checked here: a `#`/`:` inside an id (or reserved chars in a kind)
+  // would make memo keys ambiguous.
+  #checkedObjectRef(ref, label) {
+    if (!this.#validKinds.has(ref.type)) {
+      if (RESERVED_REF_CHARS.test(ref.type)) {
+        throw new KerberosRelationsError(
+          `Invalid ${label} kind "${ref.type}" — kinds must not contain whitespace, ":", "#", "@", "*" or "|"`,
+        );
+      }
+      this.#validKinds.add(ref.type);
+    }
+    const id = ref.id;
+    if (id.indexOf(':') !== -1 || id.indexOf('#') !== -1) {
+      throw new KerberosRelationsError(`Invalid ${label} id "${id}" — ids must not contain ":" or "#"`);
+    }
+    return ref;
+  }
+
   #normalizeResource(input) {
-    if (typeof input === 'string') return parseObjectRef(input, 'resource');
+    if (typeof input === 'string') return this.#checkedObjectRef(parseObjectRef(input, 'resource'), 'resource');
     if (input && typeof input === 'object') {
-      if (this.#mapResource) return parseObjectRef(this.#mapResource(input), 'resource');
-      if (typeof input.kind === 'string' && typeof input.id === 'string') return { type: input.kind, id: input.id };
-      if (typeof input.type === 'string' && typeof input.id === 'string') return { type: input.type, id: input.id };
+      if (this.#mapResource) {
+        return this.#checkedObjectRef(parseObjectRef(this.#mapResource(input), 'resource'), 'resource');
+      }
+      if (typeof input.kind === 'string' && typeof input.id === 'string') {
+        return this.#checkedObjectRef({ type: input.kind, id: input.id }, 'resource');
+      }
+      if (typeof input.type === 'string' && typeof input.id === 'string') {
+        return this.#checkedObjectRef({ type: input.type, id: input.id }, 'resource');
+      }
     }
     throw new KerberosRelationsError('A resource is required — pass a "type:id" string or a { kind, id } object');
   }
@@ -732,7 +823,14 @@ class RelationResolver {
     if (args.principal && typeof args.principal === 'object') {
       if (this.#mapPrincipal) return parseSubjectRef(this.#mapPrincipal(args.principal));
       if (typeof args.principal.id === 'string') {
-        return { type: this.#subjectType, id: args.principal.id, relation: null };
+        const id = args.principal.id;
+        // Reference-grammar characters in a principal id would make memo keys
+        // ambiguous, and a literal '*' id would silently match wildcard
+        // tuples — reject instead of guessing.
+        if (id === SUBJECT_WILDCARD_ID || id.indexOf(':') !== -1 || id.indexOf('#') !== -1) {
+          throw new KerberosRelationsError(`Invalid principal id "${id}" — ids must not be "*" or contain ":" / "#"`);
+        }
+        return { type: this.#subjectType, id, relation: null };
       }
     }
     throw new KerberosRelationsError('A subject is required — pass a "subject" string or a "principal" object');
@@ -742,6 +840,70 @@ class RelationResolver {
     if (!this.#schema.isCheckable(resourceType, name)) {
       throw new KerberosRelationsError(`${label}: "${name}" is not a relation or permission of "${resourceType}"`);
     }
+  }
+
+  #identityToken(value) {
+    if (!value) return 0;
+    let token = this.#identityTokens.get(value);
+    if (!token) {
+      token = this.#identitySeq += 1;
+      this.#identityTokens.set(value, token);
+    }
+    return token;
+  }
+
+  // The caller-provided memo is a two-level structure: the outer Map is keyed
+  // by SCOPE strings (resolved once per session, never per subproblem) and
+  // holds inner Maps with short unscoped keys.
+  //
+  // - `session.shared` (scope = resolver token) holds IO reads and
+  //   caveat-independent walks (`doc|`/`rev|`/`closure|`/`subjects|`): one
+  //   memo Map shared with a DIFFERENT resolver instance can never leak its
+  //   documents.
+  // - `session.decisions` (scope = resolver + principal/context identity
+  //   tokens) holds `check|`/`lr|` results, whose caveat outcomes depend on
+  //   the principal and check-time context.
+  //
+  // Same object references → same identity tokens → full sharing (the engine
+  // reuses one principal object and one memo across a whole checkResources
+  // batch); different references → isolated inner Maps instead of stale reuse.
+  #createSession(args, opts) {
+    const principal = args.principal && typeof args.principal === 'object' ? args.principal : null;
+    const context = args.context && typeof args.context === 'object' ? args.context : null;
+
+    const memo = opts?.memo;
+    if (!(memo instanceof Map)) {
+      // Private session (no caller-provided memo): nothing can be shared
+      // across calls, so skip the scope bookkeeping entirely — hot path for
+      // standalone one-shot checks. One Map serves both roles: the namespaced
+      // key prefixes (`check|`/`doc|`/...) already keep entries apart, and a
+      // private session has exactly one resolver/principal/context.
+      const single = new Map();
+      return { shared: single, decisions: single, principal, context };
+    }
+
+    let shared = memo.get(this.#sharedKey);
+    if (!shared) {
+      shared = new Map();
+      memo.set(this.#sharedKey, shared);
+    }
+
+    let decisionsKey;
+    if (principal === this.#lastPrincipal && context === this.#lastContext) {
+      decisionsKey = this.#lastDecisionsKey;
+    } else {
+      decisionsKey = `${this.#sharedKey}:p${this.#identityToken(principal)}:c${this.#identityToken(context)}`;
+      this.#lastPrincipal = principal;
+      this.#lastContext = context;
+      this.#lastDecisionsKey = decisionsKey;
+    }
+    let decisions = memo.get(decisionsKey);
+    if (!decisions) {
+      decisions = new Map();
+      memo.set(decisionsKey, decisions);
+    }
+
+    return { shared, decisions, principal, context };
   }
 
   // -------------------------------------------------------------------------
@@ -841,14 +1003,17 @@ class RelationResolver {
       this.#telemetry.recordCacheRequest('hit', CACHE_KIND_RELATION);
       return entries;
     } catch (error) {
-      // A corrupt document is deterministic (retrying cannot help) — treat it
-      // as empty instead of failing the check.
+      // A corrupt document THROWS (typed) instead of resolving as empty: in
+      // the subtract position of an exclusion an "empty" read would silently
+      // WIDEN access (a real editor gains read_only when the editor document
+      // fails to parse). Errors are never read as an answer — they propagate
+      // per the engine's onError semantics. Genuine absence (miss) stays empty.
       this.#telemetry.recordCacheRequest('error', CACHE_KIND_RELATION);
       this.#logError(
         { event: 'Relations.corruptDocument', key, errorMessage: error.message },
         `Kerberos.js relations: corrupt relation document for "${key}"`,
       );
-      return EMPTY_ENTRIES;
+      throw new KerberosCodecError(`Corrupt relation document for "${key}": ${error.message}`, { cause: error });
     }
   }
 
@@ -864,12 +1029,12 @@ class RelationResolver {
   // would deadlock on cyclic data instead of hitting the depth guard.)
   #readRelationEntries(type, id, relation, session) {
     const docKey = `doc|${type}:${id}#${relation}`;
-    let promise = session.memo.get(docKey);
+    let promise = session.shared.get(docKey);
     if (!promise) {
       const staticEntries = this.#forwardIndex.get(`${type}:${id}#${relation}`);
       if (staticEntries) promise = Promise.resolve(staticEntries);
       else promise = this.#reader.enabled ? this.#readCachedEntries(type, id, relation) : EMPTY_ENTRIES_PROMISE;
-      session.memo.set(docKey, promise);
+      session.shared.set(docKey, promise);
     }
     return promise;
   }
@@ -920,22 +1085,24 @@ class RelationResolver {
       for (const entry of parsed) entries.push(entry);
       return entries;
     } catch (error) {
+      // Same rule as forward documents: corrupt data throws instead of
+      // silently narrowing the reverse index (which would drop candidates).
       this.#telemetry.recordCacheRequest('error', CACHE_KIND_RELATION);
       this.#logError(
         { event: 'Relations.corruptDocument', key, errorMessage: error.message },
         `Kerberos.js relations: corrupt reverse document for "${key}"`,
       );
-      return staticEntries;
+      throw new KerberosCodecError(`Corrupt reverse document for "${key}": ${error.message}`, { cause: error });
     }
   }
 
   // Promise-memoized like forward documents (reverse reads never recurse).
   #readReverseEntries(subjectKey, session) {
     const memoKey = `rev|${subjectKey}`;
-    let promise = session.memo.get(memoKey);
+    let promise = session.shared.get(memoKey);
     if (!promise) {
       promise = this.#loadReverseEntries(subjectKey);
-      session.memo.set(memoKey, promise);
+      session.shared.set(memoKey, promise);
     }
     return promise;
   }
@@ -951,22 +1118,31 @@ class RelationResolver {
     const condition = this.#schema.getCaveat(caveat.name);
     if (!condition) return false;
 
-    // Merge fast paths: allocate only when both sides carry context.
+    // The condition always receives a COPY (or the shared frozen empty
+    // object): a mutating raw-function caveat must never poison the stored
+    // tuple context or the caller's context object.
     const written = caveat.context;
     const checkTime = session.context;
     let ctx;
     if (written && checkTime) ctx = { ...checkTime, ...written };
-    else ctx = written ?? checkTime ?? EMPTY_CONTEXT;
+    else if (written) ctx = { ...written };
+    else if (checkTime) ctx = { ...checkTime };
+    else ctx = EMPTY_CONTEXT;
 
     try {
       return condition.isFulfilled({ P: session.principal, ctx, context: ctx }) === true;
     } catch (error) {
-      // A throwing caveat fails closed — the tuple simply does not match.
+      // A THROWING caveat is an evaluation error, not a "no" — treating it as
+      // not-matched would widen access in exclusion subtract positions. It
+      // propagates (typed) per the engine's onError semantics; a caveat that
+      // EVALUATES to false still simply does not match.
       this.#logError(
         { event: 'Relations.caveatError', caveat: caveat.name, errorMessage: error.message },
-        `Kerberos.js relations: caveat "${caveat.name}" threw and was treated as not matched`,
+        `Kerberos.js relations: caveat "${caveat.name}" threw during evaluation`,
       );
-      return false;
+      throw new KerberosRelationsError(`Caveat "${caveat.name}" threw during evaluation: ${error.message}`, {
+        cause: error,
+      });
     }
   }
 
@@ -1031,8 +1207,11 @@ class RelationResolver {
     // Identity: a userset subject trivially contains itself.
     if (subject.relation === name && subject.type === resource.type && subject.id === resource.id) return true;
 
+    // Decisions live in the principal/context-scoped inner map (see
+    // #createSession): caveat outcomes depend on them, so a shared memo must
+    // never replay a decision computed under a different principal or context.
     const key = `check|${resource.type}:${resource.id}#${name}@${subjectToString(subject)}`;
-    if (session.memo.has(key)) return session.memo.get(key);
+    if (session.decisions.has(key)) return session.decisions.get(key);
 
     let result;
     if (this.#schema.getRelationSubjects(resource.type, name)) {
@@ -1043,7 +1222,7 @@ class RelationResolver {
       result = node ? await this.#evalRewrite(node, resource, subject, session, depth) : false;
     }
 
-    session.memo.set(key, result);
+    session.decisions.set(key, result);
     return result;
   }
 
@@ -1100,7 +1279,7 @@ class RelationResolver {
   // candidates found through it must then be verified with check().
   #subjectClosure(subject, session) {
     const memoKey = `closure|${subjectToString(subject)}`;
-    let promise = session.memo.get(memoKey);
+    let promise = session.shared.get(memoKey);
     if (promise) return promise;
 
     promise = (async () => {
@@ -1135,7 +1314,7 @@ class RelationResolver {
       }
       return { members, caveated };
     })();
-    session.memo.set(memoKey, promise);
+    session.shared.set(memoKey, promise);
     return promise;
   }
 
@@ -1146,8 +1325,9 @@ class RelationResolver {
       );
     }
 
+    // Lives with `check|` decisions — verified candidate sets embed caveat outcomes.
     const memoKey = `lr|${type}#${name}@${subjectToString(subject)}`;
-    if (session.memo.has(memoKey)) return session.memo.get(memoKey);
+    if (session.decisions.has(memoKey)) return session.decisions.get(memoKey);
 
     const analysis = this.#analyzeReachability(type, name);
     const closure = await this.#subjectClosure(subject, session);
@@ -1246,7 +1426,7 @@ class RelationResolver {
       }
     }
 
-    session.memo.set(memoKey, ids);
+    session.decisions.set(memoKey, ids);
     return ids;
   }
 
@@ -1300,7 +1480,7 @@ class RelationResolver {
     // Value-memo (completed results only) — an in-flight promise here would
     // deadlock on cyclic data instead of hitting the depth guard.
     const memoKey = `subjects|${resource.type}:${resource.id}#${name}`;
-    if (session.memo.has(memoKey)) return session.memo.get(memoKey);
+    if (session.shared.has(memoKey)) return session.shared.get(memoKey);
 
     let result;
     if (this.#schema.getRelationSubjects(resource.type, name)) {
@@ -1310,7 +1490,7 @@ class RelationResolver {
       result = node ? await this.#collectRewriteSubjects(node, resource, session, depth) : emptySubjectSet();
     }
 
-    session.memo.set(memoKey, result);
+    session.shared.set(memoKey, result);
     return result;
   }
 }
@@ -1324,14 +1504,6 @@ function resolveName(args, label) {
     throw new KerberosRelationsError(`${label} received both "relation" and "permission" with different values`);
   }
   return relation;
-}
-
-function createSession(args, opts) {
-  return {
-    memo: opts?.memo instanceof Map ? opts.memo : new Map(),
-    principal: args.principal && typeof args.principal === 'object' ? args.principal : null,
-    context: args.context && typeof args.context === 'object' ? args.context : null,
-  };
 }
 
 function compareSubjectResults(left, right) {

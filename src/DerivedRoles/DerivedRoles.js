@@ -52,7 +52,12 @@ class DerivedRoles {
         if (!def.condition && !def.relation) {
           throw new Error(`Derived role definition "${def.name}" must declare a "condition" or a "relation"`);
         }
-        defs.push({ ...def, condition: def.condition ? DerivedRoles.parseConditions(def.condition, options) : null });
+        // Never materialize an absent condition (e.g. as null): shapes may be
+        // reused across instances, and a written `condition: null` would fail
+        // the optional-field validation on the next construction.
+        const parsedDef = { ...def };
+        if (def.condition) parsedDef.condition = DerivedRoles.parseConditions(def.condition, options);
+        defs.push(parsedDef);
       }
       this.#shape.definitions = defs;
     }

@@ -1,7 +1,7 @@
 {
   "name": "@alexify/kerberos",
   "version": "2.0.1",
-  "description": "Fast and low overhead authorization framework for JavaScript runtime",
+  "description": "Fast, zero-dependency in-process authorization engine for Node.js and browsers — ABAC, RBAC and ReBAC (Zanzibar-style relations) with Cerbos-like policies, caveats, OpenTelemetry and pluggable validation/caching",
   "main": "index.js",
   "browser": {
     "./index.js": "./browser.js",
@@ -28,7 +28,7 @@
   },
   "scripts": {
     "test": "node --test test/*.test.js",
-    "test:coverage": "c8 --include 'src/**' --reporter text --reporter lcov node --test test/*.test.js",
+    "test:coverage": "c8 --all --include 'src/**' --check-coverage --lines 90 --statements 90 --branches 90 --functions 90 --reporter text --reporter lcov node --test test/*.test.js",
     "test:types": "tsd",
     "bench": "node bench/bench.js",
     "lint": "oxlint src test",
@@ -45,7 +45,6 @@
   "keywords": [
     "kerberos",
     "authorization",
-    "authentication",
     "security",
     "auth",
     "policy",
@@ -53,7 +52,18 @@
     "cerbos",
     "framework",
     "schema",
-    "web"
+    "web",
+    "abac",
+    "rbac",
+    "rebac",
+    "zanzibar",
+    "spicedb",
+    "openfga",
+    "fine-grained-authorization",
+    "permissions",
+    "policy-as-code",
+    "derived-roles",
+    "opentelemetry"
   ],
   "author": "Alex Dolid <dolid.sasha@gmail.com>",
   "license": "MIT",
@@ -87,10 +97,6 @@
   "publishConfig": {
     "access": "public"
   },
-  "pre-commit": [
-    "lint",
-    "test"
-  ],
   "packageManager": "pnpm@11.5.0",
   "files": [
     "index.js",
@@ -104,6 +110,7 @@
     "LICENSE",
     "README.md",
     "CHANGELOG.md",
+    "SECURITY.md",
     "package.json"
   ]
 }

@@ -615,7 +615,9 @@ describe('RelationResolver', () => {
       );
     });
 
-    it('fails closed when a caveat condition throws', async () => {
+    it('surfaces a throwing caveat as a typed error instead of reading it as "not matched"', async () => {
+      // An evaluation ERROR is not a "no": in an exclusion subtract position a
+      // swallowed caveat error would silently WIDEN access.
       const throwing = new RelationResolver({
         schema: {
           relationSchema: {
@@ -635,7 +637,10 @@ describe('RelationResolver', () => {
         tuples: [{ resource: 'doc:d1', relation: 'viewer', subject: 'user:u1', caveat: { name: 'boom' } }],
       });
 
-      assert.equal(await throwing.check({ resource: 'doc:d1', relation: 'viewer', subject: 'user:u1' }), false);
+      await assert.rejects(
+        () => throwing.check({ resource: 'doc:d1', relation: 'viewer', subject: 'user:u1' }),
+        (error) => error instanceof KerberosRelationsError && /Caveat "boom" threw/.test(error.message),
+      );
     });
   });
 
@@ -755,7 +760,11 @@ describe('RelationResolver', () => {
       assert.deepEqual(cache.reads, []);
     });
 
-    it('treats a corrupt document as empty instead of failing the check', async () => {
+    it('surfaces a corrupt document as KerberosCodecError instead of treating it as empty', async () => {
+      // "Corrupt = empty" would silently widen access in exclusion subtract
+      // positions; a data error is never read as an answer. Absence (miss)
+      // still resolves as empty.
+      const { KerberosCodecError } = require('../src/index.js');
       const errors = [];
       const cache = buildCache({
         'rel:document:bad:viewer': { nope: true },
@@ -766,15 +775,14 @@ describe('RelationResolver', () => {
         logger: { debug() {}, error: (entry) => errors.push(entry) },
       });
 
-      assert.equal(
-        await relations.check({ resource: 'document:bad', permission: 'view', subject: 'user:carl' }),
-        false,
+      await assert.rejects(
+        () => relations.check({ resource: 'document:bad', permission: 'view', subject: 'user:carl' }),
+        (error) => error instanceof KerberosCodecError && /Corrupt relation document/.test(error.message),
       );
-      // One unparseable entry poisons the document deterministically — the
-      // whole document resolves as empty (fail-closed).
-      assert.equal(
-        await relations.check({ resource: 'document:partial', permission: 'view', subject: 'user:ok' }),
-        false,
+      // One unparseable entry poisons the whole document deterministically.
+      await assert.rejects(
+        () => relations.check({ resource: 'document:partial', permission: 'view', subject: 'user:ok' }),
+        (error) => error instanceof KerberosCodecError,
       );
       assert.equal(errors.filter((entry) => entry.event === 'Relations.corruptDocument').length, 2);
     });
@@ -1625,5 +1633,494 @@ describe('RelationResolver parallel error propagation', () => {
     assert.deepEqual(saraDocs, ['document:public', 'document:readme']);
     assert.deepEqual(ritaDocs, ['document:public', 'document:readme']);
     assert.ok(subjects.includes('user:sara') && subjects.includes('user:rita'));
+  });
+});
+
+describe('RelationResolver code-review regressions', () => {
+  const { RelationResolver } = require('../src/Relations/index.js');
+  const { KerberosCodecError } = require('../src/index.js');
+
+  describe('decision-memo scoping (R1)', () => {
+    it('never replays a caveated decision for a different principal on a shared memo', async () => {
+      const relations = new RelationResolver({ schema: buildSchemaShape(), tuples: buildStaticTuples() });
+      const memo = new Map();
+
+      // cara is a caveated editor (valid_ip via written context 10.0.0.1).
+      assert.equal(
+        await relations.check(
+          {
+            resource: 'document:readme',
+            permission: 'edit',
+            subject: 'user:cara',
+            principal: { id: 'cara', roles: ['USER'], attr: { ip: '10.0.0.1' } },
+          },
+          { memo },
+        ),
+        true,
+      );
+      // Same memo, different principal object (wrong ip) — must re-evaluate.
+      assert.equal(
+        await relations.check(
+          {
+            resource: 'document:readme',
+            permission: 'edit',
+            subject: 'user:cara',
+            principal: { id: 'cara', roles: ['USER'], attr: { ip: '8.8.8.8' } },
+          },
+          { memo },
+        ),
+        false,
+      );
+    });
+
+    it('never replays decisions across two resolver instances sharing one memo', async () => {
+      const schemaA = {
+        relationSchema: {
+          definitions: { user: {}, doc: { relations: { viewer: ['user'] }, permissions: { view: 'viewer' } } },
+        },
+      };
+      const schemaB = {
+        relationSchema: {
+          definitions: { user: {}, doc: { relations: { viewer: ['user'] }, permissions: { view: 'viewer' } } },
+        },
+      };
+      const tenantA = new RelationResolver({ schema: schemaA, tuples: ['doc:d1#viewer@user:sara'] });
+      const tenantB = new RelationResolver({ schema: schemaB, tuples: [] });
+      const memo = new Map();
+
+      assert.equal(
+        await tenantA.check({ resource: 'doc:d1', permission: 'view', subject: 'user:sara' }, { memo }),
+        true,
+      );
+      // Identical key strings, different tenant — must NOT leak tenant A's decision.
+      assert.equal(
+        await tenantB.check({ resource: 'doc:d1', permission: 'view', subject: 'user:sara' }, { memo }),
+        false,
+      );
+    });
+
+    it('still shares decisions when the same principal object is reused (engine batch pattern)', async () => {
+      let caveatEvaluations = 0;
+      const relations = new RelationResolver({
+        schema: {
+          relationSchema: {
+            caveats: {
+              counted: {
+                match: () => {
+                  caveatEvaluations += 1;
+                  return true;
+                },
+              },
+            },
+            definitions: {
+              user: {},
+              doc: { relations: { viewer: [{ type: 'user', caveat: 'counted' }] }, permissions: { view: 'viewer' } },
+            },
+          },
+        },
+        tuples: [{ resource: 'doc:d1', relation: 'viewer', subject: 'user:sara', caveat: { name: 'counted' } }],
+      });
+      const memo = new Map();
+      const principal = { id: 'sara', roles: ['USER'] };
+
+      assert.equal(
+        await relations.check({ resource: 'doc:d1', permission: 'view', subject: 'user:sara', principal }, { memo }),
+        true,
+      );
+      assert.equal(
+        await relations.check({ resource: 'doc:d1', permission: 'view', subject: 'user:sara', principal }, { memo }),
+        true,
+      );
+      // Same object reference → same identity token → memo hit, one evaluation.
+      assert.equal(caveatEvaluations, 1);
+    });
+  });
+
+  describe('exclusion does not corrupt the memoized base set (R2)', () => {
+    it('keeps the memoized viewer set intact after a subtracting lookup', async () => {
+      const relations = new RelationResolver({
+        schema: {
+          relationSchema: {
+            definitions: {
+              user: {},
+              doc: {
+                relations: { viewer: ['user', 'user:*'], blocked: ['user'] },
+                permissions: {
+                  can_read: { exclude: { base: 'viewer', subtract: ['blocked'] } },
+                  all_viewers: { anyOf: ['viewer'] },
+                },
+              },
+            },
+          },
+        },
+        tuples: ['doc:d1#viewer@user:*', 'doc:d1#blocked@user:anne'],
+      });
+      const memo = new Map();
+
+      assert.deepEqual(await relations.lookupSubjects({ resource: 'doc:d1', permission: 'can_read' }, { memo }), [
+        { subject: 'user:*', exclusions: ['user:anne'] },
+      ]);
+      // The same memo must still hold the UNCORRUPTED viewer set: anne IS a viewer.
+      assert.deepEqual(await relations.lookupSubjects({ resource: 'doc:d1', permission: 'all_viewers' }, { memo }), [
+        'user:*',
+      ]);
+    });
+  });
+
+  describe('permission-typed subject refs are rejected at compile (R3)', () => {
+    it('throws with a hint when a subject relation references a permission', () => {
+      assert.throws(
+        () =>
+          new RelationResolver({
+            schema: {
+              relationSchema: {
+                definitions: {
+                  user: {},
+                  group: { relations: { member: ['user'] }, permissions: { admin: 'member' } },
+                  document: { relations: { viewer: ['user', 'group#admin'] }, permissions: { view: 'viewer' } },
+                },
+              },
+            },
+          }),
+        (error) =>
+          error instanceof KerberosRelationsError &&
+          /subject relations must reference a relation, not a permission/.test(error.message),
+      );
+    });
+  });
+
+  describe('"|" is a reserved name character (R4)', () => {
+    it('rejects names containing the admission-key delimiter', () => {
+      assert.throws(
+        () => new RelationSchema({ relationSchema: { definitions: { 'a|b': {} } } }),
+        /Invalid definition name/,
+      );
+      assert.throws(
+        () =>
+          new RelationSchema({
+            relationSchema: { definitions: { user: {}, doc: { relations: { 'b|c': ['user'] } } } },
+          }),
+        /Invalid relation name/,
+      );
+    });
+  });
+
+  describe('errors are never read as an answer in subtract positions (R6)', () => {
+    it('rejects instead of granting read_only when the editor document is corrupt', async () => {
+      const relations = new RelationResolver({
+        schema: buildSchemaShape(),
+        cache: {
+          async get(key) {
+            if (key === 'rel:document:d1:viewer') return ['user:eve'];
+            if (key === 'rel:document:d1:editor') return { corrupt: true };
+            return undefined;
+          },
+        },
+      });
+
+      // eve IS an editor whose document is corrupt — silently treating it as
+      // empty would grant her read_only (viewer − editor). It must throw.
+      await assert.rejects(
+        () => relations.check({ resource: 'document:d1', permission: 'read_only', subject: 'user:eve' }),
+        (error) => error instanceof KerberosCodecError,
+      );
+    });
+
+    it('rejects instead of widening access when a subtrahend caveat throws', async () => {
+      const relations = new RelationResolver({
+        schema: {
+          relationSchema: {
+            caveats: {
+              boom: {
+                match: () => {
+                  throw new Error('boom');
+                },
+              },
+            },
+            definitions: {
+              user: {},
+              doc: {
+                relations: { viewer: ['user'], blocked: [{ type: 'user', caveat: 'boom' }] },
+                permissions: { can_read: { exclude: { base: 'viewer', subtract: ['blocked'] } } },
+              },
+            },
+          },
+        },
+        tuples: [
+          'doc:d1#viewer@user:eve',
+          { resource: 'doc:d1', relation: 'blocked', subject: 'user:eve', caveat: { name: 'boom' } },
+        ],
+      });
+
+      await assert.rejects(
+        () => relations.check({ resource: 'doc:d1', permission: 'can_read', subject: 'user:eve' }),
+        (error) => error instanceof KerberosRelationsError && /threw during evaluation/.test(error.message),
+      );
+    });
+
+    it('rejects on corrupt reverse documents instead of narrowing the reverse index', async () => {
+      const relations = new RelationResolver({
+        schema: buildSchemaShape(),
+        cache: {
+          async get(key) {
+            if (key === 'rel:rev:user:sara') return { corrupt: true };
+            return undefined;
+          },
+        },
+        reverseIndex: true,
+      });
+
+      await assert.rejects(
+        () => relations.lookupResources({ subject: 'user:sara', permission: 'view', resourceType: 'document' }),
+        (error) => error instanceof KerberosCodecError && /Corrupt reverse document/.test(error.message),
+      );
+    });
+  });
+});
+
+describe('RelationResolver contract hardening', () => {
+  const { RelationResolver } = require('../src/Relations/index.js');
+  const { Effect, Kerberos } = require('../src/index.js');
+
+  it('compiled schema getters return copies and frozen structures (R5)', () => {
+    const schema = new RelationSchema(buildSchemaShape());
+
+    // Mutating the introspection copies must not affect the compiled schema.
+    schema.definitions.get('document').permissions.set('view', { kind: 'ref', name: 'owner' });
+    schema.caveats.delete('valid_ip');
+    assert.equal(schema.getPermissionNode('document', 'view').kind, 'union');
+    assert.ok(schema.getCaveat('valid_ip'));
+
+    // Refs and rewrite nodes are frozen.
+    assert.ok(Object.isFrozen(schema.getRelationSubjects('document', 'viewer')));
+    assert.ok(Object.isFrozen(schema.getRelationSubjects('document', 'viewer')[0]));
+    assert.ok(Object.isFrozen(schema.getPermissionNode('document', 'view')));
+    assert.ok(Object.isFrozen(schema.getPermissionNode('document', 'view').children));
+  });
+
+  it('validates list arguments through a configured backend (M1)', async () => {
+    const { z } = require('zod');
+    const relations = new RelationResolver({ schema: buildSchemaShape(), tuples: buildStaticTuples(), z });
+
+    await assert.rejects(
+      () => relations.list({ resource: 'document:readme', subject: 'user:olga', relations: [42] }),
+      (error) => error instanceof KerberosRelationsError && /Invalid list arguments/.test(error.message),
+    );
+  });
+
+  it('records argument errors on the telemetry span (M2)', async () => {
+    const spans = [];
+    const relations = new RelationResolver({
+      schema: buildSchemaShape(),
+      telemetry: {
+        tracer: {
+          startActiveSpan(name, options, fn) {
+            const span = {
+              name,
+              status: null,
+              exceptions: [],
+              setAttribute() {},
+              addEvent() {},
+              recordException(error) {
+                this.exceptions.push(error);
+              },
+              setStatus(status) {
+                this.status = status;
+              },
+              end() {},
+            };
+            spans.push(span);
+            return fn(span);
+          },
+        },
+      },
+    });
+
+    await assert.rejects(() => relations.check({ resource: 'document:readme', subject: 'user:olga' }));
+    assert.equal(spans.length, 1);
+    assert.equal(spans[0].status?.code, 2);
+    assert.equal(spans[0].exceptions.length, 1);
+  });
+
+  it('rejects ambiguous object-form ids and wildcard principal ids (M3)', async () => {
+    const relations = new RelationResolver({ schema: buildSchemaShape(), tuples: buildStaticTuples() });
+
+    await assert.rejects(
+      () => relations.check({ resource: { kind: 'document', id: 'a#b' }, relation: 'view', subject: 'user:olga' }),
+      /ids must not contain ":" or "#"/,
+    );
+    await assert.rejects(
+      () => relations.check({ resource: { kind: 'doc:ument', id: 'a' }, relation: 'view', subject: 'user:olga' }),
+      /kinds must not contain/,
+    );
+    await assert.rejects(
+      () =>
+        relations.check({
+          resource: { kind: 'document', id: 'readme' },
+          relation: 'view',
+          principal: { id: '*', roles: ['USER'] },
+        }),
+      /Invalid principal id/,
+    );
+  });
+
+  it('rejects direct self-referencing permissions at compile (M4)', () => {
+    assert.throws(
+      () =>
+        new RelationSchema({
+          relationSchema: {
+            definitions: {
+              user: {},
+              doc: { relations: { viewer: ['user'] }, permissions: { view: { anyOf: ['view', 'viewer'] } } },
+            },
+          },
+        }),
+      /directly references itself/,
+    );
+  });
+
+  it('protects tuple written context from mutating caveats (M5)', async () => {
+    const writtenContext = { allowed: true };
+    const relations = new RelationResolver({
+      schema: {
+        relationSchema: {
+          caveats: {
+            mutator: {
+              match: ({ ctx }) => {
+                const verdict = ctx.allowed === true;
+                ctx.allowed = false; // attempts to poison the stored context
+                return verdict;
+              },
+            },
+          },
+          definitions: {
+            user: {},
+            doc: { relations: { viewer: [{ type: 'user', caveat: 'mutator' }] } },
+          },
+        },
+      },
+      tuples: [
+        {
+          resource: 'doc:d1',
+          relation: 'viewer',
+          subject: 'user:u1',
+          caveat: { name: 'mutator', context: writtenContext },
+        },
+      ],
+    });
+
+    assert.equal(await relations.check({ resource: 'doc:d1', relation: 'viewer', subject: 'user:u1' }), true);
+    // Second evaluation still sees the original written context.
+    assert.equal(await relations.check({ resource: 'doc:d1', relation: 'viewer', subject: 'user:u1' }), true);
+    assert.equal(writtenContext.allowed, true);
+  });
+
+  it('omits concrete subjects covered by an unexcluded wildcard (M6)', async () => {
+    const relations = new RelationResolver({
+      schema: {
+        relationSchema: {
+          definitions: {
+            user: {},
+            doc: { relations: { viewer: ['user', 'user:*'] }, permissions: { view: 'viewer' } },
+          },
+        },
+      },
+      tuples: ['doc:d1#viewer@user:*', 'doc:d1#viewer@user:alice'],
+    });
+
+    assert.deepEqual(await relations.lookupSubjects({ resource: 'doc:d1', permission: 'view' }), ['user:*']);
+  });
+
+  it('keeps actionsSet/allowActionsSet out of serialized policy shapes (M7)', async () => {
+    const { ResourcePolicy, RolePolicy } = require('../src/index.js');
+    const resourcePolicy = new ResourcePolicy({
+      resourcePolicy: {
+        version: 'default',
+        resource: 'expense',
+        rules: [{ actions: ['view'], effect: Effect.Allow, roles: ['USER'] }],
+      },
+    });
+    const rolePolicy = new RolePolicy({
+      rolePolicy: { role: 'USER', version: 'default', rules: [{ resource: 'expense', allowActions: ['view'] }] },
+    });
+
+    assert.equal(JSON.stringify(resourcePolicy.shape).includes('actionsSet'), false);
+    assert.equal(JSON.stringify(rolePolicy.shape).includes('allowActionsSet'), false);
+    // The hot-path Sets still exist as non-enumerable fields.
+    assert.ok(resourcePolicy.rules[0].actionsSet instanceof Set);
+    assert.ok(rolePolicy.rules[0].allowActionsSet instanceof Set);
+
+    // And evaluation still works.
+    const kerberos = new Kerberos(
+      [
+        {
+          resourcePolicy: {
+            version: 'default',
+            resource: 'expense',
+            rules: [{ actions: ['view'], effect: Effect.Allow, roles: ['USER'] }],
+          },
+        },
+      ],
+      [],
+    );
+    assert.equal(
+      await kerberos.isAllowed({
+        principal: { id: 'u', roles: ['USER'] },
+        action: 'view',
+        resource: { id: 'e1', kind: 'expense' },
+      }),
+      true,
+    );
+  });
+});
+
+describe('RelationResolver lookup edge cases', () => {
+  const { RelationResolver } = require('../src/Relations/index.js');
+
+  it('truncates lookupSubjects deterministically at maxResults', async () => {
+    const relations = new RelationResolver({
+      schema: {
+        relationSchema: {
+          definitions: { user: {}, doc: { relations: { viewer: ['user'] }, permissions: { view: 'viewer' } } },
+        },
+      },
+      tuples: ['doc:d1#viewer@user:a', 'doc:d1#viewer@user:b', 'doc:d1#viewer@user:c'],
+      maxResults: 2,
+    });
+
+    assert.deepEqual(await relations.lookupSubjects({ resource: 'doc:d1', permission: 'view' }), ['user:a', 'user:b']);
+  });
+
+  it('filters by subjectType including wildcard entries', async () => {
+    const relations = new RelationResolver({
+      schema: {
+        relationSchema: {
+          definitions: {
+            user: {},
+            bot: {},
+            doc: { relations: { viewer: ['user', 'bot', 'user:*'] }, permissions: { view: 'viewer' } },
+          },
+        },
+      },
+      tuples: ['doc:d1#viewer@user:*', 'doc:d1#viewer@bot:crawler'],
+    });
+
+    assert.deepEqual(await relations.lookupSubjects({ resource: 'doc:d1', permission: 'view', subjectType: 'bot' }), [
+      'bot:crawler',
+    ]);
+    assert.deepEqual(await relations.lookupSubjects({ resource: 'doc:d1', permission: 'view', subjectType: 'user' }), [
+      'user:*',
+    ]);
+  });
+
+  it('handles duplicate names in list()', async () => {
+    const relations = new RelationResolver({ schema: buildSchemaShape(), tuples: buildStaticTuples() });
+
+    const granted = await relations.list({
+      resource: 'document:readme',
+      subject: 'user:olga',
+      relations: ['view', 'view', 'edit'],
+    });
+    assert.deepEqual([...granted].sort(), ['edit', 'view']);
   });
 });

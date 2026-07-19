@@ -9,7 +9,7 @@ import type {
   RequestResource,
   TypeBoxLike,
   ValidationOptions,
-} from '@alexify/kerberos';
+} from './index.js';
 
 type NonEmptyArray<T> = [T, ...T[]];
 
@@ -149,6 +149,16 @@ export type RelationResolverOptions = ValidationOptions & {
   maxResults?: number;
 };
 
+/**
+ * Per-call options. `memo` is a session Map shared across calls to reuse
+ * document reads and decision subproblems. Sharing one Map is safe by
+ * construction: every entry is scoped by resolver instance, and decision
+ * entries are additionally scoped by the IDENTITY of the `principal`/`context`
+ * object references — reuse the same object references to maximize sharing
+ * (the Kerberos engine does exactly that across a checkResources batch).
+ */
+export type RelationCallOptions = { memo?: Map<string, unknown> | null };
+
 export type RelationCheckArgs = {
   resource: string | RequestResource;
   subject?: string;
@@ -170,7 +180,7 @@ export type RelationLookupSubjectsResult = Array<string | { subject: string; exc
 export class RelationResolver {
   constructor(options: RelationResolverOptions);
   get schema(): RelationSchema;
-  check(args: RelationCheckArgs, opts?: { memo?: Map<string, unknown> | null }): Promise<boolean>;
+  check(args: RelationCheckArgs, opts?: RelationCallOptions): Promise<boolean>;
   list(
     args: {
       resource: string | RequestResource;
@@ -179,7 +189,7 @@ export class RelationResolver {
       relations: string[];
       context?: Record<string, unknown>;
     },
-    opts?: { memo?: Map<string, unknown> | null },
+    opts?: RelationCallOptions,
   ): Promise<Set<string>>;
   lookupSubjects(
     args: {
@@ -189,7 +199,7 @@ export class RelationResolver {
       subjectType?: string;
       context?: Record<string, unknown>;
     },
-    opts?: { memo?: Map<string, unknown> | null },
+    opts?: RelationCallOptions,
   ): Promise<RelationLookupSubjectsResult>;
   lookupResources(
     args: {
@@ -200,7 +210,7 @@ export class RelationResolver {
       resourceType: string;
       context?: Record<string, unknown>;
     },
-    opts?: { memo?: Map<string, unknown> | null },
+    opts?: RelationCallOptions,
   ): Promise<string[]>;
 }
 

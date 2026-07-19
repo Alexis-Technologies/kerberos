@@ -362,3 +362,79 @@ describe('Telemetry', () => {
     });
   });
 });
+
+describe('Telemetry writer-level contract', () => {
+  const { createTelemetryWriter } = require('../src/telemetry.js');
+
+  it('records cache requests with and without the kind attribute', async () => {
+    const { exporter, reader, meter } = createMetricSetup();
+    const writer = createTelemetryWriter({ meter });
+
+    writer.recordCacheRequest('hit');
+    writer.recordCacheRequest('miss', 'relation');
+    writer.recordCacheRequest('error', 'relation');
+
+    const metrics = await collectMetrics(reader, exporter);
+    const points = metrics['kerberos.cache.requests'].dataPoints;
+    const withoutKind = points.find((p) => p.attributes['kerberos.cache.result'] === 'hit');
+    assert.equal(withoutKind.attributes['kerberos.cache.kind'], undefined);
+    const withKind = points.find((p) => p.attributes['kerberos.cache.result'] === 'miss');
+    assert.equal(withKind.attributes['kerberos.cache.kind'], 'relation');
+  });
+
+  it('records relation checks by outcome', async () => {
+    const { exporter, reader, meter } = createMetricSetup();
+    const writer = createTelemetryWriter({ meter });
+
+    writer.recordRelationCheck(true);
+    writer.recordRelationCheck(true);
+    writer.recordRelationCheck(false);
+
+    const metrics = await collectMetrics(reader, exporter);
+    const points = metrics['kerberos.relations.checks'].dataPoints;
+    const allow = points.find((p) => p.attributes['kerberos.relations.result'] === 'allow');
+    const deny = points.find((p) => p.attributes['kerberos.relations.result'] === 'deny');
+    assert.equal(allow.value, 2);
+    assert.equal(deny.value, 1);
+  });
+
+  it('exposes no-op stubs on the disabled writer', () => {
+    const disabled = createTelemetryWriter(null);
+    assert.equal(disabled.enabled, false);
+    assert.equal(disabled.recordCacheRequest('hit', 'relation'), undefined);
+    assert.equal(disabled.recordRelationCheck(true), undefined);
+  });
+
+  it('emits kerberos.cache.requests from the engine cache path', async () => {
+    const { exporter, reader, meter } = createMetricSetup();
+    const store = new Map([
+      [
+        'resource:document:default:',
+        {
+          resourcePolicy: {
+            version: 'default',
+            resource: 'document',
+            rules: [{ actions: ['view'], effect: Effect.Allow, roles: ['USER'] }],
+          },
+        },
+      ],
+    ]);
+    const kerberos = new Kerberos([], [], { cache: store, telemetry: { meter } });
+
+    assert.equal(
+      await kerberos.isAllowed({ principal, action: 'view', resource: { id: 'doc1', kind: 'document' } }),
+      true,
+    );
+
+    const metrics = await collectMetrics(reader, exporter);
+    const points = metrics['kerberos.cache.requests'].dataPoints;
+    const results = new Set();
+    for (const point of points) {
+      results.add(point.attributes['kerberos.cache.result']);
+      // Engine (policy) reads carry NO kind attribute.
+      assert.equal(point.attributes['kerberos.cache.kind'], undefined);
+    }
+    assert.ok(results.has('hit'));
+    assert.ok(results.has('miss'));
+  });
+});

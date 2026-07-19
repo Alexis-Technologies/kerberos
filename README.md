@@ -372,7 +372,7 @@ When mixed policy types are present, Kerberos resolves each action in this order
 2. If it returns an explicit `EFFECT_ALLOW` or `EFFECT_DENY`, use that result.
 3. Otherwise, evaluate all matching `RolePolicy` entries for the principal roles.
 4. If multiple role policies apply to the same action, `EFFECT_DENY` wins over `EFFECT_ALLOW`.
-5. If the role layer is not applicable for that action, fall back to the matching `ResourcePolicy`.
+5. If the role layer is not applicable for that action, fall back to the matching `ResourcePolicy`. Before its rules are matched, the imported **derived roles are resolved**: condition-backed definitions evaluate synchronously, and relation-backed definitions (the `relation:` field) resolve through the configured [`relations` resolver](#rebac-relations) (ReBAC) — `list`-first with parallel `check` fallback, one shared memo per request. The resulting `effectiveDerivedRoles` then participate in rule matching alongside plain `roles`.
 6. If nothing matches, return `EFFECT_DENY`.
 
 The decision is computed **per action** — different actions in the same request may be resolved by different policy layers. Each lookup (principal / role / resource) walks the [scope search chain](#scopes-and-policy-versions) and `policyVersion`, and checks in-memory policies first, then the optional `cache`.
@@ -385,7 +385,15 @@ flowchart TD
 
     R -->|"EFFECT_DENY (wins over Allow)"| DONE
     R -->|"EFFECT_ALLOW"| DONE
-    R -->|role layer not applicable| RES{{"ResourcePolicy<br/>(by resource.kind)"}}
+    R -->|role layer not applicable| DR
+
+    subgraph DR ["Derived-roles resolution (importDerivedRoles)"]
+        direction TB
+        SYNC["Condition-backed definitions<br/>(sync: parentRoles + condition)"] --> EDR([effectiveDerivedRoles])
+        REL["Relation-backed definitions (relation: field)<br/>async via the relations resolver (ReBAC):<br/>list-first, parallel check fallback, shared memo"] --> EDR
+    end
+
+    EDR --> RES{{"ResourcePolicy<br/>(by resource.kind — rules match roles / derivedRoles)"}}
 
     RES -->|"EFFECT_ALLOW / EFFECT_DENY"| DONE
     RES -->|no rule matched| DEF([Default: EFFECT_DENY])
@@ -473,14 +481,16 @@ const kerberos2 = new Kerberos(policies, derivedRoles, {
 
 Works out of the box with any registered SDK (e.g. `NodeSDK` from `@opentelemetry/sdk-node`); with no SDK registered, everything no-ops.
 
-**Spans** — one per public call: `Kerberos.isAllowed` (decision attributes on the span) and `Kerberos.checkResources` (one `kerberos.decision` event per resource × action). The span is started **active**, so spans created inside — e.g. an auto-instrumented Redis cache behind the `cache` option — nest correctly. Attributes include `kerberos.call_id`, `kerberos.req_id`, `kerberos.resource.kind`, `kerberos.action`, `kerberos.allowed` / `kerberos.effect`, `kerberos.matched_policy` / `kerberos.matched_scope`, and identity attributes `kerberos.principal.id` / `kerberos.resource.id`. On errors the span gets `ERROR` status plus an exception event — without changing the error contract (the `logger`-controlled fallback/rethrow behavior is untouched).
+**Spans** — one per public call: `Kerberos.isAllowed` (decision attributes on the span) and `Kerberos.checkResources` (one `kerberos.decision` event per resource × action); the built-in ReBAC resolver adds `Kerberos.relations.check` / `.list` / `.lookupSubjects` / `.lookupResources` when given its own `telemetry` option (see [Resolver telemetry](#resolver-telemetry)). The span is started **active**, so spans created inside — e.g. an auto-instrumented Redis cache behind the `cache` option, or resolver spans under an engine span — nest correctly. Attributes include `kerberos.call_id`, `kerberos.req_id`, `kerberos.resource.kind`, `kerberos.action`, `kerberos.allowed` / `kerberos.effect`, `kerberos.matched_policy` / `kerberos.matched_rule` / `kerberos.matched_scope`, and identity attributes `kerberos.principal.id` / `kerberos.resource.id`. On errors the span gets `ERROR` status plus an exception event — error-handling behavior itself is controlled solely by the [`onError`](#configuration-options) option, never by telemetry or logging.
 
-**Metrics** — two instruments:
+**Metrics** — four instruments:
 
 | Instrument | Type | Unit | Attributes |
 | ---------- | ---- | ---- | ---------- |
 | `kerberos.decisions` | Counter | `{decision}` | `kerberos.effect`, `kerberos.resource.kind` |
 | `kerberos.request.duration` | Histogram | `ms` | `kerberos.req_kind`, `error` |
+| `kerberos.cache.requests` | Counter | `{request}` | `kerberos.cache.result` (`hit`/`miss`/`error`), `kerberos.cache.kind` (only for ReBAC tuple reads: `relation`) |
+| `kerberos.relations.checks` | Counter | `{check}` | `kerberos.relations.result` (`allow`/`deny`) |
 
 > Metric attributes deliberately exclude actions and principals to keep cardinality bounded — they assume a bounded set of resource kinds.
 
@@ -1191,6 +1201,7 @@ const relations = new RelationResolver({
             owner: ['user'],
             editor: ['user', { type: 'user', caveat: 'valid_ip' }], // caveated subjects
             viewer: ['user', 'user:*', 'group#member'],             // incl. the wildcard
+            auditor: ['user'],
           },
           permissions: {
             edit: { anyOf: ['owner', 'editor'] },                                  // union (+)
@@ -1209,6 +1220,7 @@ const relations = new RelationResolver({
     'document:readme#viewer@group:eng#member',
     'group:eng#member@user:sara',
     'document:readme#parent@folder:docs',
+    'document:readme#auditor@user:vera',
     { resource: 'document:readme', relation: 'editor', subject: 'user:cara', caveat: { name: 'valid_ip', context: { allowed_ips: ['10.0.0.1'] } } },
   ],
 });
@@ -1251,7 +1263,9 @@ Exactly like dynamic policies, tuples can live in your cache/store — Kerberos 
 
 - **Reverse documents** (opt-in, only needed for `lookupResources` over cache-backed tuples): key **`rel:rev:<subjectKey>`** (e.g. `rel:rev:user:emilia`, `rel:rev:group:eng#member`) → JSON array of `{ "resource": "document:readme", "relation": "viewer" }` entries. Enable with `reverseIndex: true`; without it `lookupResources` throws a typed error when a cache is configured (`check`/`list`/`lookupSubjects` never need reverse documents).
 
-Static tuples always win per `(resource, relation)` key — the cache is only consulted on a static miss, and sources for the same key are never merged. Corrupt documents are logged and treated as empty (fail-closed); entries the schema does not admit are skipped. Transient cache failures retry per `cacheRetry` and then surface as `KerberosCacheError`.
+Static tuples always win per `(resource, relation)` key — the cache is only consulted on a static miss, and sources for the same key are never merged. **A corrupt document throws a typed `KerberosCodecError`** (propagating per the engine's `onError` semantics) instead of resolving as empty — an "empty" read would silently *widen* access in exclusion positions (`read_only = viewer − editor`: a real editor whose editor document fails to parse would gain `read_only`). The same rule applies to a caveat whose condition **throws** (→ `KerberosRelationsError`): an evaluation error is never read as an answer; a caveat that cleanly evaluates to `false` simply does not match. Genuine absence (cache miss) still resolves as an empty set, and entries the schema does not admit are skipped with an operator log. Transient cache failures retry per `cacheRetry` and then surface as `KerberosCacheError`.
+
+**Session memo contract** (`opts.memo` on `check`/`list`/`lookupSubjects`/`lookupResources`): pass one `Map` to share work across calls — document reads are shared whenever the same resolver instance is used, and decision entries are automatically scoped by resolver instance plus the *identity* of the `principal`/`context` objects, so reusing a memo across different principals, contexts or resolver instances is safe by construction (reuse the same object references to maximize sharing — that is exactly what the Kerberos engine does across a `checkResources` batch).
 
 ### Consistency (honest limitations)
 

@@ -57,17 +57,18 @@ class ResourcePolicy {
     if (this.#shape.resourcePolicy.rules?.length) {
       const rules = [];
       for (const rule of this.#shape.resourcePolicy.rules) {
-        rules.push({
+        const parsedRule = {
           ...rule,
           condition: ResourcePolicy.parseConditions(rule.condition, options),
           output: ResourcePolicy.parseOutputs(rule.output, options),
-          // `rule.actions` is static per policy but scanned on every check()
-          // call (once per rule per requested action); precomputing the Set
-          // once here turns the repeated `includes` linear scans into O(1)
-          // lookups on the hot path, same rationale as the `principalRoles`
-          // Set below.
-          actionsSet: new Set(rule.actions),
-        });
+        };
+        // `rule.actions` is static per policy but scanned on every check()
+        // call (once per rule per requested action); precomputing the Set
+        // once turns the repeated `includes` linear scans into O(1) lookups.
+        // Non-enumerable so the runtime-only field never leaks into
+        // JSON.stringify / deepEqual / spreads of `.rules` / `.shape`.
+        Object.defineProperty(parsedRule, 'actionsSet', { value: new Set(rule.actions) });
+        rules.push(parsedRule);
       }
       this.#shape.resourcePolicy.rules = rules;
     }
