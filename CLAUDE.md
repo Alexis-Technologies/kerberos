@@ -21,7 +21,7 @@ pnpm format            # oxfmt src test (format:check for CI)
 pnpm bench             # ops/sec benchmark harness (bench/bench.js)
 ```
 
-Linting/formatting is **oxlint/oxfmt** (`.oxlintrc.json`, `.oxfmtrc.json`; the `correctness` category is intentionally off). `pre-commit` (see `package.json`) runs `lint` then `test` on commit; CI (`.github/workflows/ci.yml`) runs lint + format check + coverage + type tests on Node 18/20/22.
+Linting/formatting is **oxlint/oxfmt** (`.oxlintrc.json`, `.oxfmtrc.json`; the `correctness` category is intentionally off) — their native bindings require Node ≥20.19, so CI (`.github/workflows/ci.yml`) runs `lint`/`format:check` in a single job pinned to Node 22, separate from the `test` job, which runs `test:coverage` + `test:types` across the Node 18/20/22 matrix.
 
 Style: 2-space indent, single quotes, semicolons, 120-char lines (see `.editorconfig`, `.oxfmtrc.json`).
 
