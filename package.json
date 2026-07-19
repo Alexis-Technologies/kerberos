@@ -97,7 +97,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "packageManager": "pnpm@11.5.0",
+  "packageManager": "pnpm@10.34.5",
   "files": [
     "index.js",
     "index.d.ts",
