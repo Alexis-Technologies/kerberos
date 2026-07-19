@@ -23,7 +23,7 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
 - [x] Conditions;
 - [x] Variables and constants;
 - [x] Outputs;
-- [x] Testing;
+- [x] Testing (`@alexify/kerberos/tests`);
 - [x] APIs:
   - [x] isAllowed API;
   - [x] CheckResourceSet API;
