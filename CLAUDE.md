@@ -89,3 +89,9 @@ Two layers, both SpiceDB-inspired (see the "borrow vs skip" notes in `README.md`
 ### Public exports
 
 The full package surface is assembled in `src/index.js` (main entry), `tests.js` (dev-only `/tests` subpath) and `relations.js` (`/relations` subpath) — check all three when adding a new export, and update `index.d.ts` / `tests.d.ts` / `relations.d.ts` in the repo root accordingly, since types are hand-maintained (not generated).
+
+### Why the package doesn't ship a separate ESM build
+
+CJS doesn't give property-level tree-shaking inside a single module, but the real size control for this package is the subpath exports (`/relations`, `/tests`), which drop entire files rather than individual exports. The main entry's DSL classes (Conditions, ResourcePolicy, RolePolicy, DerivedRoles, ...) are interdependent — Kerberos.js needs all of them at once — so there's no dead code to shake there regardless of module format.
+
+A full ESM+CJS dual build is a deliberate non-goal: (1) it would contradict the "src/ ships as-is, no build step" philosophy; (2) heavy use of `instanceof` for self-classification (parsePolicy, schema builders, RelationResolver) creates a real dual package hazard risk if a CJS and an ESM copy ever load simultaneously in the same dependency tree.
