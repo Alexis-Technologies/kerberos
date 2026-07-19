@@ -11,6 +11,10 @@ const SCOPE_NAME = '@alexify/kerberos';
 const SPAN_NAMES = {
   IsAllowed: 'Kerberos.isAllowed',
   CheckResources: 'Kerberos.checkResources',
+  RelationsCheck: 'Kerberos.relations.check',
+  RelationsList: 'Kerberos.relations.list',
+  RelationsLookupSubjects: 'Kerberos.relations.lookupSubjects',
+  RelationsLookupResources: 'Kerberos.relations.lookupResources',
 };
 
 function hasMethod(value, methodName) {
@@ -55,6 +59,7 @@ function createDisabledTelemetryWriter() {
     recordDecisions() {},
     recordError() {},
     recordCacheRequest() {},
+    recordRelationCheck() {},
     endRequest() {},
   };
 }
@@ -87,6 +92,7 @@ function createTelemetryWriter(telemetry) {
   let decisionsCounter = null;
   let durationHistogram = null;
   let cacheRequestsCounter = null;
+  let relationChecksCounter = null;
   if (hasMethod(meter, 'createCounter') && hasMethod(meter, 'createHistogram')) {
     try {
       decisionsCounter = meter.createCounter('kerberos.decisions', {
@@ -101,10 +107,15 @@ function createTelemetryWriter(telemetry) {
         unit: '{request}',
         description: 'Dynamic-policy cache lookups by result (hit/miss/error)',
       });
+      relationChecksCounter = meter.createCounter('kerberos.relations.checks', {
+        unit: '{check}',
+        description: 'ReBAC relation checks resolved by the built-in resolver',
+      });
     } catch {
       decisionsCounter = null;
       durationHistogram = null;
       cacheRequestsCounter = null;
+      relationChecksCounter = null;
     }
   }
 
@@ -234,12 +245,28 @@ function createTelemetryWriter(telemetry) {
     },
 
     /**
-     * Counts a dynamic-policy cache lookup by outcome (`hit`/`miss`/`error`).
+     * Counts a cache lookup by outcome (`hit`/`miss`/`error`). The optional
+     * `kind` (e.g. `'relation'` for ReBAC tuple documents) is added as an
+     * attribute only when provided, so pre-existing policy series stay intact.
      * Not tied to a span — works in meter-only configurations too.
      */
-    recordCacheRequest(result) {
+    recordCacheRequest(result, kind) {
       try {
-        cacheRequestsCounter?.add(1, { 'kerberos.cache.result': result });
+        const attributes = { 'kerberos.cache.result': result };
+        if (kind) attributes['kerberos.cache.kind'] = kind;
+        cacheRequestsCounter?.add(1, attributes);
+      } catch {
+        // Telemetry must never break authorization.
+      }
+    },
+
+    /**
+     * Counts one ReBAC relation resolution by outcome. Emitted at the public
+     * boundary of the built-in resolver (`check` once, `list` once per name).
+     */
+    recordRelationCheck(allowed) {
+      try {
+        relationChecksCounter?.add(1, { 'kerberos.relations.result': allowed ? 'allow' : 'deny' });
       } catch {
         // Telemetry must never break authorization.
       }

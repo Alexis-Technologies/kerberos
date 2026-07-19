@@ -1118,7 +1118,7 @@ Kerberos supports **relationship-based access control** (ReBAC) — "Google Driv
 It comes in two layers:
 
 1. **The `relations` engine option** — a delegation contract like `logger`/`cache`/`codec`. ANY object with a `check` method works, including a resolver backed by the join tables your database already has.
-2. **The built-in "Zanzibar-lite" resolver** — `createRelationResolver` from the **`@alexify/kerberos/relations`** subpath (kept out of the main entry so non-ReBAC browser bundles do not grow).
+2. **The built-in "Zanzibar-lite" resolver** — the `RelationResolver` class from the **`@alexify/kerberos/relations`** subpath (kept out of the main entry so non-ReBAC browser bundles do not grow).
 
 ### Relation-backed derived roles
 
@@ -1169,9 +1169,9 @@ Resolver failures follow the [`onError`](#configuration-options) semantics, per-
 ### The built-in Zanzibar-lite resolver
 
 ```javascript
-import { createRelationResolver } from '@alexify/kerberos/relations';
+import { RelationResolver } from '@alexify/kerberos/relations';
 
-const relations = createRelationResolver({
+const relations = new RelationResolver({
   schema: {
     relationSchema: {
       caveats: {
@@ -1230,6 +1230,14 @@ What it borrows from SpiceDB (see [`src/Relations/`](./src/Relations)):
 - **depth limiting instead of cycle tracking** (`maxDepth`, default 50) — visited-sets are semantically unsound under exclusions, so cyclic relationship data throws a typed `KerberosRelationsError`;
 - **caveats** (ABAC-on-ReBAC): named conditions bound to tuples with write-time context; at check time the written context takes precedence over the check-time `context` argument, and the condition sees `{ P, ctx }`. Caveats are ordinary Kerberos `Conditions` — for JSON/cache-stored schemas author them as `{ match: { $expr: '...' } }` and pass a codec built with `createSafeExprCodec({ jsep, roots: ['P', 'ctx'] })` (same eval-free guarantees as dynamic policies). A throwing or false caveat fails closed. There is deliberately no CEL and no partial evaluation (`CONDITIONAL` results) — in-process, the full context is available at check time;
 - **reverse lookups**: `lookupSubjects` walks the permission tree forward and expands groups (wildcards come back as `'user:*'`, or `{ subject: 'user:*', exclusions: [...] }` under exclusions; caveated tuples are treated as present — an upper bound); `lookupResources` uses compile-time reachability entrypoints plus candidate verification for intersection/exclusion/caveat paths (the LookupResources2 pattern).
+
+### Resolver telemetry
+
+The resolver takes the same `telemetry` option as the engine (`{ api }` or `{ tracer, meter }`, see [OpenTelemetry](#opentelemetry)): one span per public call (`Kerberos.relations.check` / `.list` / `.lookupSubjects` / `.lookupResources`, with resource/relation attributes and identity attributes gated by `includeIdentity`), a `kerberos.relations.checks` counter (`kerberos.relations.result: allow|deny`), the shared `kerberos.request.duration` histogram, and tuple-document cache reads counted in `kerberos.cache.requests` with `kerberos.cache.kind: relation`. When the resolver runs inside a Kerberos engine that also has telemetry, resolver spans nest under the `isAllowed`/`checkResources` span automatically (active span context). As everywhere else, telemetry failures are swallowed and can never affect resolution.
+
+```javascript
+const relations = new RelationResolver({ schema, tuples, telemetry: { api: require('@opentelemetry/api') } });
+```
 
 ### Dynamic tuples (cache-backed)
 
@@ -1395,9 +1403,9 @@ Apple Silicon (M-series), Node v24:
 | `isAllowed` — derived roles + variables + condition | ~300,000 |
 | `checkResources` — 10 resources × 3 actions |  ~41,000 |
 | `isAllowed` — cache-backed dynamic policy (`$expr`, in-memory Map) | ~150,000 |
-| `relations.check` — direct tuple (flat) | ~820,000 |
-| `relations.check` — deep walk (3 arrows + nested groups) | ~110,000 |
-| `isAllowed` — relation-backed derived role (deep walk) |  ~76,000 |
+| `relations.check` — direct tuple (flat) | ~850,000 |
+| `relations.check` — deep walk (3 arrows + nested groups) | ~120,000 |
+| `isAllowed` — relation-backed derived role (deep walk) |  ~80,000 |
 
 `checkResources` evaluates resources **concurrently** (`Promise.allSettled`): with a remote policy store, N resources cost one parallel wave of lookups instead of N sequential round-trips (measured ~8x faster with a 2ms-latency cache and 10 resources), and one failing resource never fails the batch — it fail-closes to `EFFECT_DENY` for its actions only.
 

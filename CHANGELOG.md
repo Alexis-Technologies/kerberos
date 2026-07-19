@@ -21,22 +21,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `checkResources` batch, `onError` semantics and per-resource isolation
     apply, and `includeMeta` traces every resolution as
     `{ source: 'relations', name, relation, matched }`.
-  - **Built-in in-process "Zanzibar-lite" resolver** on the new
-    **`@alexify/kerberos/relations` subpath** (kept out of the main entry so
-    non-ReBAC bundles do not grow): a JSON relation-schema DSL compiled to
-    SpiceDB's userset-rewrite algebra (union `anyOf` / intersection `allOf` /
-    exclusion `exclude` / arrows `{ via, permission }` incl. `.all`, wildcard
-    subjects `user:*`, subject relations `group#member`, fail-fast compile
-    checks), static tuples indexed in both directions (zero IO) plus dynamic
-    tuples via the same read-only cache fallback as policies
-    (`rel:<type>:<id>:<relation>` documents; opt-in `rel:rev:<subject>`
-    reverse documents with `reverseIndex: true`), **caveats** (ABAC-on-ReBAC:
-    named conditions with write-time context precedence, `{ $expr }` support
-    through the eval-free codec), recursive `check` with short-circuiting,
-    per-request memoization and a SpiceDB-style `maxDepth` guard (default 50),
-    and **reverse APIs** — `lookupSubjects` (group-expanding, with
-    wildcard-exclusion entries) and `lookupResources` (reachability
-    entrypoints + candidate verification). New typed `KerberosRelationsError`.
+  - **Built-in in-process "Zanzibar-lite" resolver** — the `RelationResolver`
+    class on the new **`@alexify/kerberos/relations` subpath** (kept out of
+    the main entry so non-ReBAC bundles do not grow): a JSON relation-schema
+    DSL compiled to SpiceDB's userset-rewrite algebra (union `anyOf` /
+    intersection `allOf` / exclusion `exclude` / arrows `{ via, permission }`
+    incl. `.all`, wildcard subjects `user:*`, subject relations
+    `group#member`, fail-fast compile checks + a precomputed O(1)
+    admission-key Set per relation), static tuples indexed in both directions
+    (zero IO) plus dynamic tuples via the same read-only cache fallback as
+    policies (`rel:<type>:<id>:<relation>` documents; opt-in
+    `rel:rev:<subject>` reverse documents with `reverseIndex: true`),
+    **caveats** (ABAC-on-ReBAC: named conditions with write-time context
+    precedence, `{ $expr }` support through the eval-free codec), recursive
+    `check` with short-circuiting, per-request memoization and a SpiceDB-style
+    `maxDepth` guard (default 50), and **reverse APIs** — `lookupSubjects`
+    (group-expanding, with wildcard-exclusion entries) and `lookupResources`
+    (reachability entrypoints + candidate verification). Engineered
+    performance-first: O(1) strategy tables over rewrite-node kinds instead of
+    switch dispatch, constructor-precompiled argument validators, per-type
+    Map/Set subject-set algebra, cursor/level-based BFS (no `shift()`), and
+    `Promise.allSettled` waves for lookup paths that need every branch
+    (candidate verification, closure levels, collect expansions) while check
+    paths stay sequential to preserve short-circuit cache-read savings.
+    Optional **resolver telemetry** via the same `telemetry` option shapes:
+    spans per public call (`Kerberos.relations.*`), a
+    `kerberos.relations.checks` counter and tuple-document cache reads tagged
+    `kerberos.cache.kind: relation`. New typed `KerberosRelationsError`.
   - Deliberately **not** implemented (documented in README/SECURITY.md):
     ZedTokens/consistency levels (freshness is delegated to the cache
     invalidation layer), CEL, partial caveat evaluation, cursors/streaming.

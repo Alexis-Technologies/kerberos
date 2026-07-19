@@ -20,6 +20,21 @@ function assertName(kind, name) {
 }
 
 /**
+ * Canonical key of an allowed-subject shape. Each relation precomputes the Set
+ * of admissible keys at compile time, turning per-entry admission checks (one
+ * per tuple/document entry) into a single O(1) Set lookup.
+ *
+ * @param {string} type
+ * @param {string | null} relation
+ * @param {boolean} wildcard
+ * @param {string | null} caveat
+ * @returns {string}
+ */
+function buildAdmissionKey(type, relation, wildcard, caveat) {
+  return `${type}|${relation ?? ''}|${wildcard ? '*' : ''}|${caveat ?? ''}`;
+}
+
+/**
  * Parses an object reference string (`type:id`) into its parts.
  *
  * @param {string} ref
@@ -223,7 +238,19 @@ class RelationSchema {
    * @returns {Array<{ type: string, relation: string | null, wildcard: boolean, caveat: string | null }> | undefined}
    */
   getRelationSubjects(type, name) {
-    return this.#definitions.get(type)?.relations.get(name);
+    return this.#definitions.get(type)?.relations.get(name)?.refs;
+  }
+
+  /**
+   * Returns the precomputed admission-key Set of a relation (see
+   * `buildAdmissionKey`), or undefined when `name` is not a relation.
+   *
+   * @param {string} type
+   * @param {string} name
+   * @returns {Set<string> | undefined}
+   */
+  getRelationAdmission(type, name) {
+    return this.#definitions.get(type)?.relations.get(name)?.admission;
   }
 
   /**
@@ -294,9 +321,11 @@ class RelationSchema {
       this.#definitions.set(type, { relations, permissions });
     }
 
-    // Pass 2: normalize subject refs, then compile permission expressions.
-    // Relations are normalized before permissions so arrow validation can rely
-    // on the normalized tupleset refs of the same definition.
+    // Pass 2: normalize subject refs (building both the ref list and the
+    // O(1) admission-key Set in the same pass), then compile permission
+    // expressions. Relations are normalized before permissions so arrow
+    // validation can rely on the normalized tupleset refs of the same
+    // definition.
     for (const [type, compiled] of this.#definitions) {
       for (const [name, refs] of compiled.relations) {
         if (!Array.isArray(refs) || !refs.length) {
@@ -305,8 +334,15 @@ class RelationSchema {
           );
         }
         const normalizedRefs = [];
-        for (const ref of refs) normalizedRefs.push(this.#normalizeSubjectTypeRef(ref, `${type}#${name}`));
-        compiled.relations.set(name, normalizedRefs);
+        const admission = new Set();
+        for (const ref of refs) {
+          const normalized = this.#normalizeSubjectTypeRef(ref, `${type}#${name}`);
+          normalizedRefs.push(normalized);
+          admission.add(
+            buildAdmissionKey(normalized.type, normalized.relation, normalized.wildcard, normalized.caveat),
+          );
+        }
+        compiled.relations.set(name, { refs: normalizedRefs, admission });
       }
       for (const [name, expr] of compiled.permissions) {
         compiled.permissions.set(name, this.#compilePermissionExpr(type, name, expr));
@@ -419,7 +455,7 @@ class RelationSchema {
     if (typeof target !== 'string' || !target.length) {
       throw new KerberosRelationsError(`Permission "${where}" — arrow requires a "permission" target name`);
     }
-    const tupleset = this.#definitions.get(type).relations.get(via);
+    const tupleset = this.#definitions.get(type).relations.get(via)?.refs;
     if (!tupleset) {
       throw new KerberosRelationsError(
         `Permission "${where}" — arrow "via" must reference a relation of "${type}" (got "${via}")`,
@@ -443,6 +479,7 @@ class RelationSchema {
 
 module.exports = {
   RelationSchema,
+  buildAdmissionKey,
   parseObjectRef,
   parseSubjectRef,
   parseTuple,

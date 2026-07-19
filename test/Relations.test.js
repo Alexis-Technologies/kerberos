@@ -441,11 +441,11 @@ function buildStaticTuples() {
   ];
 }
 
-describe('createRelationResolver', () => {
-  const { createRelationResolver } = require('../src/Relations/index.js');
+describe('RelationResolver', () => {
+  const { RelationResolver } = require('../src/Relations/index.js');
 
   function buildResolver(extra = {}) {
-    return createRelationResolver({ schema: buildSchemaShape(), tuples: buildStaticTuples(), ...extra });
+    return new RelationResolver({ schema: buildSchemaShape(), tuples: buildStaticTuples(), ...extra });
   }
 
   describe('check — static tuples', () => {
@@ -616,7 +616,7 @@ describe('createRelationResolver', () => {
     });
 
     it('fails closed when a caveat condition throws', async () => {
-      const throwing = createRelationResolver({
+      const throwing = new RelationResolver({
         schema: {
           relationSchema: {
             caveats: {
@@ -641,7 +641,7 @@ describe('createRelationResolver', () => {
 
   describe('depth guard', () => {
     it('throws a typed error on cyclic relationship data', async () => {
-      const relations = createRelationResolver({
+      const relations = new RelationResolver({
         schema: buildSchemaShape(),
         tuples: ['group:a#member@group:b#member', 'group:b#member@group:a#member'],
         maxDepth: 5,
@@ -893,7 +893,7 @@ describe('createRelationResolver', () => {
     });
 
     it('represents wildcard-with-exclusions results', async () => {
-      const wildcardResolver = createRelationResolver({
+      const wildcardResolver = new RelationResolver({
         schema: {
           relationSchema: {
             definitions: {
@@ -1056,7 +1056,7 @@ describe('createRelationResolver', () => {
 
 describe('Kerberos relations integration', () => {
   const { Effect, Kerberos } = require('../src/index.js');
-  const { createRelationResolver } = require('../src/Relations/index.js');
+  const { RelationResolver } = require('../src/Relations/index.js');
 
   const documentPolicy = {
     resourcePolicy: {
@@ -1283,7 +1283,7 @@ describe('Kerberos relations integration', () => {
 
   describe('built-in resolver end to end', () => {
     it('authorizes through static tuples', async () => {
-      const relations = createRelationResolver({ schema: buildSchemaShape(), tuples: buildStaticTuples() });
+      const relations = new RelationResolver({ schema: buildSchemaShape(), tuples: buildStaticTuples() });
       const kerberos = new Kerberos([documentPolicy], [relationDerivedRoles], { relations });
 
       assert.equal(await kerberos.isAllowed({ principal: olga, action: 'view', resource: readme }), true);
@@ -1312,7 +1312,7 @@ describe('Kerberos relations integration', () => {
           return undefined;
         },
       };
-      const relations = createRelationResolver({ schema: buildSchemaShape(), cache });
+      const relations = new RelationResolver({ schema: buildSchemaShape(), cache });
       const kerberos = new Kerberos([documentPolicy], [relationDerivedRoles], { relations });
 
       const response = await kerberos.checkResources({
@@ -1351,7 +1351,7 @@ describe('Kerberos relations integration', () => {
           return undefined;
         },
       };
-      const relations = createRelationResolver({ schema: jsonSchema, cache, codec });
+      const relations = new RelationResolver({ schema: jsonSchema, cache, codec });
       const kerberos = new Kerberos([documentPolicy], [relationDerivedRoles], { relations });
 
       assert.equal(
@@ -1371,5 +1371,259 @@ describe('Kerberos relations integration', () => {
         false,
       );
     });
+  });
+});
+
+describe('RelationResolver telemetry', () => {
+  const { RelationResolver } = require('../src/Relations/index.js');
+
+  // Minimal fake OTel tracer/meter capturing spans, counters and histograms.
+  function buildFakeTelemetry() {
+    const counters = {};
+    const histograms = {};
+    const spans = [];
+    const meter = {
+      createCounter(name) {
+        counters[name] = [];
+        return { add: (value, attributes) => counters[name].push({ value, attributes }) };
+      },
+      createHistogram(name) {
+        histograms[name] = [];
+        return { record: (value, attributes) => histograms[name].push({ value, attributes }) };
+      },
+    };
+    const tracer = {
+      startActiveSpan(name, options, fn) {
+        const span = {
+          name,
+          attributes: { ...(options?.attributes ?? {}) },
+          ended: false,
+          setAttribute(key, value) {
+            this.attributes[key] = value;
+          },
+          addEvent() {},
+          recordException() {},
+          setStatus(status) {
+            this.status = status;
+          },
+          end() {
+            this.ended = true;
+          },
+        };
+        spans.push(span);
+        return fn(span);
+      },
+    };
+    return { telemetry: { tracer, meter }, counters, histograms, spans };
+  }
+
+  it('emits a span, the relations counter and the duration histogram for check', async () => {
+    const fake = buildFakeTelemetry();
+    const relations = new RelationResolver({
+      schema: buildSchemaShape(),
+      tuples: buildStaticTuples(),
+      telemetry: fake.telemetry,
+    });
+
+    assert.equal(
+      await relations.check({ resource: 'document:readme', permission: 'view', subject: 'user:olga' }),
+      true,
+    );
+
+    assert.equal(fake.spans.length, 1);
+    const span = fake.spans[0];
+    assert.equal(span.name, 'Kerberos.relations.check');
+    assert.equal(span.attributes['kerberos.resource.kind'], 'document');
+    assert.equal(span.attributes['kerberos.relations.name'], 'view');
+    assert.equal(span.attributes['kerberos.allowed'], true);
+    // Identity attributes are on by default.
+    assert.equal(span.attributes['kerberos.relations.subject'], 'user:olga');
+    assert.equal(span.attributes['kerberos.resource.id'], 'readme');
+    assert.equal(span.ended, true);
+
+    assert.deepEqual(fake.counters['kerberos.relations.checks'], [
+      { value: 1, attributes: { 'kerberos.relations.result': 'allow' } },
+    ]);
+    assert.equal(fake.histograms['kerberos.request.duration'].length, 1);
+    assert.equal(fake.histograms['kerberos.request.duration'][0].attributes['kerberos.req_kind'], 'RelationsCheck');
+  });
+
+  it('strips identity attributes with includeIdentity: false', async () => {
+    const fake = buildFakeTelemetry();
+    const relations = new RelationResolver({
+      schema: buildSchemaShape(),
+      tuples: buildStaticTuples(),
+      telemetry: { ...fake.telemetry, includeIdentity: false },
+    });
+
+    await relations.check({ resource: 'document:readme', permission: 'view', subject: 'user:olga' });
+
+    const span = fake.spans[0];
+    assert.equal(span.attributes['kerberos.relations.subject'], undefined);
+    assert.equal(span.attributes['kerberos.resource.id'], undefined);
+    assert.equal(span.attributes['kerberos.resource.kind'], 'document');
+  });
+
+  it('counts one relations check per list name and annotates the span', async () => {
+    const fake = buildFakeTelemetry();
+    const relations = new RelationResolver({
+      schema: buildSchemaShape(),
+      tuples: buildStaticTuples(),
+      telemetry: fake.telemetry,
+    });
+
+    const granted = await relations.list({
+      resource: { kind: 'document', id: 'readme' },
+      principal: { id: 'olga', roles: ['USER'] },
+      relations: ['view', 'edit', 'audit'],
+    });
+    assert.deepEqual([...granted].sort(), ['edit', 'view']);
+
+    const results = [];
+    for (const entry of fake.counters['kerberos.relations.checks']) {
+      results.push(entry.attributes['kerberos.relations.result']);
+    }
+    assert.deepEqual(results.sort(), ['allow', 'allow', 'deny']);
+
+    const span = fake.spans[0];
+    assert.equal(span.name, 'Kerberos.relations.list');
+    assert.equal(span.attributes['kerberos.relations.requested'], 3);
+    assert.equal(span.attributes['kerberos.relations.granted'], 2);
+  });
+
+  it('records relation cache reads with the relation kind attribute', async () => {
+    const fake = buildFakeTelemetry();
+    const relations = new RelationResolver({
+      schema: buildSchemaShape(),
+      cache: {
+        async get(key) {
+          if (key === 'rel:document:cached:viewer') return ['user:carl'];
+          return undefined;
+        },
+      },
+      telemetry: fake.telemetry,
+    });
+
+    assert.equal(
+      await relations.check({ resource: 'document:cached', permission: 'view', subject: 'user:carl' }),
+      true,
+    );
+
+    const cacheRecords = fake.counters['kerberos.cache.requests'];
+    assert.ok(cacheRecords.length >= 2);
+    for (const record of cacheRecords) {
+      assert.equal(record.attributes['kerberos.cache.kind'], 'relation');
+    }
+    const outcomes = new Set();
+    for (const record of cacheRecords) outcomes.add(record.attributes['kerberos.cache.result']);
+    assert.ok(outcomes.has('hit'));
+    assert.ok(outcomes.has('miss'));
+  });
+
+  it('annotates lookup spans with the result count', async () => {
+    const fake = buildFakeTelemetry();
+    const relations = new RelationResolver({
+      schema: buildSchemaShape(),
+      tuples: buildStaticTuples(),
+      telemetry: fake.telemetry,
+    });
+
+    const subjects = await relations.lookupSubjects({ resource: 'document:readme', permission: 'audit' });
+    assert.deepEqual(subjects, ['user:vera']);
+    assert.equal(fake.spans[0].name, 'Kerberos.relations.lookupSubjects');
+    assert.equal(fake.spans[0].attributes['kerberos.result.count'], 1);
+
+    const resources = await relations.lookupResources({
+      subject: 'user:rita',
+      permission: 'view',
+      resourceType: 'folder',
+    });
+    assert.deepEqual(resources, ['folder:docs', 'folder:root']);
+    assert.equal(fake.spans[1].name, 'Kerberos.relations.lookupResources');
+    assert.equal(fake.spans[1].attributes['kerberos.result.count'], 2);
+  });
+
+  it('never lets a broken tracer or meter affect resolution', async () => {
+    const throwingTelemetry = {
+      tracer: {
+        startActiveSpan() {
+          throw new Error('tracer boom');
+        },
+      },
+      meter: {
+        createCounter() {
+          return {
+            add() {
+              throw new Error('meter boom');
+            },
+          };
+        },
+        createHistogram() {
+          return {
+            record() {
+              throw new Error('meter boom');
+            },
+          };
+        },
+      },
+    };
+    const relations = new RelationResolver({
+      schema: buildSchemaShape(),
+      tuples: buildStaticTuples(),
+      telemetry: throwingTelemetry,
+    });
+
+    assert.equal(
+      await relations.check({ resource: 'document:readme', permission: 'view', subject: 'user:olga' }),
+      true,
+    );
+    assert.equal(
+      await relations.check({ resource: 'document:readme', permission: 'view', subject: 'user:ghost' }),
+      false,
+    );
+  });
+});
+
+describe('RelationResolver parallel error propagation', () => {
+  const { RelationResolver } = require('../src/Relations/index.js');
+  const { KerberosCacheError } = require('../src/index.js');
+
+  it('surfaces the first failure from a settled verification wave', async () => {
+    // Exclusion forces candidate verification; the editor document read fails
+    // with a transient error — the wave settles fully, then the typed cache
+    // error surfaces instead of silently reading as "not granted".
+    const relations = new RelationResolver({
+      schema: buildSchemaShape(),
+      cache: {
+        async get(key) {
+          if (key === 'rel:rev:user:eve') return [{ resource: 'document:d1', relation: 'viewer' }];
+          if (key === 'rel:document:d1:viewer') return ['user:eve'];
+          if (key === 'rel:document:d1:editor') throw new Error('ECONNRESET');
+          return undefined;
+        },
+      },
+      cacheRetry: { attempts: 1 },
+      reverseIndex: true,
+    });
+
+    await assert.rejects(
+      () => relations.lookupResources({ subject: 'user:eve', permission: 'read_only', resourceType: 'document' }),
+      (error) => error instanceof KerberosCacheError,
+    );
+  });
+
+  it('keeps concurrent lookups over a shared memo correct', async () => {
+    const relations = new RelationResolver({ schema: buildSchemaShape(), tuples: buildStaticTuples() });
+    const memo = new Map();
+
+    const [saraDocs, ritaDocs, subjects] = await Promise.all([
+      relations.lookupResources({ subject: 'user:sara', permission: 'view', resourceType: 'document' }, { memo }),
+      relations.lookupResources({ subject: 'user:rita', permission: 'view', resourceType: 'document' }, { memo }),
+      relations.lookupSubjects({ resource: 'document:readme', permission: 'view' }, { memo }),
+    ]);
+
+    assert.deepEqual(saraDocs, ['document:public', 'document:readme']);
+    assert.deepEqual(ritaDocs, ['document:public', 'document:readme']);
+    assert.ok(subjects.includes('user:sara') && subjects.includes('user:rita'));
   });
 });

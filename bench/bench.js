@@ -142,7 +142,7 @@ async function main() {
   }
 
   // ReBAC scenarios: the built-in Zanzibar-lite resolver over static tuples.
-  const { createRelationResolver } = require('../src/Relations/index.js');
+  const { RelationResolver } = require('../src/Relations/index.js');
   const relationSchema = {
     relationSchema: {
       definitions: {
@@ -171,7 +171,7 @@ async function main() {
     'group:eng#member@group:leads#member',
     'group:leads#member@user:deep',
   ];
-  const relations = createRelationResolver({ schema: relationSchema, tuples: relationTuples });
+  const relations = new RelationResolver({ schema: relationSchema, tuples: relationTuples });
 
   results.push(
     await bench('relations.check — direct tuple (flat)', () =>

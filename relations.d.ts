@@ -3,7 +3,7 @@ import type {
   Conditions,
   ConditionsSchema,
   KerberosLogger,
-  KerberosRelationsResolver,
+  KerberosTelemetryOptions,
   PolicyCodec,
   RequestPrincipal,
   RequestResource,
@@ -82,17 +82,30 @@ export class RelationSchema {
   static parseShape(shape: unknown, options?: RelationSchemaOptions): unknown;
   static parseCaveat(name: string, def: unknown, options?: RelationSchemaOptions): Conditions;
   get shape(): unknown;
-  get definitions(): Map<string, { relations: Map<string, unknown[]>; permissions: Map<string, unknown> }>;
+  get definitions(): Map<
+    string,
+    { relations: Map<string, { refs: unknown[]; admission: Set<string> }>; permissions: Map<string, unknown> }
+  >;
   get caveats(): Map<string, Conditions>;
   hasDefinition(type: string): boolean;
   getRelationSubjects(
     type: string,
     name: string,
   ): Array<{ type: string; relation: string | null; wildcard: boolean; caveat: string | null }> | undefined;
+  /** Precomputed O(1) admission-key Set of a relation (see `buildAdmissionKey`). */
+  getRelationAdmission(type: string, name: string): Set<string> | undefined;
   getPermissionNode(type: string, name: string): unknown;
   isCheckable(type: string, name: string): boolean;
   getCaveat(name: string): Conditions | undefined;
 }
+
+/** Canonical admission key of an allowed-subject shape. */
+export function buildAdmissionKey(
+  type: string,
+  relation: string | null,
+  wildcard: boolean,
+  caveat: string | null,
+): string;
 
 export function parseObjectRef(ref: string, label?: string): { type: string; id: string };
 export function parseSubjectRef(ref: string): { type: string; id: string; relation: string | null };
@@ -113,6 +126,13 @@ export type RelationResolverOptions = ValidationOptions & {
   /** Compiles `{ $expr }` caveat conditions (eval-free). */
   codec?: PolicyCodec;
   logger?: KerberosLogger | boolean;
+  /**
+   * OpenTelemetry delegation (same shapes as the Kerberos option): one span
+   * per public call plus `kerberos.relations.checks` and
+   * `kerberos.cache.requests` (kind `relation`) metrics. Guarded — telemetry
+   * can never affect resolution.
+   */
+  telemetry?: KerberosTelemetryOptions | null;
   /** Subject type used when mapping a Kerberos principal (default 'user'). */
   subjectType?: string;
   mapPrincipal?: (principal: RequestPrincipal) => string;
@@ -141,8 +161,15 @@ export type RelationCheckArgs = {
 
 export type RelationLookupSubjectsResult = Array<string | { subject: string; exclusions: string[] }>;
 
-export type RelationResolver = KerberosRelationsResolver & {
-  schema: RelationSchema;
+/**
+ * The built-in in-process "Zanzibar-lite" relation resolver. It implements
+ * the Kerberos `relations` delegation contract (pass an instance as the
+ * `relations` constructor option) and additionally exposes the standalone
+ * SpiceDB-flavoured `check` / `lookupSubjects` / `lookupResources` API.
+ */
+export class RelationResolver {
+  constructor(options: RelationResolverOptions);
+  get schema(): RelationSchema;
   check(args: RelationCheckArgs, opts?: { memo?: Map<string, unknown> | null }): Promise<boolean>;
   list(
     args: {
@@ -175,15 +202,7 @@ export type RelationResolver = KerberosRelationsResolver & {
     },
     opts?: { memo?: Map<string, unknown> | null },
   ): Promise<string[]>;
-};
-
-/**
- * Creates the built-in in-process "Zanzibar-lite" relation resolver. It
- * implements the Kerberos `relations` delegation contract (pass it as the
- * `relations` constructor option) and additionally exposes the standalone
- * SpiceDB-flavoured `check` / `lookupSubjects` / `lookupResources` API.
- */
-export function createRelationResolver(options: RelationResolverOptions): RelationResolver;
+}
 
 export class RelationsZodSchemas {
   static buildShape(z: unknown): unknown;

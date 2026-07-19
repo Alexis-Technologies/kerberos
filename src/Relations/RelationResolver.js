@@ -1,10 +1,20 @@
-const { RelationSchema, parseObjectRef, parseSubjectRef, parseTuple } = require('./RelationSchema.js');
+const {
+  RelationSchema,
+  buildAdmissionKey,
+  parseObjectRef,
+  parseSubjectRef,
+  parseTuple,
+} = require('./RelationSchema.js');
 const { RelationsJsonSchemas, RelationsTypeBoxSchemas, RelationsZodSchemas } = require('./schemas/index.js');
 
 const { createCacheReader } = require('../caching/cache.js');
 const { createLoggerWriter } = require('../logging.js');
+const { createTelemetryWriter } = require('../telemetry.js');
 const { KerberosRelationsError } = require('../errors.js');
-const { parseWithValidation } = require('../validation');
+const { resolveValidationAdapter } = require('../validation');
+// Platform runtime: bundlers swap this for `./runtime/browser.js` via the
+// package.json `browser` field map when targeting the browser.
+const { getNow } = require('../runtime/node.js');
 
 // SpiceDB uses the same default: depth is the only recursion guard — a
 // visited-set is deliberately NOT used because it is semantically unsound in
@@ -14,173 +24,813 @@ const DEFAULT_MAX_RESULTS = 1000;
 
 const SUBJECT_WILDCARD_ID = '*';
 
+const CACHE_KIND_RELATION = 'relation';
+
 const EMPTY_ENTRIES = Object.freeze([]);
+// Shared resolved promise for static-only misses — avoids allocating a new
+// promise per empty read on the hot path.
+const EMPTY_ENTRIES_PROMISE = Promise.resolve(EMPTY_ENTRIES);
+const EMPTY_CONTEXT = Object.freeze({});
+
+/**
+ * Builds a prototype-less dispatch table so lookups can never resolve to
+ * inherited members and stay O(1) (same pattern as the codec's
+ * NODE_EVALUATORS strategy tables).
+ */
+function createDispatch(entries) {
+  return Object.assign(Object.create(null), entries);
+}
 
 function subjectToString(subject) {
   const base = `${subject.type}:${subject.id}`;
   return subject.relation === null ? base : `${base}#${subject.relation}`;
 }
 
-/**
- * Whether a subject entry (with an optional caveat) is admitted by the
- * relation's allowed subject-type refs. Mirrors SpiceDB write-time validation:
- * a concrete subject needs a non-wildcard ref, a `type:*` subject needs the
- * wildcard ref, and a caveated entry needs a ref declaring that exact caveat.
- */
-function matchesAllowedRefs(refs, subject, caveat) {
-  const caveatName = caveat ? caveat.name : null;
-  const isWildcardSubject = subject.relation === null && subject.id === SUBJECT_WILDCARD_ID;
-  for (const ref of refs) {
-    if (ref.type !== subject.type) continue;
-    if (ref.relation !== subject.relation) continue;
-    if (ref.wildcard !== isWildcardSubject) continue;
-    if (ref.caveat !== caveatName) continue;
-    return true;
+function subjectAdmissionKey(subject, caveat) {
+  const isWildcard = subject.relation === null && subject.id === SUBJECT_WILDCARD_ID;
+  return buildAdmissionKey(subject.type, subject.relation, isWildcard, caveat ? caveat.name : null);
+}
+
+// 'user:emilia' | { subject, caveat? } → { subject, caveat }
+function parseDocumentEntry(raw) {
+  if (typeof raw === 'string') return { subject: parseSubjectRef(raw), caveat: null };
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    let caveat = null;
+    if (raw.caveat !== undefined && raw.caveat !== null) {
+      if (typeof raw.caveat !== 'object' || typeof raw.caveat.name !== 'string') {
+        throw new KerberosRelationsError('Invalid relation document caveat — expected { name, context? }');
+      }
+      caveat = { name: raw.caveat.name, context: raw.caveat.context ?? null };
+    }
+    return { subject: parseSubjectRef(raw.subject), caveat };
   }
-  return false;
+  throw new KerberosRelationsError(
+    'Invalid relation document entry — expected a subject string or { subject, caveat? }',
+  );
+}
+
+// 'document:readme#viewer' | { resource: 'document:readme', relation, caveat? }
+function parseReverseEntry(raw) {
+  if (typeof raw === 'string') {
+    const hash = raw.indexOf('#');
+    if (hash === -1) throw new KerberosRelationsError(`Invalid reverse entry "${raw}" — expected "type:id#relation"`);
+    return { resource: parseObjectRef(raw.slice(0, hash), 'resource'), relation: raw.slice(hash + 1), caveat: null };
+  }
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    let caveat = null;
+    if (raw.caveat !== undefined && raw.caveat !== null) {
+      if (typeof raw.caveat !== 'object' || typeof raw.caveat.name !== 'string') {
+        throw new KerberosRelationsError('Invalid reverse entry caveat — expected { name, context? }');
+      }
+      caveat = { name: raw.caveat.name, context: raw.caveat.context ?? null };
+    }
+    return { resource: parseObjectRef(raw.resource, 'resource'), relation: raw.relation, caveat };
+  }
+  throw new KerberosRelationsError('Invalid reverse entry — expected "type:id#relation" or { resource, relation }');
 }
 
 /**
- * Creates the built-in in-process "Zanzibar-lite" relation resolver.
+ * allSettled with the engine's error rule: every sibling settles (no
+ * unawaited rejection — memoized promises stay handled), then the FIRST
+ * rejection reason is rethrown; otherwise the fulfilled values are returned
+ * in input order.
+ */
+async function settleAll(promises) {
+  const settled = await Promise.allSettled(promises);
+  const values = new Array(settled.length);
+  let firstError = null;
+  for (let i = 0; i < settled.length; i++) {
+    if (settled[i].status === 'rejected') {
+      if (!firstError) firstError = settled[i].reason;
+      continue;
+    }
+    values[i] = settled[i].value;
+  }
+  if (firstError) throw firstError instanceof Error ? firstError : new Error(String(firstError));
+  return values;
+}
+
+// ---------------------------------------------------------------------------
+// Subject-set algebra for lookupSubjects, keyed per type:
+//   { concrete: Map<type, Set<id>>, wildcards: Map<type, Set<excluded id>> }
+// Per-type Maps make wildcard coverage and subtraction O(1) per id instead of
+// slicing/`startsWith`-scanning composite string keys. Caveated tuples are
+// INCLUDED (results are an upper bound for them) — use check() for
+// per-subject certainty.
+// ---------------------------------------------------------------------------
+
+function emptySubjectSet() {
+  return { concrete: new Map(), wildcards: new Map() };
+}
+
+function addConcrete(set, type, id) {
+  let ids = set.concrete.get(type);
+  if (!ids) {
+    ids = new Set();
+    set.concrete.set(type, ids);
+  }
+  ids.add(id);
+}
+
+function wildcardCovers(set, type, id) {
+  const exclusions = set.wildcards.get(type);
+  return exclusions !== undefined && !exclusions.has(id);
+}
+
+function normalizeSubjectSet(set) {
+  // An exclusion that is also independently a concrete member is void.
+  for (const [type, exclusions] of set.wildcards) {
+    const ids = set.concrete.get(type);
+    if (!ids) continue;
+    for (const id of exclusions) if (ids.has(id)) exclusions.delete(id);
+  }
+  return set;
+}
+
+function unionSubjectSets(target, other) {
+  for (const [type, ids] of other.concrete) {
+    let targetIds = target.concrete.get(type);
+    if (!targetIds) {
+      targetIds = new Set();
+      target.concrete.set(type, targetIds);
+    }
+    for (const id of ids) targetIds.add(id);
+  }
+  for (const [type, otherExclusions] of other.wildcards) {
+    const existing = target.wildcards.get(type);
+    if (existing === undefined) {
+      target.wildcards.set(type, new Set(otherExclusions));
+      continue;
+    }
+    // Excluded from the union only if excluded on both sides. Deleting the
+    // current entry during Set iteration is safe per spec.
+    for (const id of existing) if (!otherExclusions.has(id)) existing.delete(id);
+  }
+  return normalizeSubjectSet(target);
+}
+
+function intersectSubjectSets(a, b) {
+  const result = emptySubjectSet();
+  for (const [type, ids] of a.concrete) {
+    const bIds = b.concrete.get(type);
+    for (const id of ids) {
+      if ((bIds !== undefined && bIds.has(id)) || wildcardCovers(b, type, id)) addConcrete(result, type, id);
+    }
+  }
+  for (const [type, ids] of b.concrete) {
+    for (const id of ids) {
+      if (wildcardCovers(a, type, id)) addConcrete(result, type, id);
+    }
+  }
+  for (const [type, aExclusions] of a.wildcards) {
+    const bExclusions = b.wildcards.get(type);
+    if (bExclusions === undefined) continue;
+    const merged = new Set(aExclusions);
+    for (const id of bExclusions) merged.add(id);
+    result.wildcards.set(type, merged);
+  }
+  return normalizeSubjectSet(result);
+}
+
+function subtractSubjectSets(target, other) {
+  for (const [type, ids] of target.concrete) {
+    const otherIds = other.concrete.get(type);
+    for (const id of ids) {
+      if ((otherIds !== undefined && otherIds.has(id)) || wildcardCovers(other, type, id)) ids.delete(id);
+    }
+    if (!ids.size) target.concrete.delete(type);
+  }
+  for (const [type, exclusions] of target.wildcards) {
+    const otherExclusions = other.wildcards.get(type);
+    if (otherExclusions !== undefined) {
+      // `type:* - type:*` removes the wildcard; the subtrahend's exclusions
+      // survive (they were not subtracted) unless excluded here too.
+      target.wildcards.delete(type);
+      for (const id of otherExclusions) if (!exclusions.has(id)) addConcrete(target, type, id);
+      continue;
+    }
+    const otherIds = other.concrete.get(type);
+    if (otherIds !== undefined) for (const id of otherIds) exclusions.add(id);
+  }
+  return normalizeSubjectSet(target);
+}
+
+/**
+ * The built-in in-process "Zanzibar-lite" relation resolver.
  *
  * Implements the Kerberos `relations` delegation contract (`check`/`list`
  * taking `principal`/`resource` objects) plus a standalone SpiceDB-flavoured
- * API (`check` with `subject`/`permission` strings). Static tuples are indexed
- * in memory (zero IO); dynamic tuples are read through the same read-only
- * cache fallback used for policies — storage, TTL, invalidation and reverse
- * documents are fully owned by the backend.
- *
- * @param {object} [options]
- * @returns {{
- *   schema: RelationSchema,
- *   check: (args: Record<string, unknown>, opts?: { memo?: Map<string, unknown> }) => Promise<boolean>,
- *   list: (args: Record<string, unknown>, opts?: { memo?: Map<string, unknown> }) => Promise<Set<string>>,
- * }}
+ * API (`check` with `subject`/`permission` strings, `lookupSubjects`,
+ * `lookupResources`). Static tuples are indexed in memory (zero IO); dynamic
+ * tuples are read through the same read-only cache fallback used for policies
+ * — storage, TTL, invalidation and reverse documents are fully owned by the
+ * backend. Optional OpenTelemetry via the `telemetry` option (spans per
+ * public call + `kerberos.relations.checks` / `kerberos.cache.requests`
+ * metrics), guarded so telemetry can never affect resolution.
  */
-function createRelationResolver(options = {}) {
-  const {
-    schema,
-    tuples,
-    cache,
-    cacheRetry,
-    codec,
-    logger,
-    subjectType = 'user',
-    mapPrincipal,
-    mapResource,
-    reverseIndex = false,
-    maxDepth,
-    maxResults,
-    z,
-    ajv,
-    typebox,
-  } = options;
+class RelationResolver {
+  /** @type {RelationSchema} */
+  #schema;
 
-  const compiled = schema instanceof RelationSchema ? schema : new RelationSchema(schema, { z, ajv, typebox, codec });
-  const limits = {
-    maxDepth: maxDepth ?? DEFAULT_MAX_DEPTH,
-    maxResults: maxResults ?? DEFAULT_MAX_RESULTS,
-  };
-  const reader = createCacheReader(cache, cacheRetry);
-  const log = createLoggerWriter(logger);
-  const validationOptions = { z, ajv, typebox };
+  #reader;
 
-  // Static tuple indexes — both directions are built at construction, so
-  // static data supports checks AND reverse lookups with zero IO.
+  #log;
+
+  #telemetry;
+
+  #includeIdentity = true;
+
+  #limits;
+
+  #subjectType;
+
+  #mapPrincipal = null;
+
+  #mapResource = null;
+
+  #reverseIndex = false;
+
   /** @type {Map<string, Array<{ subject: object, caveat: object | null }>>} */
-  const forwardIndex = new Map();
+  #forwardIndex = new Map();
+
   /** @type {Map<string, Array<{ resource: { type: string, id: string }, relation: string, caveat: object | null }>>} */
-  const reverseStaticIndex = new Map();
+  #reverseStaticIndex = new Map();
 
-  function logDebug(entry, message) {
+  // Structural reachability analyses per `${type}#${name}` — instance-scoped
+  // and bounded by schema size, so a plain Map (not WeakMap) is the right
+  // structure; session memos are request-scoped Maps owned by the caller.
+  #reachabilityMemo = new Map();
+
+  // Argument validators are resolved ONCE here (mirroring Kerberos'
+  // constructor-precompiled validators) instead of re-resolving the backend on
+  // every public call.
+  #checkArgsValidator = null;
+
+  #lookupSubjectsArgsValidator = null;
+
+  #lookupResourcesArgsValidator = null;
+
+  // O(1) strategy tables over rewrite-node kinds (prototype-less, built once).
+  #rewriteEvaluators;
+
+  #subjectCollectors;
+
+  #reachabilityCollectors;
+
+  /**
+   * @param {object} options
+   */
+  constructor(options = {}) {
+    const {
+      schema,
+      tuples,
+      cache,
+      cacheRetry,
+      codec,
+      logger,
+      telemetry,
+      subjectType = 'user',
+      mapPrincipal,
+      mapResource,
+      reverseIndex = false,
+      maxDepth,
+      maxResults,
+      z,
+      ajv,
+      typebox,
+    } = options;
+
+    this.#schema = schema instanceof RelationSchema ? schema : new RelationSchema(schema, { z, ajv, typebox, codec });
+    this.#limits = {
+      maxDepth: maxDepth ?? DEFAULT_MAX_DEPTH,
+      maxResults: maxResults ?? DEFAULT_MAX_RESULTS,
+    };
+    this.#reader = createCacheReader(cache, cacheRetry);
+    this.#log = createLoggerWriter(logger);
+    this.#telemetry = createTelemetryWriter(telemetry);
+    this.#includeIdentity = telemetry?.includeIdentity !== false;
+    this.#subjectType = subjectType;
+    if (typeof mapPrincipal === 'function') this.#mapPrincipal = mapPrincipal;
+    if (typeof mapResource === 'function') this.#mapResource = mapResource;
+    this.#reverseIndex = reverseIndex === true;
+
+    this.#checkArgsValidator = resolveValidationAdapter({
+      z,
+      ajv,
+      typebox,
+      buildJson: () => RelationsJsonSchemas.buildCheckArgs(),
+      buildTypeBox: (t) => RelationsTypeBoxSchemas.buildCheckArgs(t),
+      buildZod: (zed) => RelationsZodSchemas.buildCheckArgs(zed),
+    });
+    this.#lookupSubjectsArgsValidator = resolveValidationAdapter({
+      z,
+      ajv,
+      typebox,
+      buildJson: () => RelationsJsonSchemas.buildLookupSubjectsArgs(),
+      buildTypeBox: (t) => RelationsTypeBoxSchemas.buildLookupSubjectsArgs(t),
+      buildZod: (zed) => RelationsZodSchemas.buildLookupSubjectsArgs(zed),
+    });
+    this.#lookupResourcesArgsValidator = resolveValidationAdapter({
+      z,
+      ajv,
+      typebox,
+      buildJson: () => RelationsJsonSchemas.buildLookupResourcesArgs(),
+      buildTypeBox: (t) => RelationsTypeBoxSchemas.buildLookupResourcesArgs(t),
+      buildZod: (zed) => RelationsZodSchemas.buildLookupResourcesArgs(zed),
+    });
+
+    if (tuples !== undefined && tuples !== null) {
+      if (!Array.isArray(tuples)) throw new KerberosRelationsError('"tuples" must be an array of relationship tuples');
+      for (const raw of tuples) this.#indexStaticTuple(raw);
+    }
+
+    // Strategy tables (dispatch on node.kind). Sequential-vs-parallel choices
+    // are deliberate per handler: `check` keeps short-circuiting sequential
+    // (the first ALLOW/DENY skips the remaining branches AND their cache
+    // reads); `collect` needs every branch, so children resolve as one
+    // allSettled wave.
+    this.#rewriteEvaluators = createDispatch({
+      ref: (node, resource, subject, session, depth) =>
+        this.#checkInternal(resource, node.name, subject, session, depth - 1),
+      union: async (node, resource, subject, session, depth) => {
+        for (const child of node.children) {
+          if (await this.#evalRewrite(child, resource, subject, session, depth)) return true;
+        }
+        return false;
+      },
+      intersection: async (node, resource, subject, session, depth) => {
+        for (const child of node.children) {
+          if (!(await this.#evalRewrite(child, resource, subject, session, depth))) return false;
+        }
+        return true;
+      },
+      exclusion: async (node, resource, subject, session, depth) => {
+        // Base first (order-sensitive); an empty base short-circuits.
+        if (!(await this.#evalRewrite(node.base, resource, subject, session, depth))) return false;
+        for (const subtracted of node.subtract) {
+          if (await this.#evalRewrite(subtracted, resource, subject, session, depth)) return false;
+        }
+        return true;
+      },
+      arrow: async (node, resource, subject, session, depth) => {
+        const entries = await this.#readRelationEntries(resource.type, resource.id, node.via, session);
+        // Compile guarantees tupleset entries are direct object refs; a false
+        // caveat removes the tuple, shrinking the reached object set.
+        const objects = [];
+        for (const entry of entries) {
+          if (entry.caveat && !this.#evaluateCaveat(entry.caveat, session)) continue;
+          objects.push(entry.subject);
+        }
+        if (node.all) {
+          // Intersection arrow (`.all`): every reached object must grant the
+          // target; zero reached objects yield false (SpiceDB semantics).
+          if (!objects.length) return false;
+          for (const object of objects) {
+            const matched = await this.#checkInternal(
+              { type: object.type, id: object.id },
+              node.target,
+              subject,
+              session,
+              depth - 1,
+            );
+            if (!matched) return false;
+          }
+          return true;
+        }
+        for (const object of objects) {
+          const matched = await this.#checkInternal(
+            { type: object.type, id: object.id },
+            node.target,
+            subject,
+            session,
+            depth - 1,
+          );
+          if (matched) return true;
+        }
+        return false;
+      },
+    });
+
+    this.#subjectCollectors = createDispatch({
+      ref: (node, resource, session, depth) => this.#collectSubjectsInternal(resource, node.name, session, depth - 1),
+      union: async (node, resource, session, depth) => {
+        const waves = [];
+        for (const child of node.children) waves.push(this.#collectRewriteSubjects(child, resource, session, depth));
+        const collected = await settleAll(waves);
+        const result = emptySubjectSet();
+        for (const set of collected) unionSubjectSets(result, set);
+        return result;
+      },
+      intersection: async (node, resource, session, depth) => {
+        const waves = [];
+        for (const child of node.children) waves.push(this.#collectRewriteSubjects(child, resource, session, depth));
+        const collected = await settleAll(waves);
+        let result = collected[0];
+        for (let i = 1; i < collected.length; i++) result = intersectSubjectSets(result, collected[i]);
+        return result;
+      },
+      exclusion: async (node, resource, session, depth) => {
+        const waves = [this.#collectRewriteSubjects(node.base, resource, session, depth)];
+        for (const subtracted of node.subtract) {
+          waves.push(this.#collectRewriteSubjects(subtracted, resource, session, depth));
+        }
+        const collected = await settleAll(waves);
+        const result = collected[0];
+        for (let i = 1; i < collected.length; i++) subtractSubjectSets(result, collected[i]);
+        return result;
+      },
+      arrow: async (node, resource, session, depth) => {
+        const entries = await this.#readRelationEntries(resource.type, resource.id, node.via, session);
+        const waves = [];
+        for (const entry of entries) {
+          const object = entry.subject;
+          waves.push(
+            this.#collectSubjectsInternal({ type: object.type, id: object.id }, node.target, session, depth - 1),
+          );
+        }
+        if (node.all) {
+          if (!waves.length) return emptySubjectSet();
+          const collected = await settleAll(waves);
+          let result = collected[0];
+          for (let i = 1; i < collected.length; i++) result = intersectSubjectSets(result, collected[i]);
+          return result;
+        }
+        const collected = await settleAll(waves);
+        const result = emptySubjectSet();
+        for (const set of collected) unionSubjectSets(result, set);
+        return result;
+      },
+    });
+
+    this.#reachabilityCollectors = createDispatch({
+      ref: (node, type, analysis, visited) => this.#collectReachability(type, node.name, analysis, visited),
+      union: (node, type, analysis, visited) => {
+        for (const child of node.children) this.#collectReachabilityNode(type, child, analysis, visited);
+      },
+      intersection: (node, type, analysis, visited) => {
+        // Candidates from the first branch suffice (a member must be in all);
+        // verification filters the superset.
+        analysis.needsCheck = true;
+        this.#collectReachabilityNode(type, node.children[0], analysis, visited);
+      },
+      exclusion: (node, type, analysis, visited) => {
+        // Only the base produces candidates; subtraction is verification-only.
+        analysis.needsCheck = true;
+        this.#collectReachabilityNode(type, node.base, analysis, visited);
+      },
+      arrow: (node, type, analysis) => {
+        if (node.all) analysis.needsCheck = true;
+        for (const ref of this.#schema.getRelationSubjects(type, node.via)) {
+          if (ref.caveat) analysis.needsCheck = true;
+          const edgeKey = `${node.via}|${ref.type}|${node.target}`;
+          if (!analysis.arrowEdgeKeys.has(edgeKey)) {
+            analysis.arrowEdgeKeys.add(edgeKey);
+            analysis.arrowEdges.push({ via: node.via, objectType: ref.type, target: node.target });
+          }
+        }
+      },
+    });
+  }
+
+  get schema() {
+    return this.#schema;
+  }
+
+  /**
+   * Checks whether a subject holds a relation/permission on a resource.
+   * Accepts both the engine-contract form (`{ principal, resource, relation }`
+   * with objects) and the standalone form (`{ resource: 'type:id', permission,
+   * subject: 'type:id', context? }`).
+   *
+   * @param {Record<string, unknown>} args
+   * @param {{ memo?: Map<string, unknown> | null }} [opts]
+   * @returns {Promise<boolean>}
+   */
+  async check(args, opts = {}) {
+    if (!args || typeof args !== 'object') throw new KerberosRelationsError('check requires an arguments object');
+    const parsed = this.#parseArgs(this.#checkArgsValidator, 'Invalid check arguments', args);
+
+    const name = resolveName(parsed, 'check');
+    const resource = this.#normalizeResource(parsed.resource);
+    const subject = this.#normalizeSubject(parsed);
+    this.#assertCheckable(resource.type, name, 'check');
+
+    return this.#runInstrumented('RelationsCheck', async (otel) => {
+      const session = createSession(parsed, opts);
+      const allowed = await this.#checkInternal(resource, name, subject, session, this.#limits.maxDepth);
+      this.#telemetry.recordRelationCheck(allowed);
+      this.#setSpanAttributes(otel, resource.type, name, {
+        'kerberos.allowed': allowed,
+        subjectKey: subjectToString(subject),
+        resourceId: resource.id,
+      });
+      return allowed;
+    });
+  }
+
+  /**
+   * Resolves which of the requested relations/permissions the subject holds
+   * on the resource. Sequential on purpose: the shared session memo lets
+   * later names reuse the subproblems (and cache reads) of earlier ones.
+   *
+   * @param {Record<string, unknown>} args
+   * @param {{ memo?: Map<string, unknown> | null }} [opts]
+   * @returns {Promise<Set<string>>}
+   */
+  async list(args, opts = {}) {
+    if (!args || typeof args !== 'object') throw new KerberosRelationsError('list requires an arguments object');
+    const names = args.relations;
+    if (!Array.isArray(names) || !names.length) {
+      throw new KerberosRelationsError('list requires a non-empty "relations" array');
+    }
+
+    const resource = this.#normalizeResource(args.resource);
+    const subject = this.#normalizeSubject(args);
+    for (const name of names) this.#assertCheckable(resource.type, name, 'list');
+
+    return this.#runInstrumented('RelationsList', async (otel) => {
+      const session = createSession(args, opts);
+      const granted = new Set();
+      for (const name of names) {
+        const allowed = await this.#checkInternal(resource, name, subject, session, this.#limits.maxDepth);
+        this.#telemetry.recordRelationCheck(allowed);
+        if (allowed) granted.add(name);
+      }
+      this.#setSpanAttributes(otel, resource.type, null, {
+        'kerberos.relations.requested': names.length,
+        'kerberos.relations.granted': granted.size,
+        subjectKey: subjectToString(subject),
+        resourceId: resource.id,
+      });
+      return granted;
+    });
+  }
+
+  /**
+   * "Who can access `resource#permission`?" — expands the permission tree to
+   * terminal subjects (auto-recursive through groups). Wildcards come back as
+   * `'type:*'` strings, or `{ subject: 'type:*', exclusions: [...] }` under
+   * exclusions.
+   *
+   * @param {Record<string, unknown>} args
+   * @param {{ memo?: Map<string, unknown> | null }} [opts]
+   * @returns {Promise<Array<string | { subject: string, exclusions: string[] }>>}
+   */
+  async lookupSubjects(args, opts = {}) {
+    if (!args || typeof args !== 'object') {
+      throw new KerberosRelationsError('lookupSubjects requires an arguments object');
+    }
+    const parsed = this.#parseArgs(this.#lookupSubjectsArgsValidator, 'Invalid lookupSubjects arguments', args);
+
+    const name = resolveName(parsed, 'lookupSubjects');
+    const resource = this.#normalizeResource(parsed.resource);
+    this.#assertCheckable(resource.type, name, 'lookupSubjects');
+
+    return this.#runInstrumented('RelationsLookupSubjects', async (otel) => {
+      const session = createSession(parsed, opts);
+      const collected = await this.#collectSubjectsInternal(resource, name, session, this.#limits.maxDepth);
+
+      const subjectTypeFilter = typeof parsed.subjectType === 'string' ? parsed.subjectType : null;
+      const results = [];
+      for (const [type, ids] of collected.concrete) {
+        if (subjectTypeFilter && type !== subjectTypeFilter) continue;
+        for (const id of ids) results.push(`${type}:${id}`);
+      }
+      for (const [type, exclusions] of collected.wildcards) {
+        if (subjectTypeFilter && type !== subjectTypeFilter) continue;
+        if (exclusions.size) {
+          const excluded = [];
+          for (const id of exclusions) excluded.push(`${type}:${id}`);
+          excluded.sort();
+          results.push({ subject: `${type}:*`, exclusions: excluded });
+        } else {
+          results.push(`${type}:*`);
+        }
+      }
+      results.sort(compareSubjectResults);
+      const limited = results.length > this.#limits.maxResults ? results.slice(0, this.#limits.maxResults) : results;
+      this.#setSpanAttributes(otel, resource.type, name, {
+        'kerberos.result.count': limited.length,
+        resourceId: resource.id,
+      });
+      return limited;
+    });
+  }
+
+  /**
+   * "Which resources of `resourceType` can the subject access?" — reachability
+   * entrypoints over the reverse index plus candidate verification for
+   * intersection/exclusion/caveat paths (SpiceDB's LookupResources2 pattern).
+   *
+   * @param {Record<string, unknown>} args
+   * @param {{ memo?: Map<string, unknown> | null }} [opts]
+   * @returns {Promise<string[]>}
+   */
+  async lookupResources(args, opts = {}) {
+    if (!args || typeof args !== 'object') {
+      throw new KerberosRelationsError('lookupResources requires an arguments object');
+    }
+    const parsed = this.#parseArgs(this.#lookupResourcesArgsValidator, 'Invalid lookupResources arguments', args);
+
+    const name = resolveName(parsed, 'lookupResources');
+    const subject = this.#normalizeSubject(parsed);
+    const resourceType = parsed.resourceType;
+    this.#assertCheckable(resourceType, name, 'lookupResources');
+
+    // Cache-backed tuples make the static reverse index incomplete: the
+    // backend must opt in by maintaining `rel:rev:<subject>` documents.
+    if (this.#reader.enabled && !this.#reverseIndex) {
+      throw new KerberosRelationsError(
+        'lookupResources over cache-backed tuples requires reverseIndex: true and backend-maintained "rel:rev:<subject>" reverse documents',
+      );
+    }
+
+    return this.#runInstrumented('RelationsLookupResources', async (otel) => {
+      const session = createSession(parsed, opts);
+      const ids = await this.#lookupResourcesInternal(subject, resourceType, name, session, this.#limits.maxDepth);
+      const sortedIds = [...ids].sort();
+      const limitedIds =
+        sortedIds.length > this.#limits.maxResults ? sortedIds.slice(0, this.#limits.maxResults) : sortedIds;
+      const results = [];
+      for (const id of limitedIds) results.push(`${resourceType}:${id}`);
+      this.#setSpanAttributes(otel, resourceType, name, {
+        'kerberos.result.count': results.length,
+        subjectKey: subjectToString(subject),
+      });
+      return results;
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Telemetry plumbing — every call is guarded; a broken tracer/meter must
+  // never affect resolution, and with telemetry disabled the public methods
+  // run the handler directly (zero instrumentation overhead).
+  // -------------------------------------------------------------------------
+
+  #runInstrumented(reqKind, handler) {
+    if (!this.#telemetry.enabled) return handler(null);
+
+    const startedAt = getNow();
+    return this.#telemetry.withRequestSpan(reqKind, null, null, async (otel) => {
+      try {
+        return await handler(otel);
+      } catch (error) {
+        this.#telemetry.recordError(otel, error);
+        throw error;
+      } finally {
+        this.#telemetry.endRequest(otel, reqKind, getNow() - startedAt);
+      }
+    });
+  }
+
+  // `subjectKey`/`resourceId` are identity attributes, gated on the same
+  // `includeIdentity` flag as the engine writer; the rest is applied as-is.
+  #setSpanAttributes(otel, resourceKind, name, attributes) {
+    const span = otel?.span;
+    if (!span) return;
     try {
-      log.debug({ timestamp: new Date().toISOString(), ...entry }, message);
+      span.setAttribute?.('kerberos.resource.kind', resourceKind);
+      if (name) span.setAttribute?.('kerberos.relations.name', name);
+      for (const key of Object.keys(attributes)) {
+        if (key === 'subjectKey' || key === 'resourceId') continue;
+        span.setAttribute?.(key, attributes[key]);
+      }
+      if (this.#includeIdentity) {
+        if (attributes.subjectKey) span.setAttribute?.('kerberos.relations.subject', attributes.subjectKey);
+        if (attributes.resourceId) span.setAttribute?.('kerberos.resource.id', attributes.resourceId);
+      }
+    } catch {
+      // Telemetry must never break resolution.
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Argument normalization
+  // -------------------------------------------------------------------------
+
+  #parseArgs(validator, label, args) {
+    if (!validator) return args;
+    try {
+      return validator.parse(args);
+    } catch (error) {
+      throw new KerberosRelationsError(`${label}: ${error.message}`, { cause: error });
+    }
+  }
+
+  #normalizeResource(input) {
+    if (typeof input === 'string') return parseObjectRef(input, 'resource');
+    if (input && typeof input === 'object') {
+      if (this.#mapResource) return parseObjectRef(this.#mapResource(input), 'resource');
+      if (typeof input.kind === 'string' && typeof input.id === 'string') return { type: input.kind, id: input.id };
+      if (typeof input.type === 'string' && typeof input.id === 'string') return { type: input.type, id: input.id };
+    }
+    throw new KerberosRelationsError('A resource is required — pass a "type:id" string or a { kind, id } object');
+  }
+
+  #normalizeSubject(args) {
+    if (typeof args.subject === 'string') return parseSubjectRef(args.subject);
+    if (args.principal && typeof args.principal === 'object') {
+      if (this.#mapPrincipal) return parseSubjectRef(this.#mapPrincipal(args.principal));
+      if (typeof args.principal.id === 'string') {
+        return { type: this.#subjectType, id: args.principal.id, relation: null };
+      }
+    }
+    throw new KerberosRelationsError('A subject is required — pass a "subject" string or a "principal" object');
+  }
+
+  #assertCheckable(resourceType, name, label) {
+    if (!this.#schema.isCheckable(resourceType, name)) {
+      throw new KerberosRelationsError(`${label}: "${name}" is not a relation or permission of "${resourceType}"`);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Diagnostics (fail-open logging; early return avoids the timestamp/object
+  // allocations entirely when no logger is configured)
+  // -------------------------------------------------------------------------
+
+  #logDebug(entry, message) {
+    if (!this.#log.enabled) return;
+    try {
+      this.#log.debug({ timestamp: new Date().toISOString(), ...entry }, message);
     } catch {
       // Diagnostics must never affect resolution.
     }
   }
 
-  function logError(entry, message) {
+  #logError(entry, message) {
+    if (!this.#log.enabled) return;
     try {
-      log.error({ timestamp: new Date().toISOString(), ...entry }, message);
+      this.#log.error({ timestamp: new Date().toISOString(), ...entry }, message);
     } catch {
       // Diagnostics must never affect resolution.
     }
   }
 
-  function indexStaticTuple(raw) {
+  // -------------------------------------------------------------------------
+  // Tuple storage — static indexes + cache-backed documents
+  // -------------------------------------------------------------------------
+
+  #indexStaticTuple(raw) {
     const tuple = parseTuple(raw);
-    const refs = compiled.getRelationSubjects(tuple.resource.type, tuple.relation);
-    if (!refs) {
+    const admission = this.#schema.getRelationAdmission(tuple.resource.type, tuple.relation);
+    if (!admission) {
       throw new KerberosRelationsError(
         `Invalid tuple — "${tuple.relation}" is not a relation of "${tuple.resource.type}"`,
       );
     }
-    if (!matchesAllowedRefs(refs, tuple.subject, tuple.caveat)) {
+    if (!admission.has(subjectAdmissionKey(tuple.subject, tuple.caveat))) {
       throw new KerberosRelationsError(
         `Invalid tuple — subject "${subjectToString(tuple.subject)}"${tuple.caveat ? ` with caveat "${tuple.caveat.name}"` : ''} is not allowed on "${tuple.resource.type}#${tuple.relation}"`,
       );
     }
 
     const forwardKey = `${tuple.resource.type}:${tuple.resource.id}#${tuple.relation}`;
-    let entries = forwardIndex.get(forwardKey);
+    let entries = this.#forwardIndex.get(forwardKey);
     if (!entries) {
       entries = [];
-      forwardIndex.set(forwardKey, entries);
+      this.#forwardIndex.set(forwardKey, entries);
     }
     entries.push({ subject: tuple.subject, caveat: tuple.caveat });
 
     const reverseKey = subjectToString(tuple.subject);
-    let reverseEntries = reverseStaticIndex.get(reverseKey);
+    let reverseEntries = this.#reverseStaticIndex.get(reverseKey);
     if (!reverseEntries) {
       reverseEntries = [];
-      reverseStaticIndex.set(reverseKey, reverseEntries);
+      this.#reverseStaticIndex.set(reverseKey, reverseEntries);
     }
     reverseEntries.push({ resource: tuple.resource, relation: tuple.relation, caveat: tuple.caveat });
   }
 
-  if (tuples !== undefined && tuples !== null) {
-    if (!Array.isArray(tuples)) throw new KerberosRelationsError('"tuples" must be an array of relationship tuples');
-    for (const raw of tuples) indexStaticTuple(raw);
-  }
-
-  function parseDocumentEntry(raw) {
-    if (typeof raw === 'string') return { subject: parseSubjectRef(raw), caveat: null };
-    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-      let caveat = null;
-      if (raw.caveat !== undefined && raw.caveat !== null) {
-        if (typeof raw.caveat !== 'object' || typeof raw.caveat.name !== 'string') {
-          throw new KerberosRelationsError('Invalid relation document caveat — expected { name, context? }');
-        }
-        caveat = { name: raw.caveat.name, context: raw.caveat.context ?? null };
-      }
-      return { subject: parseSubjectRef(raw.subject), caveat };
-    }
-    throw new KerberosRelationsError(
-      'Invalid relation document entry — expected a subject string or { subject, caveat? }',
-    );
-  }
-
-  async function readCachedEntries(type, id, relation) {
+  async #readCachedEntries(type, id, relation) {
     const key = `rel:${type}:${id}:${relation}`;
-    // A transient backend failure surfaces as KerberosCacheError (after the
-    // reader's retry loop) and propagates to the caller.
-    const value = await reader.get(key);
-    if (value === undefined || value === null) return EMPTY_ENTRIES;
+    let value;
+    try {
+      // A transient backend failure surfaces as KerberosCacheError (after the
+      // reader's retry loop) and propagates to the caller.
+      value = await this.#reader.get(key);
+    } catch (error) {
+      this.#telemetry.recordCacheRequest('error', CACHE_KIND_RELATION);
+      throw error;
+    }
+    if (value === undefined || value === null) {
+      this.#telemetry.recordCacheRequest('miss', CACHE_KIND_RELATION);
+      return EMPTY_ENTRIES;
+    }
 
     try {
       const doc = typeof value === 'string' ? JSON.parse(value) : value;
       if (!Array.isArray(doc)) {
         throw new KerberosRelationsError('relation document must be a JSON array of subject entries');
       }
-      const refs = compiled.getRelationSubjects(type, relation);
+      const admission = this.#schema.getRelationAdmission(type, relation);
       const entries = [];
       for (const raw of doc) {
         const entry = parseDocumentEntry(raw);
         // Entries the schema does not admit are data problems, not crashes:
         // skip them fail-closed and leave a trace for the operator.
-        if (!matchesAllowedRefs(refs, entry.subject, entry.caveat)) {
-          logDebug(
+        if (!admission.has(subjectAdmissionKey(entry.subject, entry.caveat))) {
+          this.#logDebug(
             { event: 'Relations.entrySkipped', key },
             `Kerberos.js relations: skipped subject entry not allowed by schema on "${type}#${relation}"`,
           );
@@ -188,11 +838,13 @@ function createRelationResolver(options = {}) {
         }
         entries.push(entry);
       }
+      this.#telemetry.recordCacheRequest('hit', CACHE_KIND_RELATION);
       return entries;
     } catch (error) {
       // A corrupt document is deterministic (retrying cannot help) — treat it
       // as empty instead of failing the check.
-      logError(
+      this.#telemetry.recordCacheRequest('error', CACHE_KIND_RELATION);
+      this.#logError(
         { event: 'Relations.corruptDocument', key, errorMessage: error.message },
         `Kerberos.js relations: corrupt relation document for "${key}"`,
       );
@@ -210,31 +862,107 @@ function createRelationResolver(options = {}) {
   // the in-process equivalent of SpiceDB's singleflight coalescing. (Check
   // subproblems memoize completed values only — an in-flight promise there
   // would deadlock on cyclic data instead of hitting the depth guard.)
-  function readRelationEntries(type, id, relation, session) {
+  #readRelationEntries(type, id, relation, session) {
     const docKey = `doc|${type}:${id}#${relation}`;
     let promise = session.memo.get(docKey);
     if (!promise) {
-      const staticEntries = forwardIndex.get(`${type}:${id}#${relation}`);
+      const staticEntries = this.#forwardIndex.get(`${type}:${id}#${relation}`);
       if (staticEntries) promise = Promise.resolve(staticEntries);
-      else promise = reader.enabled ? readCachedEntries(type, id, relation) : Promise.resolve(EMPTY_ENTRIES);
+      else promise = this.#reader.enabled ? this.#readCachedEntries(type, id, relation) : EMPTY_ENTRIES_PROMISE;
       session.memo.set(docKey, promise);
     }
     return promise;
   }
 
-  // Caveat conditions see `{ P, ctx }` — deliberately NOT the resource:
+  async #loadReverseEntries(subjectKey) {
+    const staticEntries = this.#reverseStaticIndex.get(subjectKey) ?? EMPTY_ENTRIES;
+    if (!this.#reader.enabled || !this.#reverseIndex) return staticEntries;
+
+    // Reverse documents are keyed by the canonical subject string; unlike the
+    // forward direction, static and cached entries are UNIONED — a subject can
+    // legitimately appear in both static tuples and backend-maintained docs.
+    const key = `rel:rev:${subjectKey}`;
+    let value;
+    try {
+      value = await this.#reader.get(key);
+    } catch (error) {
+      this.#telemetry.recordCacheRequest('error', CACHE_KIND_RELATION);
+      throw error;
+    }
+    if (value === undefined || value === null) {
+      this.#telemetry.recordCacheRequest('miss', CACHE_KIND_RELATION);
+      return staticEntries;
+    }
+
+    try {
+      const doc = typeof value === 'string' ? JSON.parse(value) : value;
+      if (!Array.isArray(doc)) {
+        throw new KerberosRelationsError('reverse document must be a JSON array of entries');
+      }
+      const entries = staticEntries.length ? [] : null;
+      const parsed = [];
+      for (const raw of doc) {
+        const entry = parseReverseEntry(raw);
+        // A reverse entry pointing at a name that is not a relation of the
+        // resource type is a data problem — skip it fail-closed.
+        if (!this.#schema.getRelationSubjects(entry.resource.type, entry.relation)) {
+          this.#logDebug(
+            { event: 'Relations.entrySkipped', key },
+            `Kerberos.js relations: skipped reverse entry with unknown relation "${entry.resource.type}#${entry.relation}"`,
+          );
+          continue;
+        }
+        parsed.push(entry);
+      }
+      this.#telemetry.recordCacheRequest('hit', CACHE_KIND_RELATION);
+      if (!staticEntries.length) return parsed;
+      for (const entry of staticEntries) entries.push(entry);
+      for (const entry of parsed) entries.push(entry);
+      return entries;
+    } catch (error) {
+      this.#telemetry.recordCacheRequest('error', CACHE_KIND_RELATION);
+      this.#logError(
+        { event: 'Relations.corruptDocument', key, errorMessage: error.message },
+        `Kerberos.js relations: corrupt reverse document for "${key}"`,
+      );
+      return staticEntries;
+    }
+  }
+
+  // Promise-memoized like forward documents (reverse reads never recurse).
+  #readReverseEntries(subjectKey, session) {
+    const memoKey = `rev|${subjectKey}`;
+    let promise = session.memo.get(memoKey);
+    if (!promise) {
+      promise = this.#loadReverseEntries(subjectKey);
+      session.memo.set(memoKey, promise);
+    }
+    return promise;
+  }
+
+  // -------------------------------------------------------------------------
+  // Caveats — conditions see `{ P, ctx }`, deliberately NOT the resource:
   // SpiceDB caveats only receive context, and keeping R out of scope is what
   // makes memoized subproblems safely shareable across a batch of resources.
   // Written (tuple) context takes precedence over check-time context.
-  function evaluateCaveat(caveat, session) {
-    const condition = compiled.getCaveat(caveat.name);
+  // -------------------------------------------------------------------------
+
+  #evaluateCaveat(caveat, session) {
+    const condition = this.#schema.getCaveat(caveat.name);
     if (!condition) return false;
-    const ctx = { ...(session.context ?? {}), ...(caveat.context ?? {}) };
+
+    // Merge fast paths: allocate only when both sides carry context.
+    const written = caveat.context;
+    const checkTime = session.context;
+    let ctx;
+    if (written && checkTime) ctx = { ...checkTime, ...written };
+    else ctx = written ?? checkTime ?? EMPTY_CONTEXT;
+
     try {
       return condition.isFulfilled({ P: session.principal, ctx, context: ctx }) === true;
     } catch (error) {
       // A throwing caveat fails closed — the tuple simply does not match.
-      logError(
+      this.#logError(
         { event: 'Relations.caveatError', caveat: caveat.name, errorMessage: error.message },
         `Kerberos.js relations: caveat "${caveat.name}" threw and was treated as not matched`,
       );
@@ -242,107 +970,61 @@ function createRelationResolver(options = {}) {
     }
   }
 
-  async function checkDirect(resource, relation, subject, session, depth) {
-    const entries = await readRelationEntries(resource.type, resource.id, relation, session);
+  // -------------------------------------------------------------------------
+  // Check engine
+  // -------------------------------------------------------------------------
 
-    // Pass 1: terminal matches — exact subjects (including userset subjects)
-    // and type-wide wildcards. Cheap, no recursion.
+  // Single pass over the document: terminal matches (exact subjects,
+  // including userset subjects, and type-wide wildcards) resolve immediately
+  // and stay ahead of recursion; userset entries are gathered and redispatched
+  // only after every cheap terminal candidate has been ruled out.
+  async #checkDirect(resource, relation, subject, session, depth) {
+    const entries = await this.#readRelationEntries(resource.type, resource.id, relation, session);
+
+    let usersets = null;
     for (const entry of entries) {
       const es = entry.subject;
       const exact = es.type === subject.type && es.id === subject.id && es.relation === subject.relation;
       const wildcard =
         es.relation === null && es.id === SUBJECT_WILDCARD_ID && subject.relation === null && es.type === subject.type;
-      if (!exact && !wildcard) continue;
-      if (entry.caveat && !evaluateCaveat(entry.caveat, session)) continue;
-      return true;
+      if (exact || wildcard) {
+        if (!entry.caveat || this.#evaluateCaveat(entry.caveat, session)) return true;
+        continue;
+      }
+      if (es.relation !== null) (usersets ??= []).push(entry);
     }
 
-    // Pass 2: userset subjects (`group:eng#member`) redispatch recursively. A
-    // caveat on the userset tuple gates the whole traversal.
-    for (const entry of entries) {
-      const es = entry.subject;
-      if (es.relation === null) continue;
-      if (es.type === subject.type && es.id === subject.id && es.relation === subject.relation) continue;
-      if (entry.caveat && !evaluateCaveat(entry.caveat, session)) continue;
-      const matched = await checkInternal({ type: es.type, id: es.id }, es.relation, subject, session, depth - 1);
-      if (matched) return true;
+    if (usersets) {
+      // Sequential on purpose: the first match wins, so parallel redispatch
+      // would only waste cache reads. A caveat on the userset tuple gates the
+      // whole traversal.
+      for (const entry of usersets) {
+        if (entry.caveat && !this.#evaluateCaveat(entry.caveat, session)) continue;
+        const es = entry.subject;
+        const matched = await this.#checkInternal(
+          { type: es.type, id: es.id },
+          es.relation,
+          subject,
+          session,
+          depth - 1,
+        );
+        if (matched) return true;
+      }
     }
 
     return false;
   }
 
-  async function evalRewrite(node, resource, subject, session, depth) {
-    switch (node.kind) {
-      case 'ref':
-        return checkInternal(resource, node.name, subject, session, depth - 1);
-      case 'union': {
-        // Sequential with short-circuit: the first ALLOW wins and later
-        // branches (and their cache reads) are skipped entirely.
-        for (const child of node.children) {
-          if (await evalRewrite(child, resource, subject, session, depth)) return true;
-        }
-        return false;
-      }
-      case 'intersection': {
-        for (const child of node.children) {
-          if (!(await evalRewrite(child, resource, subject, session, depth))) return false;
-        }
-        return true;
-      }
-      case 'exclusion': {
-        // Base first (order-sensitive); an empty base short-circuits.
-        if (!(await evalRewrite(node.base, resource, subject, session, depth))) return false;
-        for (const subtracted of node.subtract) {
-          if (await evalRewrite(subtracted, resource, subject, session, depth)) return false;
-        }
-        return true;
-      }
-      case 'arrow': {
-        const entries = await readRelationEntries(resource.type, resource.id, node.via, session);
-        // Compile guarantees tupleset entries are direct object refs; a false
-        // caveat removes the tuple, shrinking the reached object set.
-        const objects = [];
-        for (const entry of entries) {
-          if (entry.caveat && !evaluateCaveat(entry.caveat, session)) continue;
-          objects.push(entry.subject);
-        }
-        if (node.all) {
-          // Intersection arrow (`.all`): every reached object must grant the
-          // target; zero reached objects yield false (SpiceDB semantics).
-          if (!objects.length) return false;
-          for (const object of objects) {
-            const matched = await checkInternal(
-              { type: object.type, id: object.id },
-              node.target,
-              subject,
-              session,
-              depth - 1,
-            );
-            if (!matched) return false;
-          }
-          return true;
-        }
-        for (const object of objects) {
-          const matched = await checkInternal(
-            { type: object.type, id: object.id },
-            node.target,
-            subject,
-            session,
-            depth - 1,
-          );
-          if (matched) return true;
-        }
-        return false;
-      }
-      default:
-        throw new KerberosRelationsError(`Unsupported rewrite node "${node.kind}"`);
-    }
+  #evalRewrite(node, resource, subject, session, depth) {
+    const evaluator = this.#rewriteEvaluators[node.kind];
+    if (!evaluator) throw new KerberosRelationsError(`Unsupported rewrite node "${node.kind}"`);
+    return evaluator(node, resource, subject, session, depth);
   }
 
-  async function checkInternal(resource, name, subject, session, depth) {
+  async #checkInternal(resource, name, subject, session, depth) {
     if (depth <= 0) {
       throw new KerberosRelationsError(
-        `Relation check exceeded the maximum depth of ${limits.maxDepth} — the relationship graph is recursive or too deep`,
+        `Relation check exceeded the maximum depth of ${this.#limits.maxDepth} — the relationship graph is recursive or too deep`,
       );
     }
 
@@ -353,266 +1035,70 @@ function createRelationResolver(options = {}) {
     if (session.memo.has(key)) return session.memo.get(key);
 
     let result;
-    const relationRefs = compiled.getRelationSubjects(resource.type, name);
-    if (relationRefs) {
-      result = await checkDirect(resource, name, subject, session, depth);
+    if (this.#schema.getRelationSubjects(resource.type, name)) {
+      result = await this.#checkDirect(resource, name, subject, session, depth);
     } else {
-      const node = compiled.getPermissionNode(resource.type, name);
-      if (!node) {
-        // A type or name outside the schema simply resolves to no access.
-        result = false;
-      } else {
-        result = await evalRewrite(node, resource, subject, session, depth);
-      }
+      const node = this.#schema.getPermissionNode(resource.type, name);
+      // A type or name outside the schema simply resolves to no access.
+      result = node ? await this.#evalRewrite(node, resource, subject, session, depth) : false;
     }
 
     session.memo.set(key, result);
     return result;
   }
 
-  function parseArgs(label, value, build) {
-    try {
-      return parseWithValidation(value, { ...validationOptions, ...build });
-    } catch (error) {
-      throw new KerberosRelationsError(`${label}: ${error.message}`, { cause: error });
-    }
+  // -------------------------------------------------------------------------
+  // Reachability analysis (structural, memoized per resolver; the memo entry
+  // is seeded before the walk so recursive schemas converge) — which
+  // relations ON the type can contribute candidates, which arrows jump to
+  // other objects, and whether candidates must be re-verified with check()
+  // (intersections, exclusions, `.all` arrows or caveated refs on the path —
+  // SpiceDB's "optimized vs full entrypoints" distinction).
+  // -------------------------------------------------------------------------
+
+  #collectReachabilityNode(type, node, analysis, visited) {
+    const collector = this.#reachabilityCollectors[node.kind];
+    if (!collector) throw new KerberosRelationsError(`Unsupported rewrite node "${node.kind}"`);
+    collector(node, type, analysis, visited);
   }
 
-  function normalizeResource(input) {
-    if (typeof input === 'string') return parseObjectRef(input, 'resource');
-    if (input && typeof input === 'object') {
-      if (typeof mapResource === 'function') return parseObjectRef(mapResource(input), 'resource');
-      if (typeof input.kind === 'string' && typeof input.id === 'string') return { type: input.kind, id: input.id };
-      if (typeof input.type === 'string' && typeof input.id === 'string') return { type: input.type, id: input.id };
-    }
-    throw new KerberosRelationsError('A resource is required — pass a "type:id" string or a { kind, id } object');
-  }
-
-  function normalizeSubject(args) {
-    if (typeof args.subject === 'string') return parseSubjectRef(args.subject);
-    if (args.principal && typeof args.principal === 'object') {
-      if (typeof mapPrincipal === 'function') return parseSubjectRef(mapPrincipal(args.principal));
-      if (typeof args.principal.id === 'string') return { type: subjectType, id: args.principal.id, relation: null };
-    }
-    throw new KerberosRelationsError('A subject is required — pass a "subject" string or a "principal" object');
-  }
-
-  function resolveName(args, label) {
-    const relation = args.relation ?? args.permission;
-    if (typeof relation !== 'string' || !relation.length) {
-      throw new KerberosRelationsError(`${label} requires a "relation" or "permission" name`);
-    }
-    if (args.relation != null && args.permission != null && args.relation !== args.permission) {
-      throw new KerberosRelationsError(`${label} received both "relation" and "permission" with different values`);
-    }
-    return relation;
-  }
-
-  function createSession(args, opts) {
-    return {
-      memo: opts?.memo instanceof Map ? opts.memo : new Map(),
-      principal: args.principal && typeof args.principal === 'object' ? args.principal : null,
-      context: args.context && typeof args.context === 'object' ? args.context : null,
-    };
-  }
-
-  function assertCheckable(resourceType, name, label) {
-    if (!compiled.isCheckable(resourceType, name)) {
-      throw new KerberosRelationsError(`${label}: "${name}" is not a relation or permission of "${resourceType}"`);
-    }
-  }
-
-  async function check(args, opts = {}) {
-    if (!args || typeof args !== 'object') throw new KerberosRelationsError('check requires an arguments object');
-    const parsed = parseArgs('Invalid check arguments', args, {
-      buildJson: () => RelationsJsonSchemas.buildCheckArgs(),
-      buildTypeBox: (t) => RelationsTypeBoxSchemas.buildCheckArgs(t),
-      buildZod: (zed) => RelationsZodSchemas.buildCheckArgs(zed),
-    });
-
-    const name = resolveName(parsed, 'check');
-    const resource = normalizeResource(parsed.resource);
-    const subject = normalizeSubject(parsed);
-    assertCheckable(resource.type, name, 'check');
-
-    const session = createSession(parsed, opts);
-    return checkInternal(resource, name, subject, session, limits.maxDepth);
-  }
-
-  async function list(args, opts = {}) {
-    if (!args || typeof args !== 'object') throw new KerberosRelationsError('list requires an arguments object');
-    const names = args.relations;
-    if (!Array.isArray(names) || !names.length) {
-      throw new KerberosRelationsError('list requires a non-empty "relations" array');
-    }
-
-    const resource = normalizeResource(args.resource);
-    const subject = normalizeSubject(args);
-    for (const name of names) assertCheckable(resource.type, name, 'list');
-
-    // Sequential on purpose: a shared memo lets later names reuse the
-    // subproblems (and cache reads) of earlier ones, and single-threaded JS
-    // has no singleflight to dedupe concurrent identical walks.
-    const session = createSession(args, opts);
-    const granted = new Set();
-    for (const name of names) {
-      if (await checkInternal(resource, name, subject, session, limits.maxDepth)) granted.add(name);
-    }
-    return granted;
-  }
-
-  // --------------------------------------------------------------------------
-  // Reverse APIs — lookupSubjects ("who can access?") and lookupResources
-  // ("what can the subject access?"), modeled on SpiceDB's LookupSubjects and
-  // LookupResources2 (reachability entrypoints + candidate verification).
-  // --------------------------------------------------------------------------
-
-  // Structural reachability analysis per (type, name): which relations ON the
-  // type can contribute candidates, which arrows jump to other objects, and
-  // whether candidates must be re-verified with check() (any intersection,
-  // exclusion, `.all` arrow or caveated ref on the path — SpiceDB's
-  // "optimized vs full entrypoints" distinction). Memoized per resolver; the
-  // memo entry is seeded before the walk so recursive schemas converge.
-  const reachabilityMemo = new Map();
-
-  function collectReachabilityNode(type, node, analysis, visited) {
-    switch (node.kind) {
-      case 'ref':
-        collectReachability(type, node.name, analysis, visited);
-        return;
-      case 'union':
-        for (const child of node.children) collectReachabilityNode(type, child, analysis, visited);
-        return;
-      case 'intersection':
-        // Candidates from the first branch suffice (a member must be in all);
-        // verification filters the superset.
-        analysis.needsCheck = true;
-        collectReachabilityNode(type, node.children[0], analysis, visited);
-        return;
-      case 'exclusion':
-        // Only the base produces candidates; subtraction is verification-only.
-        analysis.needsCheck = true;
-        collectReachabilityNode(type, node.base, analysis, visited);
-        return;
-      case 'arrow': {
-        if (node.all) analysis.needsCheck = true;
-        for (const ref of compiled.getRelationSubjects(type, node.via)) {
-          if (ref.caveat) analysis.needsCheck = true;
-          const edgeKey = `${node.via}|${ref.type}|${node.target}`;
-          if (!analysis.arrowEdgeKeys.has(edgeKey)) {
-            analysis.arrowEdgeKeys.add(edgeKey);
-            analysis.arrowEdges.push({ via: node.via, objectType: ref.type, target: node.target });
-          }
-        }
-        return;
-      }
-      default:
-        throw new KerberosRelationsError(`Unsupported rewrite node "${node.kind}"`);
-    }
-  }
-
-  function collectReachability(type, name, analysis, visited) {
+  #collectReachability(type, name, analysis, visited) {
     const visitKey = `${type}#${name}`;
     if (visited.has(visitKey)) return;
     visited.add(visitKey);
 
-    const refs = compiled.getRelationSubjects(type, name);
+    const refs = this.#schema.getRelationSubjects(type, name);
     if (refs) {
       analysis.entryRelations.add(name);
       for (const ref of refs) if (ref.caveat) analysis.needsCheck = true;
       return;
     }
-    const node = compiled.getPermissionNode(type, name);
-    if (node) collectReachabilityNode(type, node, analysis, visited);
+    const node = this.#schema.getPermissionNode(type, name);
+    if (node) this.#collectReachabilityNode(type, node, analysis, visited);
   }
 
-  function analyzeReachability(type, name) {
+  #analyzeReachability(type, name) {
     const key = `${type}#${name}`;
-    let analysis = reachabilityMemo.get(key);
+    let analysis = this.#reachabilityMemo.get(key);
     if (!analysis) {
       analysis = { entryRelations: new Set(), arrowEdges: [], arrowEdgeKeys: new Set(), needsCheck: false };
-      reachabilityMemo.set(key, analysis);
-      collectReachability(type, name, analysis, new Set());
+      this.#reachabilityMemo.set(key, analysis);
+      this.#collectReachability(type, name, analysis, new Set());
     }
     return analysis;
   }
 
-  function parseReverseEntry(raw) {
-    // 'document:readme#viewer' | { resource: 'document:readme', relation, caveat? }
-    if (typeof raw === 'string') {
-      const hash = raw.indexOf('#');
-      if (hash === -1) throw new KerberosRelationsError(`Invalid reverse entry "${raw}" — expected "type:id#relation"`);
-      return { resource: parseObjectRef(raw.slice(0, hash), 'resource'), relation: raw.slice(hash + 1), caveat: null };
-    }
-    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-      let caveat = null;
-      if (raw.caveat !== undefined && raw.caveat !== null) {
-        if (typeof raw.caveat !== 'object' || typeof raw.caveat.name !== 'string') {
-          throw new KerberosRelationsError('Invalid reverse entry caveat — expected { name, context? }');
-        }
-        caveat = { name: raw.caveat.name, context: raw.caveat.context ?? null };
-      }
-      return { resource: parseObjectRef(raw.resource, 'resource'), relation: raw.relation, caveat };
-    }
-    throw new KerberosRelationsError('Invalid reverse entry — expected "type:id#relation" or { resource, relation }');
-  }
-
-  async function loadReverseEntries(subjectKey) {
-    const staticEntries = reverseStaticIndex.get(subjectKey) ?? EMPTY_ENTRIES;
-    if (!reader.enabled || !reverseIndex) return staticEntries;
-
-    // Reverse documents are keyed by the canonical subject string; unlike the
-    // forward direction, static and cached entries are UNIONED — a subject can
-    // legitimately appear in both static tuples and backend-maintained docs.
-    const key = `rel:rev:${subjectKey}`;
-    const value = await reader.get(key);
-    if (value === undefined || value === null) return staticEntries;
-
-    try {
-      const doc = typeof value === 'string' ? JSON.parse(value) : value;
-      if (!Array.isArray(doc)) {
-        throw new KerberosRelationsError('reverse document must be a JSON array of entries');
-      }
-      const entries = [];
-      for (const raw of doc) {
-        const entry = parseReverseEntry(raw);
-        // A reverse entry pointing at a name that is not a relation of the
-        // resource type is a data problem — skip it fail-closed.
-        if (!compiled.getRelationSubjects(entry.resource.type, entry.relation)) {
-          logDebug(
-            { event: 'Relations.entrySkipped', key },
-            `Kerberos.js relations: skipped reverse entry with unknown relation "${entry.resource.type}#${entry.relation}"`,
-          );
-          continue;
-        }
-        entries.push(entry);
-      }
-      return staticEntries.length ? [...staticEntries, ...entries] : entries;
-    } catch (error) {
-      logError(
-        { event: 'Relations.corruptDocument', key, errorMessage: error.message },
-        `Kerberos.js relations: corrupt reverse document for "${key}"`,
-      );
-      return staticEntries;
-    }
-  }
-
-  // Promise-memoized like forward documents (reverse reads never recurse).
-  function readReverseEntries(subjectKey, session) {
-    const memoKey = `rev|${subjectKey}`;
-    let promise = session.memo.get(memoKey);
-    if (!promise) {
-      promise = loadReverseEntries(subjectKey);
-      session.memo.set(memoKey, promise);
-    }
-    return promise;
-  }
+  // -------------------------------------------------------------------------
+  // Reverse lookups
+  // -------------------------------------------------------------------------
 
   // The membership closure of a subject: every userset (`type:id#relation`)
   // the subject transitively belongs to via direct tuples, plus the type-wide
-  // wildcard key. `caveated` reports whether any traversed tuple carried a
-  // caveat — candidates found through it must then be verified with check().
-  async function subjectClosure(subject, session) {
+  // wildcard key. BFS proceeds level by level with each level's reverse reads
+  // fired as one settled wave (reads are independent and all needed).
+  // `caveated` reports whether any traversed tuple carried a caveat —
+  // candidates found through it must then be verified with check().
+  #subjectClosure(subject, session) {
     const memoKey = `closure|${subjectToString(subject)}`;
     let promise = session.memo.get(memoKey);
     if (promise) return promise;
@@ -620,23 +1106,32 @@ function createRelationResolver(options = {}) {
     promise = (async () => {
       const members = new Set();
       let caveated = false;
-      const queue = [subjectToString(subject)];
-      if (subject.relation === null && subject.id !== SUBJECT_WILDCARD_ID) queue.push(`${subject.type}:*`);
-      const seen = new Set(queue);
+      let level = [subjectToString(subject)];
+      if (subject.relation === null && subject.id !== SUBJECT_WILDCARD_ID) level.push(`${subject.type}:*`);
+      const seen = new Set(level);
 
-      while (queue.length) {
-        const memberKey = queue.shift();
-        members.add(memberKey);
-        for (const entry of await readReverseEntries(memberKey, session)) {
-          if (entry.caveat) caveated = true;
-          // Every tuple `res#rel@member` makes the subject a member of the
-          // userset `res#rel`, which may itself appear as a subject elsewhere.
-          const usersetKey = `${entry.resource.type}:${entry.resource.id}#${entry.relation}`;
-          if (!seen.has(usersetKey)) {
-            seen.add(usersetKey);
-            queue.push(usersetKey);
+      while (level.length) {
+        const reads = [];
+        for (const memberKey of level) {
+          members.add(memberKey);
+          reads.push(this.#readReverseEntries(memberKey, session));
+        }
+        const entryLists = await settleAll(reads);
+
+        const next = [];
+        for (const entries of entryLists) {
+          for (const entry of entries) {
+            if (entry.caveat) caveated = true;
+            // Every tuple `res#rel@member` makes the subject a member of the
+            // userset `res#rel`, which may itself appear as a subject elsewhere.
+            const usersetKey = `${entry.resource.type}:${entry.resource.id}#${entry.relation}`;
+            if (!seen.has(usersetKey)) {
+              seen.add(usersetKey);
+              next.push(usersetKey);
+            }
           }
         }
+        level = next;
       }
       return { members, caveated };
     })();
@@ -644,72 +1139,110 @@ function createRelationResolver(options = {}) {
     return promise;
   }
 
-  async function lookupResourcesInternal(subject, type, name, session, depth) {
+  async #lookupResourcesInternal(subject, type, name, session, depth) {
     if (depth <= 0) {
       throw new KerberosRelationsError(
-        `Relation lookup exceeded the maximum depth of ${limits.maxDepth} — the relationship graph is recursive or too deep`,
+        `Relation lookup exceeded the maximum depth of ${this.#limits.maxDepth} — the relationship graph is recursive or too deep`,
       );
     }
 
     const memoKey = `lr|${type}#${name}@${subjectToString(subject)}`;
     if (session.memo.has(memoKey)) return session.memo.get(memoKey);
 
-    const analysis = analyzeReachability(type, name);
-    const closure = await subjectClosure(subject, session);
+    const analysis = this.#analyzeReachability(type, name);
+    const closure = await this.#subjectClosure(subject, session);
     const candidates = new Set();
 
     // Entrypoint candidates: reverse entries of any closure member that hit a
-    // contributing relation of the target type.
-    for (const member of closure.members) {
-      for (const entry of await readReverseEntries(member, session)) {
+    // contributing relation of the target type. All reads fire as one wave
+    // (independent, all needed), then a synchronous scan collects candidates.
+    const memberReads = [];
+    for (const member of closure.members) memberReads.push(this.#readReverseEntries(member, session));
+    const memberEntryLists = await settleAll(memberReads);
+    for (const entries of memberEntryLists) {
+      for (const entry of entries) {
         if (entry.resource.type === type && analysis.entryRelations.has(entry.relation)) {
           candidates.add(entry.resource.id);
         }
       }
     }
 
-    // Arrow candidates. Cross-type arrows recurse (find objects granting the
-    // target, then resources referencing them through the tupleset relation);
-    // same-type arrows (recursive hierarchies like folder→parent→folder) are
-    // resolved as a fixpoint BFS over the candidate set instead of recursing
-    // on an identical subproblem.
+    // Arrow candidates. Cross-type arrows recurse in parallel (independent
+    // subtrees, all needed); same-type arrows (recursive hierarchies like
+    // folder→parent→folder) are resolved as a fixpoint BFS over the candidate
+    // set instead of recursing on an identical subproblem.
     const sameTypeEdges = [];
+    const crossEdges = [];
     for (const edge of analysis.arrowEdges) {
-      if (edge.objectType === type && edge.target === name) {
-        sameTypeEdges.push(edge);
-        continue;
+      if (edge.objectType === type && edge.target === name) sameTypeEdges.push(edge);
+      else crossEdges.push(edge);
+    }
+    if (crossEdges.length) {
+      const recursions = [];
+      for (const edge of crossEdges) {
+        recursions.push(this.#lookupResourcesInternal(subject, edge.objectType, edge.target, session, depth - 1));
       }
-      const objects = await lookupResourcesInternal(subject, edge.objectType, edge.target, session, depth - 1);
-      for (const objectId of objects) {
-        for (const entry of await readReverseEntries(`${edge.objectType}:${objectId}`, session)) {
+      const objectSets = await settleAll(recursions);
+
+      // One wave of reverse reads over every reached object, then a scan.
+      const objectReads = [];
+      const objectEdges = [];
+      for (let i = 0; i < crossEdges.length; i++) {
+        const edge = crossEdges[i];
+        for (const objectId of objectSets[i]) {
+          objectEdges.push(edge);
+          objectReads.push(this.#readReverseEntries(`${edge.objectType}:${objectId}`, session));
+        }
+      }
+      const objectEntryLists = await settleAll(objectReads);
+      for (let i = 0; i < objectEntryLists.length; i++) {
+        const edge = objectEdges[i];
+        for (const entry of objectEntryLists[i]) {
           if (entry.resource.type === type && entry.relation === edge.via) candidates.add(entry.resource.id);
         }
       }
     }
     if (sameTypeEdges.length) {
-      const queue = [...candidates];
-      while (queue.length) {
-        const id = queue.shift();
-        for (const entry of await readReverseEntries(`${type}:${id}`, session)) {
-          if (entry.resource.type !== type || candidates.has(entry.resource.id)) continue;
-          for (const edge of sameTypeEdges) {
-            if (entry.relation !== edge.via) continue;
-            candidates.add(entry.resource.id);
-            queue.push(entry.resource.id);
-            break;
+      // Fixpoint BFS in waves: each frontier's reverse reads settle together.
+      let frontier = [...candidates];
+      while (frontier.length) {
+        const reads = [];
+        for (const id of frontier) reads.push(this.#readReverseEntries(`${type}:${id}`, session));
+        const entryLists = await settleAll(reads);
+
+        const next = [];
+        for (const entries of entryLists) {
+          for (const entry of entries) {
+            if (entry.resource.type !== type || candidates.has(entry.resource.id)) continue;
+            for (const edge of sameTypeEdges) {
+              if (entry.relation !== edge.via) continue;
+              candidates.add(entry.resource.id);
+              next.push(entry.resource.id);
+              break;
+            }
           }
         }
+        frontier = next;
       }
     }
 
     // Verification (SpiceDB LookupResources2 pattern): candidate sets reached
     // through intersections, exclusions, `.all` arrows or caveats are a
-    // superset — filter them through the check engine (shared memo).
+    // superset — filter them through the check engine as one settled wave
+    // (all results needed, no short-circuit; document reads coalesce through
+    // the promise memo).
     let ids = candidates;
     if (analysis.needsCheck || closure.caveated) {
-      ids = new Set();
+      const candidateList = [];
+      const checks = [];
       for (const id of candidates) {
-        if (await checkInternal({ type, id }, name, subject, session, depth - 1)) ids.add(id);
+        candidateList.push(id);
+        checks.push(this.#checkInternal({ type, id }, name, subject, session, depth - 1));
+      }
+      const outcomes = await settleAll(checks);
+      ids = new Set();
+      for (let i = 0; i < outcomes.length; i++) {
+        if (outcomes[i] === true) ids.add(candidateList[i]);
       }
     }
 
@@ -717,202 +1250,50 @@ function createRelationResolver(options = {}) {
     return ids;
   }
 
-  async function lookupResources(args, opts = {}) {
-    if (!args || typeof args !== 'object') {
-      throw new KerberosRelationsError('lookupResources requires an arguments object');
-    }
-    const parsed = parseArgs('Invalid lookupResources arguments', args, {
-      buildJson: () => RelationsJsonSchemas.buildLookupResourcesArgs(),
-      buildTypeBox: (t) => RelationsTypeBoxSchemas.buildLookupResourcesArgs(t),
-      buildZod: (zed) => RelationsZodSchemas.buildLookupResourcesArgs(zed),
-    });
+  // -------------------------------------------------------------------------
+  // lookupSubjects collection
+  // -------------------------------------------------------------------------
 
-    const name = resolveName(parsed, 'lookupResources');
-    const subject = normalizeSubject(parsed);
-    const resourceType = parsed.resourceType;
-    assertCheckable(resourceType, name, 'lookupResources');
-
-    // Cache-backed tuples make the static reverse index incomplete: the
-    // backend must opt in by maintaining `rel:rev:<subject>` documents.
-    if (reader.enabled && !reverseIndex) {
-      throw new KerberosRelationsError(
-        'lookupResources over cache-backed tuples requires reverseIndex: true and backend-maintained "rel:rev:<subject>" reverse documents',
-      );
-    }
-
-    const session = createSession(parsed, opts);
-    const ids = await lookupResourcesInternal(subject, resourceType, name, session, limits.maxDepth);
-    const sortedIds = [...ids].sort().slice(0, limits.maxResults);
-    const results = [];
-    for (const id of sortedIds) results.push(`${resourceType}:${id}`);
-    return results;
-  }
-
-  // --- lookupSubjects ------------------------------------------------------
-  // Collected subject sets track concrete subjects plus type-wide wildcards
-  // with exclusions (`user:* - {user:anne}`), mirroring SpiceDB's
-  // LookupSubjects results. Caveated tuples are INCLUDED (the result is an
-  // upper bound for them) — use check() for per-subject certainty.
-
-  function emptySubjectSet() {
-    return { concrete: new Set(), wildcards: new Map() };
-  }
-
-  function normalizeSubjectSet(set) {
-    // An exclusion that is also independently a concrete member is void.
-    for (const exclusions of set.wildcards.values()) {
-      for (const key of exclusions) if (set.concrete.has(key)) exclusions.delete(key);
-    }
-    return set;
-  }
-
-  function wildcardCovers(set, key) {
-    const type = key.slice(0, key.indexOf(':'));
-    const exclusions = set.wildcards.get(type);
-    return exclusions !== undefined && !exclusions.has(key);
-  }
-
-  function unionSubjectSets(target, other) {
-    for (const key of other.concrete) target.concrete.add(key);
-    for (const [type, otherExclusions] of other.wildcards) {
-      const existing = target.wildcards.get(type);
-      if (existing === undefined) {
-        target.wildcards.set(type, new Set(otherExclusions));
-        continue;
-      }
-      // Excluded from the union only if excluded on both sides.
-      for (const key of existing) if (!otherExclusions.has(key)) existing.delete(key);
-    }
-    return normalizeSubjectSet(target);
-  }
-
-  function intersectSubjectSets(a, b) {
+  async #collectRelationSubjects(resource, relation, session, depth) {
     const result = emptySubjectSet();
-    for (const key of a.concrete) {
-      if (b.concrete.has(key) || wildcardCovers(b, key)) result.concrete.add(key);
-    }
-    for (const key of b.concrete) {
-      if (wildcardCovers(a, key)) result.concrete.add(key);
-    }
-    for (const [type, aExclusions] of a.wildcards) {
-      const bExclusions = b.wildcards.get(type);
-      if (bExclusions === undefined) continue;
-      result.wildcards.set(type, new Set([...aExclusions, ...bExclusions]));
-    }
-    return normalizeSubjectSet(result);
-  }
+    const entries = await this.#readRelationEntries(resource.type, resource.id, relation, session);
 
-  function subtractSubjectSets(target, other) {
-    for (const key of [...target.concrete]) {
-      if (other.concrete.has(key) || wildcardCovers(other, key)) target.concrete.delete(key);
-    }
-    for (const [type, exclusions] of [...target.wildcards]) {
-      const otherExclusions = other.wildcards.get(type);
-      if (otherExclusions !== undefined) {
-        // `type:* - type:*` removes the wildcard; the subtrahend's exclusions
-        // survive (they were not subtracted) unless excluded here too.
-        target.wildcards.delete(type);
-        for (const key of otherExclusions) if (!exclusions.has(key)) target.concrete.add(key);
-        continue;
-      }
-      for (const key of other.concrete) {
-        if (key.startsWith(`${type}:`)) exclusions.add(key);
-      }
-    }
-    return normalizeSubjectSet(target);
-  }
-
-  async function collectRelationSubjects(resource, relation, session, depth) {
-    const result = emptySubjectSet();
-    for (const entry of await readRelationEntries(resource.type, resource.id, relation, session)) {
+    // Single pass: terminal subjects land directly in the set, userset
+    // expansions are gathered and resolved as one settled wave (collect needs
+    // every branch — there is no short-circuit to preserve).
+    let waves = null;
+    for (const entry of entries) {
       const es = entry.subject;
       if (es.relation !== null) {
-        // Userset — expand recursively; SpiceDB's LookupSubjects is
-        // auto-recursive through groups.
-        const expanded = await collectSubjectsInternal({ type: es.type, id: es.id }, es.relation, session, depth - 1);
-        unionSubjectSets(result, expanded);
+        (waves ??= []).push(
+          this.#collectSubjectsInternal({ type: es.type, id: es.id }, es.relation, session, depth - 1),
+        );
         continue;
       }
       if (es.id === SUBJECT_WILDCARD_ID) {
         if (!result.wildcards.has(es.type)) result.wildcards.set(es.type, new Set());
         continue;
       }
-      result.concrete.add(`${es.type}:${es.id}`);
+      addConcrete(result, es.type, es.id);
+    }
+
+    if (waves) {
+      const expanded = await settleAll(waves);
+      for (const set of expanded) unionSubjectSets(result, set);
     }
     return normalizeSubjectSet(result);
   }
 
-  async function collectRewriteSubjects(node, resource, session, depth) {
-    switch (node.kind) {
-      case 'ref':
-        return collectSubjectsInternal(resource, node.name, session, depth - 1);
-      case 'union': {
-        const result = emptySubjectSet();
-        for (const child of node.children) {
-          unionSubjectSets(result, await collectRewriteSubjects(child, resource, session, depth));
-        }
-        return result;
-      }
-      case 'intersection': {
-        let result = await collectRewriteSubjects(node.children[0], resource, session, depth);
-        for (let i = 1; i < node.children.length; i++) {
-          result = intersectSubjectSets(
-            result,
-            await collectRewriteSubjects(node.children[i], resource, session, depth),
-          );
-        }
-        return result;
-      }
-      case 'exclusion': {
-        const result = await collectRewriteSubjects(node.base, resource, session, depth);
-        for (const subtracted of node.subtract) {
-          subtractSubjectSets(result, await collectRewriteSubjects(subtracted, resource, session, depth));
-        }
-        return result;
-      }
-      case 'arrow': {
-        const entries = await readRelationEntries(resource.type, resource.id, node.via, session);
-        const objects = [];
-        for (const entry of entries) objects.push(entry.subject);
-        if (node.all) {
-          if (!objects.length) return emptySubjectSet();
-          let result = await collectSubjectsInternal(
-            { type: objects[0].type, id: objects[0].id },
-            node.target,
-            session,
-            depth - 1,
-          );
-          for (let i = 1; i < objects.length; i++) {
-            result = intersectSubjectSets(
-              result,
-              await collectSubjectsInternal(
-                { type: objects[i].type, id: objects[i].id },
-                node.target,
-                session,
-                depth - 1,
-              ),
-            );
-          }
-          return result;
-        }
-        const result = emptySubjectSet();
-        for (const object of objects) {
-          unionSubjectSets(
-            result,
-            await collectSubjectsInternal({ type: object.type, id: object.id }, node.target, session, depth - 1),
-          );
-        }
-        return result;
-      }
-      default:
-        throw new KerberosRelationsError(`Unsupported rewrite node "${node.kind}"`);
-    }
+  #collectRewriteSubjects(node, resource, session, depth) {
+    const collector = this.#subjectCollectors[node.kind];
+    if (!collector) throw new KerberosRelationsError(`Unsupported rewrite node "${node.kind}"`);
+    return collector(node, resource, session, depth);
   }
 
-  async function collectSubjectsInternal(resource, name, session, depth) {
+  async #collectSubjectsInternal(resource, name, session, depth) {
     if (depth <= 0) {
       throw new KerberosRelationsError(
-        `Relation lookup exceeded the maximum depth of ${limits.maxDepth} — the relationship graph is recursive or too deep`,
+        `Relation lookup exceeded the maximum depth of ${this.#limits.maxDepth} — the relationship graph is recursive or too deep`,
       );
     }
 
@@ -922,62 +1303,43 @@ function createRelationResolver(options = {}) {
     if (session.memo.has(memoKey)) return session.memo.get(memoKey);
 
     let result;
-    if (compiled.getRelationSubjects(resource.type, name)) {
-      result = await collectRelationSubjects(resource, name, session, depth);
+    if (this.#schema.getRelationSubjects(resource.type, name)) {
+      result = await this.#collectRelationSubjects(resource, name, session, depth);
     } else {
-      const node = compiled.getPermissionNode(resource.type, name);
-      result = node ? await collectRewriteSubjects(node, resource, session, depth) : emptySubjectSet();
+      const node = this.#schema.getPermissionNode(resource.type, name);
+      result = node ? await this.#collectRewriteSubjects(node, resource, session, depth) : emptySubjectSet();
     }
 
     session.memo.set(memoKey, result);
     return result;
   }
+}
 
-  async function lookupSubjects(args, opts = {}) {
-    if (!args || typeof args !== 'object') {
-      throw new KerberosRelationsError('lookupSubjects requires an arguments object');
-    }
-    const parsed = parseArgs('Invalid lookupSubjects arguments', args, {
-      buildJson: () => RelationsJsonSchemas.buildLookupSubjectsArgs(),
-      buildTypeBox: (t) => RelationsTypeBoxSchemas.buildLookupSubjectsArgs(t),
-      buildZod: (zed) => RelationsZodSchemas.buildLookupSubjectsArgs(zed),
-    });
-
-    const name = resolveName(parsed, 'lookupSubjects');
-    const resource = normalizeResource(parsed.resource);
-    assertCheckable(resource.type, name, 'lookupSubjects');
-
-    const session = createSession(parsed, opts);
-    const collected = await collectSubjectsInternal(resource, name, session, limits.maxDepth);
-
-    const subjectType = typeof parsed.subjectType === 'string' ? parsed.subjectType : null;
-    const results = [];
-    for (const key of collected.concrete) {
-      if (subjectType && !key.startsWith(`${subjectType}:`)) continue;
-      results.push(key);
-    }
-    for (const [type, exclusions] of collected.wildcards) {
-      if (subjectType && type !== subjectType) continue;
-      if (exclusions.size) results.push({ subject: `${type}:*`, exclusions: [...exclusions].sort() });
-      else results.push(`${type}:*`);
-    }
-    results.sort((left, right) => {
-      const a = typeof left === 'string' ? left : left.subject;
-      const b = typeof right === 'string' ? right : right.subject;
-      return a < b ? -1 : a > b ? 1 : 0;
-    });
-    return results.slice(0, limits.maxResults);
+function resolveName(args, label) {
+  const relation = args.relation ?? args.permission;
+  if (typeof relation !== 'string' || !relation.length) {
+    throw new KerberosRelationsError(`${label} requires a "relation" or "permission" name`);
   }
+  if (args.relation != null && args.permission != null && args.relation !== args.permission) {
+    throw new KerberosRelationsError(`${label} received both "relation" and "permission" with different values`);
+  }
+  return relation;
+}
 
+function createSession(args, opts) {
   return {
-    schema: compiled,
-    check,
-    list,
-    lookupSubjects,
-    lookupResources,
+    memo: opts?.memo instanceof Map ? opts.memo : new Map(),
+    principal: args.principal && typeof args.principal === 'object' ? args.principal : null,
+    context: args.context && typeof args.context === 'object' ? args.context : null,
   };
 }
 
+function compareSubjectResults(left, right) {
+  const a = typeof left === 'string' ? left : left.subject;
+  const b = typeof right === 'string' ? right : right.subject;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 module.exports = {
-  createRelationResolver,
+  RelationResolver,
 };
