@@ -1,10 +1,10 @@
 # Kerberos.js
 
-Kerberos.js is a JavaScript library for authorization solutions. It is a simple and lightweight Cerbos (Cerbos mini).
+Kerberos.js is a JavaScript library for authorization solutions. It is a simple and lightweight Cerbos (Cerbos mini) + lightweight SpiceDB (Zanzibar-lite) implementation.
 
 ### Motivation:
 
-- Cerbos is a powerful authorization engine, but it is written in Go and requires a separate server to run.
+- Cerbos and SpiceDB are powerful authorization engines, but they are written in Go and require a separate server to run.
 - We all know that gRPC is faster than REST API because it uses protobuf. But it can be even faster—by avoiding network requests altogether. Often, maintaining a separate service just for your permissions can be unnecessary, don’t you think?
 - Kerberos.js is a lightweight alternative that can be used in the browser or server-side JavaScript applications (only up to 8 KB, query planner included).
 - Some features that are only available in the paid version of Cerbos(Cerbos Hub) are available here for free.
@@ -13,6 +13,7 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
     - isAllowed API;
 - lack of some functionality in your Cerbos policies. With Kerberos.js you can use all the power of JavaScript to create your policies.
 - if you are using Cerbos Hub and you want to test your policies locally, it can be a bit tricky. With Kerberos.js you can test your policies locally without any hassle.
+- if you are using SpiceDB and want a lightweight, in-process alternative, Kerberos.js provides a Zanzibar-lite implementation.
 
 ### Features:
 
