@@ -5,6 +5,80 @@ All notable changes to **`@alexify/kerberos`** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-07-21
+
+### Added
+
+- **Resources Query Plan API — `kerberos.planResources(args)`**, Cerbos-compatible
+  ([`/api/plan/resources`](https://docs.cerbos.dev/cerbos/latest/api/#resources-query-plan)):
+  partially evaluates the policies against everything known at plan time (full
+  principal, `resource.kind`, known `attr`) and returns a filter over the
+  unknown resource fields — `KIND_ALWAYS_ALLOWED` / `KIND_ALWAYS_DENIED` /
+  `KIND_CONDITIONAL` with a Cerbos-shaped `{ operator, operands }` condition
+  tree (`request.resource.id` / `request.resource.attr.*` variables; operators
+  `and/or/not/eq/ne/lt/le/gt/ge/in/add/sub/mult/div/mod/index/list`), ready for
+  translation into database queries (compatible in shape with Cerbos ORM
+  query-plan adapters).
+  - **Full layer parity with `isAllowed`**: principal override (Deny wins,
+    conditional principal rules compose residually), role-policy allowlist with
+    implicit deny + `parentRoles` intersection (Deny-wins across roles, cycle
+    detection), resource layer Deny-over-Allow with default deny, scope
+    first-match-wins + `policyVersion` selection, cache-backed policies —
+    guarded by a property-style parity suite (`test/PlanParity.test.js`) that
+    grid-samples unknown attributes against real `isAllowed` results.
+  - **Partial evaluator** for codec-compiled `{ $expr }` conditions
+    (`src/planning/`): constant folding through the codec's own interpreter
+    (including `&&`/`||`/`?:` laziness), `variables` inlined at `V.*` use
+    sites, `C.*`/`P.*` folded to literals; plain JS-function conditions and
+    non-translatable constructs degrade soundly to the Kerberos **`opaque`**
+    operator (translator post-filters).
+  - **ReBAC bridge**: relation-backed derived roles plan as the Kerberos
+    **`relation`** operator; the new exported **`expandRelationOperands(plan,
+    lookup)`** helper materializes them into
+    `in(request.resource.id, [ids])` via any resolver (e.g.
+    `RelationResolver.lookupResources`).
+  - `action` (single) **or** `actions` (multi — the plan is the AND of the
+    per-action plans, Cerbos semantics); `includeMeta` adds `filterDebug`
+    (s-expression rendering), `matchedScopes` and the `resolution` trace;
+    `onError: 'deny'` fail-closes to `KIND_ALWAYS_DENIED`; wildcard `'*'`
+    actions are rejected at validation.
+  - Policy sources resolve as one concurrent `Promise.allSettled` wave
+    (principal / roles+parent-closure / resource+derived-roles) — with a
+    cache-backed store, one round-trip wave instead of three sequential ones;
+    the `meta.resolution` trace order stays deterministic.
+  - `buildPlanResourcesArgs` schema builders across all three validation
+    backends (Zod / JSON Schema / TypeBox), `Kerberos.parsePlanResourcesArgs`,
+    the exported **`PlanKind` enum** (`AlwaysAllowed` / `AlwaysDenied` /
+    `Conditional`, mirroring `Effect`), hand-maintained types (`PlanFilter`,
+    `PlanExpressionOperand`, `PlanResourcesArgs`, `PlanResourcesResponse`), a
+    `planResources` bench scenario and a README section with the planning
+    flow diagram.
+  - **Plan observability**: each `planResources` call records the outcome —
+    span attributes (`kerberos.plan.kind`, `kerberos.plan.opaque_count`,
+    `kerberos.plan.relation_count`, `kerberos.plan.actions_count`), a new
+    **`kerberos.plans`** counter (by filter kind and resource kind) and a
+    structured `PlanResources.result` audit entry — so an `ALWAYS_ALLOWED`
+    filter (a fail-open query) is distinguishable from an `ALWAYS_DENIED` one
+    in traces, metrics and logs.
+  - Bundle-size tooling: `pnpm size` (esbuild browser bundle, minified +
+    gzipped, per entry) with the measured numbers in the README; CI smoke-runs
+    it, and lint/format now also cover `scripts/` and `bench/`.
+
+### Fixed
+
+- **Wire safety of query-plan filters**: folded constants that JSON transport
+  would silently corrupt (`undefined` vanishes, `NaN`/`Infinity` become
+  `null`, `Date` instances become ISO strings, `BigInt` throws) are no longer
+  emitted into filter operands — such conditions degrade to the sound `opaque`
+  operator instead, and the parity suite now verifies filters **after** a JSON
+  round-trip.
+- Plan construction no longer throws on principals whose attributes contain
+  circular structures (node deduplication survives unserializable values).
+- Compiled `{ $expr }` ASTs are now **deeply frozen** at parse time: the
+  cached AST shared by every closure of the same expression (and exposed to
+  the query planner) can no longer be mutated to alter other consumers'
+  evaluation.
+
 ## [3.0.0] - 2026-07-20
 
 ### Added

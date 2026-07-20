@@ -9,7 +9,7 @@ security reports. You should receive a response within a few days.
 
 ## Supported versions
 
-Only the latest published `2.x` release receives security fixes.
+Only the latest published `3.x` release receives security fixes.
 
 ## Threat model
 
@@ -59,6 +59,22 @@ deliberately different from a networked authorization server:
   If that window matters for your threat model, keep revocation-sensitive
   relationships in static tuples, shorten TTLs/invalidation latency, or use a
   centralized authorization service.
+- **Query plans embed folded principal/constant values.** `planResources`
+  partially evaluates policies against the fully-known principal, so the
+  returned `filter` (and `meta.filterDebug`) contains **literal values derived
+  from principal attributes, constants and variables** (e.g.
+  `eq(request.resource.attr.owner, "<principal id>")`). Treat plans as output
+  for trusted sinks — your database translator or backend — and do not forward
+  raw plans or `filterDebug` strings to untrusted clients without reviewing
+  what they disclose. Operands are guaranteed JSON-safe: values that JSON
+  transport would corrupt (`undefined`, `NaN`/`Infinity`, `Date` objects,
+  `BigInt`) are never emitted — such conditions degrade to the `opaque`
+  operator instead.
+- **Compiled `$expr` ASTs are deeply frozen.** Expression ASTs are cached and
+  shared across every compiled closure of the same expression (and surfaced to
+  the internal query planner). They are deep-frozen at parse time, so
+  in-process code cannot mutate a cached AST to alter the behavior of other
+  policies using the same expression.
 
 ## Philosophy: opt-in safety layers
 
