@@ -57,8 +57,34 @@ function residualPV(operand) {
   return { k: 'residual', operand };
 }
 
-function toOp(planValue) {
-  return planValue.k === 'const' ? { value: planValue.v } : planValue.operand;
+/**
+ * A folded constant may only enter a WIRE operand if it survives JSON
+ * transport unchanged: `null`, booleans, strings, finite numbers, or arrays
+ * thereof. Everything else silently changes meaning on the wire — `undefined`
+ * vanishes from JSON (the operand becomes `{}`), `NaN`/`Infinity` become
+ * `null`, a `Date` becomes an ISO string (the runtime compares numerically),
+ * `BigInt` throws — so those degrade the expression to `opaque`. Fully-known
+ * folds are unaffected: the guard only runs where a constant joins a residual
+ * expression.
+ */
+function isWireSafeValue(value, seen = null) {
+  if (value === null) return true;
+  const type = typeof value;
+  if (type === 'string' || type === 'boolean') return true;
+  if (type === 'number') return Number.isFinite(value);
+  if (!Array.isArray(value)) return false;
+  if (seen?.has(value)) return false;
+  const visited = seen ?? new Set();
+  visited.add(value);
+  for (const item of value) if (!isWireSafeValue(item, visited)) return false;
+  return true;
+}
+
+// PlanValue → wire operand with the guard applied: null means "cannot
+// residualize soundly".
+function safeOperand(planValue) {
+  if (planValue.k !== 'const') return planValue.operand;
+  return isWireSafeValue(planValue.v) ? { value: planValue.v } : null;
 }
 
 function describeFn(fn) {
@@ -300,7 +326,10 @@ function createExprPlanner({ principal, resource, actions, constants, variables 
     if (left.k === 'const' && right.k === 'const') return constPV(evalConst(node));
     const operator = JS_TO_CERBOS_BINARY[node.operator];
     if (!operator || left.k === 'opaque' || right.k === 'opaque') return OPAQUE;
-    return residualPV({ expression: { operator, operands: [toOp(left), toOp(right)] } });
+    const leftOperand = safeOperand(left);
+    const rightOperand = safeOperand(right);
+    if (!leftOperand || !rightOperand) return OPAQUE;
+    return residualPV({ expression: { operator, operands: [leftOperand, rightOperand] } });
   }
 
   function planCall(node) {
@@ -331,20 +360,31 @@ function createExprPlanner({ principal, resource, actions, constants, variables 
     // semantics — not expressible; a residual receiver is assumed to be a
     // list (documented plannability constraint).
     if (receiver.k === 'const' && !Array.isArray(receiver.v)) return OPAQUE;
-    return residualPV({ expression: { operator: 'in', operands: [toOp(argPlans[0]), toOp(receiver)] } });
+    const itemOperand = safeOperand(argPlans[0]);
+    const listOperand = safeOperand(receiver);
+    if (!itemOperand || !listOperand) return OPAQUE;
+    return residualPV({ expression: { operator: 'in', operands: [itemOperand, listOperand] } });
   }
 
   function planArray(node) {
-    // One pass: element operands + const/opaque flags together.
-    const operands = new Array(node.elements.length);
+    // One pass: element plans + const/opaque flags together. The wire guard
+    // applies only on the residual path — a fully-const array still folds
+    // (its own use sites re-check wire safety).
+    const plans = new Array(node.elements.length);
     let allConst = true;
     for (let i = 0; i < node.elements.length; i++) {
       const plan = planValue(node.elements[i]);
       if (plan.k === 'opaque') return OPAQUE;
       if (plan.k !== 'const') allConst = false;
-      operands[i] = toOp(plan);
+      plans[i] = plan;
     }
     if (allConst) return constPV(evalConst(node));
+    const operands = new Array(plans.length);
+    for (let i = 0; i < plans.length; i++) {
+      const operand = safeOperand(plans[i]);
+      if (!operand) return OPAQUE;
+      operands[i] = operand;
+    }
     return residualPV({ expression: { operator: 'list', operands } });
   }
 

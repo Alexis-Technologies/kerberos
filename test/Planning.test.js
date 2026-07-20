@@ -43,6 +43,22 @@ describe('Planning', () => {
       assert.strictEqual(JSON.stringify({ fn }), '{}');
     });
 
+    it('deep-freezes the shared cached AST (cache poisoning impossible)', () => {
+      const fn = codec.compileExpr('R.attr.qty > 10 && P.roles.includes("USER")');
+      const { ast } = fn[EXPR_META];
+      assert.ok(Object.isFrozen(ast));
+      // Nested nodes and argument arrays are frozen too.
+      assert.ok(Object.isFrozen(ast.left));
+      assert.ok(Object.isFrozen(ast.left.right));
+      assert.ok(Object.isFrozen(ast.right.arguments));
+      // A strict-mode mutation attempt throws instead of silently poisoning
+      // every consumer of this cached expression.
+      assert.throws(() => {
+        'use strict';
+        ast.left.right.value = 1;
+      }, TypeError);
+    });
+
     it('evalExprAst evaluates an AST with the default roots', () => {
       const { ast } = codec.compileExpr('P.id === "u1" && C.limit > 2')[EXPR_META];
       assert.strictEqual(evalExprAst(ast, { P: { id: 'u1' }, C: { limit: 3 } }), true);
@@ -333,6 +349,48 @@ describe('Planning', () => {
     it('propagates evaluation errors on fully-known subtrees (runtime parity)', () => {
       const resource = { kind: 'document', attr: { obj: null } };
       assert.throws(() => plan('R.attr.obj.x === 1', { resource }), TypeError);
+    });
+
+    describe('wire-safety guard', () => {
+      // Folded constants that JSON transport would corrupt must never enter a
+      // residual operand — the expression degrades to opaque instead.
+      it('degrades undefined folds to opaque (JSON drops the key)', () => {
+        assert.strictEqual(plan('R.attr.owner === P.attr.missing').t, 'opaque');
+      });
+
+      it('degrades non-finite number folds to opaque (JSON turns them into null)', () => {
+        const constants = { get: () => ({ inf: Infinity, nan: NaN }) };
+        assert.strictEqual(plan('R.attr.n > C.inf', { constants }).t, 'opaque');
+        assert.strictEqual(plan('R.attr.n === C.nan', { constants }).t, 'opaque');
+      });
+
+      it('degrades Date folds to opaque (JSON turns them into ISO strings)', () => {
+        assert.strictEqual(plan('new Date(0) < R.attr.t').t, 'opaque');
+        const constants = { get: () => ({ when: new Date(0) }) };
+        assert.strictEqual(plan('R.attr.t > C.when', { constants }).t, 'opaque');
+      });
+
+      it('degrades BigInt and object folds to opaque', () => {
+        const constants = { get: () => ({ big: 10n, obj: { min: 5 } }) };
+        assert.strictEqual(plan('R.attr.n === C.big', { constants }).t, 'opaque');
+        assert.strictEqual(plan('R.attr.o === C.obj', { constants }).t, 'opaque');
+      });
+
+      it('guards in-lists element-wise', () => {
+        assert.strictEqual(plan('[P.attr.missing, "a"].includes(R.attr.x)').t, 'opaque');
+        const constants = { get: () => ({ dates: [new Date(0)] }) };
+        assert.strictEqual(plan('C.dates.includes(R.attr.x)', { constants }).t, 'opaque');
+      });
+
+      it('keeps wire-safe comparisons plannable', () => {
+        assert.deepStrictEqual(plan('R.attr.x === null'), {
+          t: 'expr',
+          e: { expression: { operator: 'eq', operands: [{ variable: 'request.resource.attr.x' }, { value: null }] } },
+        });
+        // Fully-known folds are unaffected by the guard.
+        const constants = { get: () => ({ when: new Date(0) }) };
+        assert.strictEqual(plan('C.when.getTime() === 0', { constants }), TRUE);
+      });
     });
   });
 });

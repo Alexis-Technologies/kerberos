@@ -9,7 +9,7 @@ const { createTelemetryWriter } = require('./telemetry.js');
 const { createCacheReader } = require('./caching/cache.js');
 const { KerberosCodecError, KerberosValidationError } = require('./errors.js');
 const { createSafeExprCodec } = require('./caching/codec.js');
-const { PlanKind, toDebugString, toFilter } = require('./planning/nodes.js');
+const { PlanKind, countLeaves, toDebugString, toFilter } = require('./planning/nodes.js');
 const { buildResourcePlan } = require('./planning/planner.js');
 const { createAjvAdapter, parseWithValidation, registerAjvKeywords } = require('./validation');
 // Platform runtime: bundlers swap this for `./runtime/browser.js` via the
@@ -645,6 +645,30 @@ class Kerberos {
     }
   }
 
+  // Guarded plan-result audit entry — the decision-level counterpart of the
+  // per-action audit logs.
+  #logPlanResult(callId, reqId, resourceKind, filter, counts, actions) {
+    try {
+      this.#logger.debug(
+        {
+          callId,
+          reqId,
+          timestamp: new Date().toISOString(),
+          reqKind: 'PlanResources',
+          event: 'PlanResources.result',
+          resourceKind,
+          filterKind: filter.kind,
+          actions,
+          opaqueCount: counts.opaque,
+          relationCount: counts.relation,
+        },
+        'Kerberos.js PlanResources result!',
+      );
+    } catch {
+      // Audit logging must never break authorization.
+    }
+  }
+
   #logMethodFinish(reqKind, callId, reqId, duration) {
     try {
       this.#logger.debug(
@@ -1247,7 +1271,7 @@ class Kerberos {
     return this.#runRequest(
       reqKind,
       args?.reqId,
-      async (callId) => {
+      async (callId, otel) => {
         const parsedArgs = this.#parseValidated('Invalid planResources arguments', () =>
           Kerberos.parsePlanResourcesArgs(args, {
             schema: this.#planResourcesArgsValidator,
@@ -1296,13 +1320,29 @@ class Kerberos {
           trace,
         });
 
+        const filter = toFilter(node);
+
+        // Decision-level observability: the plan outcome (an ALWAYS_ALLOWED
+        // filter is a fail-open query) must be visible to operators, like the
+        // per-action decisions of isAllowed/checkResources are.
+        const counts = countLeaves(node);
+        this.#telemetry.recordPlan(otel, {
+          kind: filter.kind,
+          resourceKind: parsedArgs.resource.kind,
+          actionsCount: actions.length,
+          opaqueCount: counts.opaque,
+          relationCount: counts.relation,
+          principalId: parsedArgs.principal.id,
+        });
+        this.#logPlanResult(callId, parsedArgs.reqId, parsedArgs.resource.kind, filter, counts, actions);
+
         const response = Kerberos.#buildPlanResponse(
           callId,
           parsedArgs.reqId,
           parsedArgs.resource,
           hasAction ? parsedArgs.action : undefined,
           actions,
-          toFilter(node),
+          filter,
         );
 
         if (parsedArgs.includeMeta) {

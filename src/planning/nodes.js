@@ -66,9 +66,24 @@ function relationNode(name, relation) {
 
 // Two opaque nodes are never provably the same condition (two distinct JS
 // functions can render identical sources), so they are exempt from dedup.
+// Keys are memoized per node — nodes are immutable once constructed and are
+// reused across levels by flattening, so deep trees are not re-stringified at
+// every ancestor. A value JSON cannot represent (circular structure, BigInt)
+// yields a null key: the node is simply never deduplicated instead of
+// failing the whole plan.
+const dedupKeys = new WeakMap();
+
 function dedupKey(node) {
   if (node.t === 'opaque') return null;
-  return JSON.stringify(node);
+  if (dedupKeys.has(node)) return dedupKeys.get(node);
+  let key;
+  try {
+    key = JSON.stringify(node);
+  } catch {
+    key = null;
+  }
+  dedupKeys.set(node, key);
+  return key;
 }
 
 /**
@@ -235,12 +250,34 @@ function toDebugString(node) {
   return renderOperand(toOperand(node));
 }
 
+/**
+ * Counts the observability-relevant leaves of a plan: `opaque` (translator
+ * must post-filter) and `relation` (ReBAC dependency to expand). Cursor-based
+ * walk, no recursion.
+ *
+ * @param {PlanNode} node
+ * @returns {{ opaque: number, relation: number }}
+ */
+function countLeaves(node) {
+  const counts = { opaque: 0, relation: 0 };
+  const queue = [node];
+  for (let i = 0; i < queue.length; i++) {
+    const current = queue[i];
+    if (current.t === 'opaque') counts.opaque += 1;
+    else if (current.t === 'relation') counts.relation += 1;
+    else if (current.t === 'and' || current.t === 'or') for (const child of current.children) queue.push(child);
+    else if (current.t === 'not') queue.push(current.child);
+  }
+  return counts;
+}
+
 module.exports = {
   FALSE,
   PlanKind,
   TRUE,
   andNode,
   constNode,
+  countLeaves,
   createDispatch,
   exprNode,
   fromOperand,

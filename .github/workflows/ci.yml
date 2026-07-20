@@ -18,6 +18,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm format:check
+      # Smoke: keeps the bundle-size script working and its numbers visible in CI logs.
+      - run: pnpm size
 
   test:
     runs-on: ubuntu-latest

@@ -11,6 +11,7 @@ const SCOPE_NAME = '@alexify/kerberos';
 const SPAN_NAMES = {
   IsAllowed: 'Kerberos.isAllowed',
   CheckResources: 'Kerberos.checkResources',
+  PlanResources: 'Kerberos.planResources',
   RelationsCheck: 'Kerberos.relations.check',
   RelationsList: 'Kerberos.relations.list',
   RelationsLookupSubjects: 'Kerberos.relations.lookupSubjects',
@@ -57,6 +58,7 @@ function createDisabledTelemetryWriter() {
       return fn(null);
     },
     recordDecisions() {},
+    recordPlan() {},
     recordError() {},
     recordCacheRequest() {},
     recordRelationCheck() {},
@@ -90,6 +92,7 @@ function createTelemetryWriter(telemetry) {
   const includeIdentity = telemetry.includeIdentity !== false;
 
   let decisionsCounter = null;
+  let plansCounter = null;
   let durationHistogram = null;
   let cacheRequestsCounter = null;
   let relationChecksCounter = null;
@@ -98,6 +101,10 @@ function createTelemetryWriter(telemetry) {
       decisionsCounter = meter.createCounter('kerberos.decisions', {
         unit: '{decision}',
         description: 'Authorization decisions evaluated by Kerberos',
+      });
+      plansCounter = meter.createCounter('kerberos.plans', {
+        unit: '{plan}',
+        description: 'Resources query plans built by planResources, by filter kind',
       });
       durationHistogram = meter.createHistogram('kerberos.request.duration', {
         unit: 'ms',
@@ -113,6 +120,7 @@ function createTelemetryWriter(telemetry) {
       });
     } catch {
       decisionsCounter = null;
+      plansCounter = null;
       durationHistogram = null;
       cacheRequestsCounter = null;
       relationChecksCounter = null;
@@ -223,6 +231,31 @@ function createTelemetryWriter(telemetry) {
           span.setAttribute?.('kerberos.resource.count', input.length);
           span.setAttribute?.('kerberos.decision.count', decisionCount);
         }
+      } catch {
+        // Telemetry must never break authorization.
+      }
+    },
+
+    /**
+     * Records the outcome of one `planResources` call: the plans counter (by
+     * filter kind) plus span attributes describing the built filter — an
+     * `ALWAYS_ALLOWED` plan (a fail-open query) must be distinguishable from
+     * an `ALWAYS_DENIED` one in traces and metrics.
+     */
+    recordPlan(handle, plan) {
+      try {
+        plansCounter?.add(1, {
+          'kerberos.plan.kind': plan.kind,
+          'kerberos.resource.kind': plan.resourceKind,
+        });
+        const span = handle?.span ?? null;
+        if (!span) return;
+        span.setAttribute?.('kerberos.resource.kind', plan.resourceKind);
+        span.setAttribute?.('kerberos.plan.kind', plan.kind);
+        span.setAttribute?.('kerberos.plan.actions_count', plan.actionsCount);
+        span.setAttribute?.('kerberos.plan.opaque_count', plan.opaqueCount);
+        span.setAttribute?.('kerberos.plan.relation_count', plan.relationCount);
+        if (includeIdentity && plan.principalId) span.setAttribute?.('kerberos.principal.id', plan.principalId);
       } catch {
         // Telemetry must never break authorization.
       }

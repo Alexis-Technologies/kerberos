@@ -160,9 +160,9 @@ const ALLOWED_GLOBALS = { Math, Date };
 const DEFAULT_ROOTS = ['P', 'R', 'V', 'C'];
 
 // Compiled `{ $expr }` closures carry their source/AST under this symbol so the
-// query planner (src/planning/) can partially evaluate them. Non-enumerable and
-// frozen: invisible to serialization, and consumers must never mutate the AST —
-// it is the same object the closure evaluates (and lives in the shared cache).
+// query planner (src/planning/) can partially evaluate them. Non-enumerable,
+// and both the meta wrapper and the AST itself are frozen (the AST deeply, at
+// parse time) — the shared cached AST cannot be mutated through this seam.
 const EXPR_META = Symbol('kerberos.exprMeta');
 
 // Safe-by-default resource limits for expressions loaded from a remote store.
@@ -178,6 +178,17 @@ const DEFAULT_LIMITS = Object.freeze({
 // AST cache keyed by jsep instance so different instances (different plugins /
 // operators) get their own namespace. WeakMap ensures the cache is GC-able.
 const astCacheByJsep = new WeakMap();
+
+// Cached ASTs are shared by every compiled closure of the same expression
+// string and exposed to the query planner via EXPR_META — deep-freezing them
+// once at parse time makes cross-consumer mutation (cache poisoning)
+// impossible. The interpreter only ever reads nodes.
+function deepFreeze(node) {
+  if (!node || typeof node !== 'object' || Object.isFrozen(node)) return node;
+  Object.freeze(node);
+  for (const key of Object.keys(node)) deepFreeze(node[key]);
+  return node;
+}
 
 /**
  * Parses an expression once and caches the resulting AST keyed by both the
@@ -210,6 +221,7 @@ function parseExpr(expr, jsepInstance, limits = DEFAULT_LIMITS) {
     throw new KerberosExprError(`Failed to parse expression: ${error.message}`);
   }
   validateNode(ast, limits.maxDepth);
+  deepFreeze(ast);
 
   // FIFO eviction keeps the cache bounded; Map preserves insertion order, so
   // the first key is the oldest entry.

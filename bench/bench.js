@@ -86,20 +86,20 @@ async function main() {
   const results = [];
 
   const simple = new Kerberos(simplePolicies, []);
-  results.push(await bench('isAllowed — simple role match', () => simple.isAllowed({ principal, action: 'view', resource })));
+  results.push(
+    await bench('isAllowed — simple role match', () => simple.isAllowed({ principal, action: 'view', resource })),
+  );
 
   const rich = new Kerberos(richPolicies, [benchDerivedRoles]);
   results.push(
     await bench('isAllowed — derived roles + variables + condition', () =>
-      rich.isAllowed({ principal, action: 'edit', resource }),
-    ),
+      rich.isAllowed({ principal, action: 'edit', resource })),
   );
 
   const manyResources = buildManyResources(10);
   results.push(
     await bench('checkResources — 10 resources × 3 actions', () =>
-      rich.checkResources({ principal, resources: manyResources }),
-    ),
+      rich.checkResources({ principal, resources: manyResources })),
   );
 
   // Cache-backed scenario: dynamic $expr policy resolved through a Map cache.
@@ -136,8 +136,7 @@ async function main() {
     const docResource = { id: 'doc1', kind: 'document', attr: { status: 'OPEN' } };
     results.push(
       await bench('isAllowed — cache-backed dynamic policy ($expr)', () =>
-        cached.isAllowed({ principal, action: 'view', resource: docResource }),
-      ),
+        cached.isAllowed({ principal, action: 'view', resource: docResource })),
     );
 
     // Query planning: partial evaluation of a rich $expr policy (variables +
@@ -176,8 +175,7 @@ async function main() {
     );
     results.push(
       await bench('planResources — $expr policy (variables + deny rule)', () =>
-        plannable.planResources({ principal, resource: { kind: 'document' }, action: 'view' }),
-      ),
+        plannable.planResources({ principal, resource: { kind: 'document' }, action: 'view' })),
     );
   }
 
@@ -215,13 +213,11 @@ async function main() {
 
   results.push(
     await bench('relations.check — direct tuple (flat)', () =>
-      relations.check({ resource: 'document:doc1', permission: 'edit', subject: 'user:sally' }),
-    ),
+      relations.check({ resource: 'document:doc1', permission: 'edit', subject: 'user:sally' })),
   );
   results.push(
     await bench('relations.check — deep walk (3 arrows + nested groups)', () =>
-      relations.check({ resource: 'document:doc1', permission: 'view', subject: 'user:deep' }),
-    ),
+      relations.check({ resource: 'document:doc1', permission: 'view', subject: 'user:deep' })),
   );
 
   const relationDerivedRoles = {
@@ -243,8 +239,7 @@ async function main() {
         principal: { id: 'deep', roles: ['USER'] },
         action: 'view',
         resource: { id: 'doc1', kind: 'document' },
-      }),
-    ),
+      })),
   );
 
   return results;

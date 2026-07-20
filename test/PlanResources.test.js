@@ -772,7 +772,40 @@ describe('planResources', () => {
       await assert.rejects(kerberos.planResources({ principal: user, resource: docKind }), KerberosValidationError);
     });
 
-    it('emits PlanResources start/finish audit events to a structured logger', async () => {
+    it('plans safely with circular principal attributes (wire guard, no throw)', async () => {
+      const kerberos = new Kerberos(
+        [
+          dynamicPolicy({
+            resourcePolicy: {
+              resource: 'document',
+              version: 'default',
+              rules: [
+                {
+                  actions: ['view'],
+                  effect: Effect.Allow,
+                  roles: ['USER'],
+                  condition: { match: { $expr: 'R.attr.owner === P.attr.loop' } },
+                },
+              ],
+            },
+          }),
+        ],
+        [],
+      );
+      const attr = {};
+      attr.loop = attr; // circular — JSON.stringify would throw
+      const plan = await kerberos.planResources({
+        principal: { id: 'u1', roles: ['USER'], attr },
+        resource: docKind,
+        action: 'view',
+      });
+      // The circular fold degrades to opaque; the plan (and its JSON form) stay valid.
+      assert.strictEqual(plan.filter.kind, CONDITIONAL);
+      assert.strictEqual(plan.filter.condition.expression.operator, 'opaque');
+      JSON.stringify(plan); // must not throw
+    });
+
+    it('emits PlanResources start/result/finish audit events to a structured logger', async () => {
       const entries = [];
       const logger = {
         info: (entry) => entries.push(entry),
@@ -787,6 +820,82 @@ describe('planResources', () => {
       const start = entries.find((entry) => entry.event === 'PlanResources.start');
       assert.strictEqual(start.reqId, 'req-1');
       assert.ok(start.callId);
+      // Decision-level audit: the plan outcome is visible to operators.
+      const result = entries.find((entry) => entry.event === 'PlanResources.result');
+      assert.ok(result);
+      assert.strictEqual(result.filterKind, DENIED);
+      assert.strictEqual(result.resourceKind, 'document');
+      assert.deepStrictEqual(result.actions, ['view']);
+      assert.strictEqual(result.opaqueCount, 0);
+      assert.strictEqual(result.relationCount, 0);
+    });
+
+    it('records the plan outcome on the span and the kerberos.plans counter', async () => {
+      const spans = [];
+      const counters = new Map();
+      const telemetry = {
+        tracer: {
+          startSpan(name) {
+            const span = { name, attributes: {}, ended: false };
+            span.setAttribute = (key, value) => {
+              span.attributes[key] = value;
+            };
+            span.end = () => {
+              span.ended = true;
+            };
+            spans.push(span);
+            return span;
+          },
+        },
+        meter: {
+          createCounter(name) {
+            const calls = [];
+            counters.set(name, calls);
+            return { add: (value, attributes) => calls.push({ value, attributes }) };
+          },
+          createHistogram: () => ({ record: () => {} }),
+        },
+      };
+
+      const kerberos = new Kerberos(
+        [
+          {
+            resourcePolicy: {
+              resource: 'document',
+              version: 'default',
+              importDerivedRoles: ['doc_roles'],
+              rules: [
+                { actions: ['view'], effect: Effect.Allow, derivedRoles: ['VIEWER'] },
+                {
+                  actions: ['view'],
+                  effect: Effect.Allow,
+                  roles: ['USER'],
+                  condition: { match: (req) => req.R.attr.public === true },
+                },
+              ],
+            },
+          },
+        ],
+        [{ name: 'doc_roles', definitions: [{ name: 'VIEWER', relation: 'viewer' }] }],
+        { telemetry, relations: { check: async () => true } },
+      );
+      const plan = await planOf(kerberos);
+      assert.strictEqual(plan.filter.kind, CONDITIONAL);
+
+      const span = spans.find((entry) => entry.name === 'Kerberos.planResources');
+      assert.ok(span);
+      assert.ok(span.ended);
+      assert.strictEqual(span.attributes['kerberos.plan.kind'], CONDITIONAL);
+      assert.strictEqual(span.attributes['kerberos.resource.kind'], 'document');
+      assert.strictEqual(span.attributes['kerberos.plan.actions_count'], 1);
+      assert.strictEqual(span.attributes['kerberos.plan.opaque_count'], 1);
+      assert.strictEqual(span.attributes['kerberos.plan.relation_count'], 1);
+      assert.strictEqual(span.attributes['kerberos.principal.id'], 'u1');
+
+      const plans = counters.get('kerberos.plans');
+      assert.deepStrictEqual(plans, [
+        { value: 1, attributes: { 'kerberos.plan.kind': CONDITIONAL, 'kerberos.resource.kind': 'document' } },
+      ]);
     });
   });
 

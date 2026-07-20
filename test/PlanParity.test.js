@@ -57,6 +57,13 @@ function evalFilter(filter, row) {
   return Boolean(evalOperand(filter.condition, row));
 }
 
+// The wire contract: parity must hold for the filter AS TRANSPORTED, not just
+// the in-memory object — JSON round-tripping catches operands that would
+// silently corrupt (undefined → {}, NaN/Infinity → null, Date → ISO string).
+function wireFilter(plan) {
+  return JSON.parse(JSON.stringify(plan.filter));
+}
+
 // ---------------------------------------------------------------------------
 // Fixture: an all-$expr policy suite exercising every layer.
 // ---------------------------------------------------------------------------
@@ -191,9 +198,10 @@ const kerberos = new Kerberos(policies, derivedRoles);
 
 async function assertParity(principal, action, planArgs, rows) {
   const plan = await kerberos.planResources(planArgs);
+  const filter = wireFilter(plan);
   for (const attr of rows) {
     const row = { id: 'r1', attr };
-    const planned = evalFilter(plan.filter, row);
+    const planned = evalFilter(filter, row);
     const actual = await kerberos.isAllowed({
       principal,
       resource: { id: 'r1', kind: 'document', attr },
@@ -225,8 +233,9 @@ describe('planResources ↔ isAllowed parity', () => {
         resource: { kind: 'document', attr: known },
         action: 'view',
       });
+      const filter = wireFilter(plan);
       for (const attr of rows) {
-        const planned = evalFilter(plan.filter, { id: 'r1', attr });
+        const planned = evalFilter(filter, { id: 'r1', attr });
         const actual = await kerberos.isAllowed({
           principal,
           resource: { id: 'r1', kind: 'document', attr },
@@ -244,8 +253,9 @@ describe('planResources ↔ isAllowed parity', () => {
         resource: { kind: 'document' },
         actions: ['view', 'edit'],
       });
+      const filter = wireFilter(plan);
       for (const attr of attrGrid) {
-        const planned = evalFilter(plan.filter, { id: 'r1', attr });
+        const planned = evalFilter(filter, { id: 'r1', attr });
         const view = await kerberos.isAllowed({
           principal,
           resource: { id: 'r1', kind: 'document', attr },

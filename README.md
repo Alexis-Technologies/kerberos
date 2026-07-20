@@ -6,7 +6,7 @@
 [![dependencies](https://img.shields.io/badge/runtime_dependencies-0-brightgreen)](#bundle-size)
 [![license](https://img.shields.io/npm/l/%40alexify%2Fkerberos)](./LICENSE)
 
-An **embedded, zero-dependency authorization engine** for Node.js and the browser: Cerbos-style policies (RBAC + ABAC), a SpiceDB-inspired "Zanzibar-lite" resolver (ReBAC) and Cerbos-compatible query plans — all in-process, no server to deploy, [~24 KB min+gzip](#bundle-size). The API deliberately stays as close to Cerbos as possible: if you know Cerbos, you already know Kerberos.js.
+An **embedded, zero-dependency authorization engine** for Node.js and the browser: Cerbos-style policies (RBAC + ABAC), a SpiceDB-inspired "Zanzibar-lite" resolver (ReBAC) and Cerbos-compatible query plans — all in-process, no server to deploy, [~25 KB min+gzip](#bundle-size). The API deliberately stays as close to Cerbos as possible: if you know Cerbos, you already know Kerberos.js.
 
 ```javascript
 import { Kerberos, Effect } from '@alexify/kerberos';
@@ -106,8 +106,8 @@ Zero runtime dependencies. Measured with `pnpm size` (esbuild browser bundle, fu
 
 | Entry | min | min+gzip |
 | ----- | ---:| --------:|
-| `@alexify/kerberos` (main entry, query planner included) | 91.4 KB | **24.4 KB** |
-| `@alexify/kerberos/relations` (opt-in ReBAC resolver) | 56.5 KB | 15.0 KB |
+| `@alexify/kerberos` (main entry, query planner included) | 93.6 KB | **25.1 KB** |
+| `@alexify/kerberos/relations` (opt-in ReBAC resolver) | 57.2 KB | 15.1 KB |
 
 The `/relations` and `/tests` subpaths are only bundled if you import them. Optional tooling (`jsep`, `zod`, `ajv`, `@sinclair/typebox`, `@opentelemetry/api`) is never included — you install what you use.
 
@@ -1308,8 +1308,9 @@ The planner works on the codec's `{ $expr }` ASTs, so **plannable conditions are
 - **Compare booleans explicitly** (`R.attr.isPublic === true`): a bare `R.attr.isPublic` leaf is planned as `eq(attr, true)`, which diverges for truthy non-boolean values.
 - **`.includes` means list membership** — use it on array attrs (a residual receiver is assumed to be a list; a constant *string* receiver would mean substring semantics and plans as `opaque`).
 - Not plannable (always sound, degrade to `opaque`): `??`, `**`, bitwise ops, `typeof`, ternaries whose test reads unknown attrs, method calls other than `.includes`, `Math`/`Date` over unknown values, object/`new` expressions over unknown values.
+- **Filters are guaranteed JSON-safe.** A folded constant that JSON transport would corrupt (`undefined` vanishes, `NaN`/`Infinity` become `null`, `Date` objects become strings, `BigInt` throws) is never emitted into an operand — the condition degrades to `opaque` instead. Comparing against possibly-missing principal attrs (`R.attr.owner === P.attr.dept` with no `dept`) therefore plans as `opaque`, not as a broken operand.
 - An attr **missing** from `resource.attr` means *unknown*, not `undefined` — it becomes a filter variable, never a folded value.
-- `Date.now()` (and friends) evaluate **at plan time** — same trade-off as Cerbos; re-plan when time matters.
+- `Date.now()` (and friends) evaluate **at plan time** — same trade-off as Cerbos. A cached/reused plan carries a *frozen* time boundary; re-plan when time matters.
 
 `variables` are partially evaluated and inlined at their `V.*` use sites; `C.*` constants and everything derivable from `P` fold into literal values. Plain JS-function *variables* still fold when they only touch known fields (they are executed against a guard that marks any unknown-field access as `opaque`).
 
@@ -1332,7 +1333,7 @@ const expanded = await expandRelationOperands(plan, ({ relation }) =>
 // (an empty id list folds the branch to FALSE — possibly the whole plan to KIND_ALWAYS_DENIED)
 ```
 
-The lookup is any `({ name, relation }) => ids` function — resolver-agnostic, like the engine's `relations` seam. Without expansion, treat `relation` like `opaque`: post-check the rows.
+The lookup is any `({ name, relation }) => ids` function — resolver-agnostic, like the engine's `relations` seam. Without expansion, treat `relation` like `opaque`: post-check the rows. Mind the cardinality: a principal with access to a very large set of resources materializes a very large `in`-list — for those cases a post-check (or a resolver-side limit) can beat expansion.
 
 ### Translating a plan
 
@@ -1362,6 +1363,11 @@ const where =
 ```
 
 Since the shape matches Cerbos, the [Cerbos ORM adapters](https://docs.cerbos.dev/cerbos/latest/recipes/orm/) (Prisma, Drizzle, Mongoose, SQLAlchemy…) accept the `filter` for the shared operator vocabulary — route `opaque`/`relation` operands to a post-filter (or pre-expand `relation` as shown above).
+
+Two operational notes:
+
+- **Plans disclose folded principal data.** Partial evaluation inlines values derived from `P`/`C`/`V` into the filter and `filterDebug` — treat plans as output for trusted sinks (your translator/backend), not for untrusted clients. See [SECURITY.md](./SECURITY.md).
+- **Plans are observable.** Each call records the outcome: a structured `PlanResources.result` audit entry (filter kind, opaque/relation counts), span attributes (`kerberos.plan.kind`, `kerberos.plan.opaque_count`, …) and the [`kerberos.plans` counter](#opentelemetry) — an `ALWAYS_ALLOWED` filter (a fail-open query) never goes unnoticed.
 
 ## Testing
 
@@ -1598,6 +1604,7 @@ Works out of the box with any registered SDK (e.g. `NodeSDK` from `@opentelemetr
 | Instrument | Type | Unit | Attributes |
 | ---------- | ---- | ---- | ---------- |
 | `kerberos.decisions` | Counter | `{decision}` | `kerberos.effect`, `kerberos.resource.kind` |
+| `kerberos.plans` | Counter | `{plan}` | `kerberos.plan.kind`, `kerberos.resource.kind` |
 | `kerberos.request.duration` | Histogram | `ms` | `kerberos.req_kind`, `error` |
 | `kerberos.cache.requests` | Counter | `{request}` | `kerberos.cache.result` (`hit`/`miss`/`error`), `kerberos.cache.kind` (only for ReBAC tuple reads: `relation`) |
 | `kerberos.relations.checks` | Counter | `{check}` | `kerberos.relations.result` (`allow`/`deny`) |
@@ -1626,7 +1633,7 @@ Apple Silicon (M-series), Node v24:
 | `isAllowed` — derived roles + variables + condition | ~300,000 |
 | `checkResources` — 10 resources × 3 actions |  ~41,000 |
 | `isAllowed` — cache-backed dynamic policy (`$expr`, in-memory Map) | ~150,000 |
-| `planResources` — `$expr` policy (variables + deny rule) |  ~54,000 |
+| `planResources` — `$expr` policy (variables + deny rule) |  ~60,000 |
 | `relations.check` — direct tuple (flat) | ~850,000 |
 | `relations.check` — deep walk (3 arrows + nested groups) | ~120,000 |
 | `isAllowed` — relation-backed derived role (deep walk) |  ~80,000 |

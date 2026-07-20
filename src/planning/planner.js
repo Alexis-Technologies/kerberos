@@ -106,11 +106,23 @@ function buildResourcePlan({
 
   // ---- role layer ----------------------------------------------------------
 
+  // Memoized per policy: consulted once for applicability and once per
+  // roleAllowNode call (including transitive parents).
+  const roleMatches = new Map();
+
   function roleMatchesResource(policy) {
-    for (const rule of policy.rules ?? []) {
-      if (rule.resource === ALL_RESOURCES || rule.resource === resource.kind) return true;
+    let matched = roleMatches.get(policy);
+    if (matched === undefined) {
+      matched = false;
+      for (const rule of policy.rules ?? []) {
+        if (rule.resource === ALL_RESOURCES || rule.resource === resource.kind) {
+          matched = true;
+          break;
+        }
+      }
+      roleMatches.set(policy, matched);
     }
-    return false;
+    return matched;
   }
 
   const applicableRolePolicies = [];
@@ -170,12 +182,24 @@ function buildResourcePlan({
   // ---- derived roles (resource layer) --------------------------------------
 
   const derivedRoleNodes = new Map();
+  // `DerivedRoles.roles` is a getter that rebuilds its Map on every access —
+  // snapshot it once per set instead of once per referenced role name.
+  const derivedRoleMaps = new Map();
+
+  function definitionsOf(set) {
+    let definitions = derivedRoleMaps.get(set);
+    if (!definitions) {
+      definitions = set.roles;
+      derivedRoleMaps.set(set, definitions);
+    }
+    return definitions;
+  }
 
   function derivedRoleNode(name) {
     if (derivedRoleNodes.has(name)) return derivedRoleNodes.get(name);
     const parts = [];
     for (const set of derivedRolesSets) {
-      const def = set.roles.get(name);
+      const def = definitionsOf(set).get(name);
       if (!def) continue;
       const planner = plannerFor(set, set.shape);
       if (def.relation) {
