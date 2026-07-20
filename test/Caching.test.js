@@ -2,7 +2,14 @@ const { describe, it, beforeEach } = require('node:test');
 const { strict: assert } = require('node:assert');
 const { Keyv } = require('keyv');
 
-const { Effect, Kerberos, createSafeExprCodec, serializePolicy, deserializePolicy, KerberosExprError } = require('../src/index.js');
+const {
+  Effect,
+  Kerberos,
+  createSafeExprCodec,
+  serializePolicy,
+  deserializePolicy,
+  KerberosExprError,
+} = require('../src/index.js');
 
 // ---------------------------------------------------------------------------
 // Shared jsep instance — configured once with all plugins for the test suite.
@@ -10,11 +17,7 @@ const { Effect, Kerberos, createSafeExprCodec, serializePolicy, deserializePolic
 // ---------------------------------------------------------------------------
 const jsepModule = require('jsep');
 const jsep = jsepModule.default || jsepModule;
-jsep.plugins.register(
-  require('@jsep-plugin/object'),
-  require('@jsep-plugin/ternary'),
-  require('@jsep-plugin/new'),
-);
+jsep.plugins.register(require('@jsep-plugin/object'), require('@jsep-plugin/ternary'), require('@jsep-plugin/new'));
 jsep.addUnaryOp('typeof');
 
 // A codec instance shared across tests.
@@ -122,10 +125,7 @@ describe('Caching / Storing policies', () => {
     it('serializes a { $expr } shape into a JSON-safe document', () => {
       const json = serializePolicy(dynamicResourcePolicy, { jsep });
       assert.strictEqual(JSON.parse(JSON.stringify(json)).resourcePolicy.resource, 'document');
-      assert.deepStrictEqual(
-        json.resourcePolicy.rules[1].derivedRoles,
-        ['OWNER']
-      );
+      assert.deepStrictEqual(json.resourcePolicy.rules[1].derivedRoles, ['OWNER']);
     });
 
     it('serializes without jsep (structural check only, no AST validation)', () => {
@@ -143,21 +143,12 @@ describe('Caching / Storing policies', () => {
     });
 
     it('throws when asked to serialize a raw JavaScript function', () => {
-      assert.throws(
-        () => serializePolicy({ condition: { match: ({ P }) => P.id === 'x' } }),
-        KerberosExprError
-      );
+      assert.throws(() => serializePolicy({ condition: { match: ({ P }) => P.id === 'x' } }), KerberosExprError);
     });
 
     it('throws when a descriptor has a non-string $expr', () => {
-      assert.throws(
-        () => serializePolicy({ condition: { match: { $expr: 42 } } }),
-        KerberosExprError
-      );
-      assert.throws(
-        () => codec.deserialize({ condition: { match: { $expr: null } } }),
-        KerberosExprError
-      );
+      assert.throws(() => serializePolicy({ condition: { match: { $expr: 42 } } }), KerberosExprError);
+      assert.throws(() => codec.deserialize({ condition: { match: { $expr: null } } }), KerberosExprError);
     });
 
     it('accepts a full codec object (createSafeExprCodec result) as codec option', async () => {
@@ -224,7 +215,9 @@ describe('Caching / Storing policies', () => {
               effect: Effect.Allow,
               roles: ['USER'],
               condition: {
-                match: { $expr: "(Date.now() - new Date(R.attr.createdAt).getTime()) < 3600000 && R.attr.status == 'OPEN'" },
+                match: {
+                  $expr: "(Date.now() - new Date(R.attr.createdAt).getTime()) < 3600000 && R.attr.status == 'OPEN'",
+                },
               },
             },
           ],
@@ -345,6 +338,43 @@ describe('Caching / Storing policies', () => {
       const ctx = { R: { attr: { ownerId: 'u1' } }, P: { id: 'u1' } };
       assert.strictEqual(a(ctx), true);
       assert.strictEqual(b(ctx), true);
+    });
+  });
+
+  describe('resource limits (configurable, safe defaults)', () => {
+    it('rejects expressions longer than maxExprLength', () => {
+      const limited = createSafeExprCodec({ jsep, maxExprLength: 32 });
+      assert.throws(() => limited.compileExpr(`P.id == '${'x'.repeat(64)}'`), KerberosExprError);
+      // Under the limit still works.
+      assert.strictEqual(limited.compileExpr("P.id == 'u1'")({ P: { id: 'u1' } }), true);
+    });
+
+    it('rejects expressions nested deeper than maxDepth', () => {
+      const limited = createSafeExprCodec({ jsep, maxDepth: 4 });
+      assert.throws(() => limited.compileExpr(`${'!'.repeat(20)}P.flag`), KerberosExprError);
+    });
+
+    it('accepts deeper nesting when maxDepth is raised', () => {
+      const relaxed = createSafeExprCodec({ jsep, maxDepth: 128 });
+      // 40 negations (even count) of a falsy value evaluate back to false.
+      const fn = relaxed.compileExpr(`${'!'.repeat(40)}P.flag`);
+      assert.strictEqual(fn({ P: { flag: false } }), false);
+      assert.strictEqual(fn({ P: { flag: true } }), true);
+    });
+
+    it('bounds the AST cache size with FIFO eviction (no unbounded growth)', () => {
+      const bounded = createSafeExprCodec({ jsep, maxCachedExprs: 5 });
+      for (let i = 0; i < 50; i++) {
+        bounded.compileExpr(`P.id == 'user-${i}'`);
+      }
+      // No assertion on internals possible (cache is module-private); the
+      // behavioral guarantee is that evaluation still works after churn.
+      assert.strictEqual(bounded.compileExpr("P.id == 'user-49'")({ P: { id: 'user-49' } }), true);
+    });
+
+    it('applies the default limits without configuration', () => {
+      const fresh = createSafeExprCodec({ jsep });
+      assert.throws(() => fresh.compileExpr(`P.id == '${'x'.repeat(5000)}'`), KerberosExprError);
     });
   });
 });

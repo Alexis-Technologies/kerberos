@@ -38,7 +38,7 @@ describe('Validation backends', () => {
     const ajv = createAjv();
 
     assert.throws(() => {
-      // eslint-disable-next-line no-new
+      // oxlint-disable-next-line no-new
       new Constants(42, { ajv });
     });
   });
@@ -47,7 +47,7 @@ describe('Validation backends', () => {
     const ajv = createAjv();
 
     assert.throws(() => {
-      // eslint-disable-next-line no-new
+      // oxlint-disable-next-line no-new
       new Conditions({ match: 42 }, { ajv, typebox: Type });
     });
   });

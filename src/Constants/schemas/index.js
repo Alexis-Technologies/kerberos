@@ -33,8 +33,8 @@ class ConstantsJsonSchemas extends JsonSchemas {
           constants: ConstantsJsonSchemas.buildShape(),
           C: ConstantsJsonSchemas.buildShape(),
         },
-        []
-      )
+        [],
+      ),
     );
   }
 }

@@ -1,8 +1,7 @@
 const { parseDerivedRolesShape } = require('./validation');
 
-const { Variables } = require('../Variables');
 const { Conditions } = require('../Conditions');
-const { Constants } = require('../Constants');
+const { parseConstants, parseVariables } = require('../policyParsers.js');
 
 /**
  * Represents a derived roles definition set.
@@ -20,13 +19,15 @@ class DerivedRoles {
   }
 
   static parseConstants(constants, options = {}) {
-    return constants instanceof Constants ? constants : new Constants(constants, options);
+    return parseConstants(constants, options);
   }
 
   static parseVariables(variables, options = {}) {
-    return variables instanceof Variables ? variables : new Variables(variables, options);
+    return parseVariables(variables, options);
   }
 
+  // Unlike policy rules, a derived-role definition's condition is required, so
+  // this intentionally does not share the null-passthrough of policyParsers.
   static parseConditions(conditions, options = {}) {
     return conditions instanceof Conditions ? conditions : new Conditions(conditions, options);
   }
@@ -44,7 +45,19 @@ class DerivedRoles {
     if (this.#shape.definitions?.length) {
       const defs = [];
       for (const def of this.#shape.definitions) {
-        defs.push({ ...def, condition: DerivedRoles.parseConditions(def.condition, options) });
+        // A definition is either condition-backed (classic, condition
+        // required) or relation-backed (`relation:` present, condition and
+        // parentRoles become optional gates). Enforced here so the invariant
+        // holds even without a validation backend.
+        if (!def.condition && !def.relation) {
+          throw new Error(`Derived role definition "${def.name}" must declare a "condition" or a "relation"`);
+        }
+        // Never materialize an absent condition (e.g. as null): shapes may be
+        // reused across instances, and a written `condition: null` would fail
+        // the optional-field validation on the next construction.
+        const parsedDef = { ...def };
+        if (def.condition) parsedDef.condition = DerivedRoles.parseConditions(def.condition, options);
+        defs.push(parsedDef);
       }
       this.#shape.definitions = defs;
     }
@@ -64,8 +77,29 @@ class DerivedRoles {
     return this.#shape;
   }
 
+  // Shared evaluation prelude: request enriched with constants/variables plus
+  // an O(1) principal-roles set for parent-role gating.
+  #buildEvalContext(req) {
+    const constants = this.#shape.constants?.get();
+    const reqWithConstants = { ...req, constants, C: constants };
+
+    const variables = this.#shape.variables?.get(reqWithConstants);
+    const reqWithVariables = { ...reqWithConstants, variables, V: variables };
+
+    return { reqWithVariables, principalRoles: new Set(reqWithVariables.P.roles) };
+  }
+
+  static #parentRolesMatch(def, principalRoles) {
+    for (const role of def.parentRoles) {
+      if (principalRoles.has(role)) return true;
+    }
+    return false;
+  }
+
   /**
-   * Resolves active derived roles for a request.
+   * Resolves active condition-backed derived roles for a request.
+   * Relation-backed definitions are skipped here — they require async
+   * resolution and are surfaced via `getRelationCandidates` instead.
    *
    * @param {Record<string, unknown>} req
    * @returns {Set<string>}
@@ -75,29 +109,46 @@ class DerivedRoles {
 
     if (!this.#shape.definitions.length) return roles;
 
-    const constants = this.#shape.constants?.get();
-    const reqWithConstants = { ...req, constants, C: constants };
-
-    const variables = this.#shape.variables?.get(reqWithConstants);
-    const reqWithVariables = { ...reqWithConstants, variables, V: variables };
-
-    // O(1) membership lookups for parent-role matching across all definitions.
-    const principalRoles = new Set(reqWithVariables.P.roles);
+    const { reqWithVariables, principalRoles } = this.#buildEvalContext(req);
 
     for (const def of this.#shape.definitions) {
-      let isRoleMatched = false;
-      for (const role of def.parentRoles) {
-        if (principalRoles.has(role)) {
-          isRoleMatched = true;
-          break;
-        }
-      }
-      if (!isRoleMatched) continue;
+      if (def.relation) continue;
+      if (!DerivedRoles.#parentRolesMatch(def, principalRoles)) continue;
 
       if (def.condition.isFulfilled(reqWithVariables)) roles.add(def.name);
     }
 
     return roles;
+  }
+
+  /**
+   * Returns the relation-backed definitions whose synchronous gates
+   * (optional `parentRoles`, optional `condition`) pass for this request. The
+   * engine resolves the returned relations through the configured `relations`
+   * resolver on its async phase.
+   *
+   * @param {Record<string, unknown>} req
+   * @returns {Array<{ name: string, relation: string }>}
+   */
+  getRelationCandidates(req) {
+    const candidates = [];
+
+    if (!this.#shape.definitions.length) return candidates;
+
+    let context = null;
+    for (const def of this.#shape.definitions) {
+      if (!def.relation) continue;
+      context ??= this.#buildEvalContext(req);
+
+      if (Array.isArray(def.parentRoles) && def.parentRoles.length) {
+        if (!DerivedRoles.#parentRolesMatch(def, context.principalRoles)) continue;
+      }
+      if (def.condition && !def.condition.isFulfilled(context.reqWithVariables)) continue;
+
+      candidates.push({ name: def.name, relation: def.relation });
+    }
+
+    return candidates;
   }
 }
 

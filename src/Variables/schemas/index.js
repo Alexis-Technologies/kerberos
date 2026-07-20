@@ -11,7 +11,7 @@ class VariablesZodSchemas extends ZodSchemas {
       z.function({
         input: [ConstantsZodSchemas.buildRequestWithConstants(z)],
         output: VariablesZodSchemas.buildVariablesReturnType(z),
-      })
+      }),
     );
   }
 
@@ -44,8 +44,8 @@ class VariablesJsonSchemas extends JsonSchemas {
           variables: JsonSchemas.buildUnknownRecordShape(),
           V: JsonSchemas.buildUnknownRecordShape(),
         },
-        []
-      )
+        [],
+      ),
     );
   }
 

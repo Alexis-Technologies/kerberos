@@ -107,6 +107,7 @@ class KerberosTest {
             resource,
             actions: new Set(),
             expectedActions: {},
+            expectedOutputs: null,
           });
         }
 
@@ -115,6 +116,9 @@ class KerberosTest {
           resourceData.actions.add(action);
           resourceData.expectedActions[action] = effect;
         }
+        // Optional Cerbos-style outputs assertion: when `outputs` is present in
+        // an expected entry, the runner deep-compares the response outputs.
+        if (expectedItem.outputs !== undefined) resourceData.expectedOutputs = expectedItem.outputs;
       }
 
       // For each principal, call checkResources once with all resources
@@ -127,7 +131,10 @@ class KerberosTest {
             resourcesToCheck.push({ resource: resourceData.resource, actions: Array.from(resourceData.actions) });
           }
 
-          const { results } = await kerberosInstance.checkResources({ principal, resources: resourcesToCheck }, effectAsBoolean);
+          const { results } = await kerberosInstance.checkResources(
+            { principal, resources: resourcesToCheck },
+            effectAsBoolean,
+          );
 
           const resultsByResourceId = new Map();
           for (const result of results) resultsByResourceId.set(result.resource.id, result);
@@ -136,7 +143,7 @@ class KerberosTest {
             const result = resultsByResourceId.get(resourceData.resource.id);
             assert.ok(
               result,
-              `No result returned for resource "${resourceData.resource.name}" (id: "${resourceData.resource.id}")!`
+              `No result returned for resource "${resourceData.resource.name}" (id: "${resourceData.resource.id}")!`,
             );
 
             const resourceName = resourceData.resource.name;
@@ -145,12 +152,20 @@ class KerberosTest {
               const effect = result.actions[action];
               assert.ok(
                 effect !== undefined,
-                `Action "${action}" not found in the checked resources response for resource "${resourceName}"!`
+                `Action "${action}" not found in the checked resources response for resource "${resourceName}"!`,
               );
               assert.strictEqual(
                 effect,
                 expectedEffect,
-                `Action "${action}" effect for resource "${resourceName}" is not matched! Expected: ${expectedEffect} but got: ${effect}`
+                `Action "${action}" effect for resource "${resourceName}" is not matched! Expected: ${expectedEffect} but got: ${effect}`,
+              );
+            }
+
+            if (resourceData.expectedOutputs !== null) {
+              assert.deepStrictEqual(
+                result.outputs,
+                resourceData.expectedOutputs,
+                `Outputs for resource "${resourceName}" did not match the expected outputs!`,
               );
             }
           }

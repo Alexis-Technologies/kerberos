@@ -1,4 +1,9 @@
-const { Conditions, ConditionsJsonSchemas, ConditionsTypeBoxSchemas, ConditionsZodSchemas } = require('../../Conditions');
+const {
+  Conditions,
+  ConditionsJsonSchemas,
+  ConditionsTypeBoxSchemas,
+  ConditionsZodSchemas,
+} = require('../../Conditions');
 const { Constants, ConstantsJsonSchemas, ConstantsTypeBoxSchemas, ConstantsZodSchemas } = require('../../Constants');
 const { Outputs, OutputsJsonSchemas, OutputsTypeBoxSchemas, OutputsZodSchemas } = require('../../Outputs');
 const { ALL_ACTIONS, Effect, JsonSchemas, TypeBoxSchemas, ZodSchemas } = require('../../schemas');
@@ -50,19 +55,13 @@ class PrincipalPolicyJsonSchemas extends JsonSchemas {
         },
         effect: { enum: Object.values(Effect) },
         condition: {
-          anyOf: [
-            ConditionsJsonSchemas.buildShape(),
-            JsonSchemas.buildInstanceOfShape(Conditions),
-          ],
+          anyOf: [ConditionsJsonSchemas.buildShape(), JsonSchemas.buildInstanceOfShape(Conditions)],
         },
         output: {
-          anyOf: [
-            OutputsJsonSchemas.buildShape(),
-            JsonSchemas.buildInstanceOfShape(Outputs),
-          ],
+          anyOf: [OutputsJsonSchemas.buildShape(), JsonSchemas.buildInstanceOfShape(Outputs)],
         },
       },
-      ['action', 'effect']
+      ['action', 'effect'],
     );
   }
 
@@ -74,7 +73,7 @@ class PrincipalPolicyJsonSchemas extends JsonSchemas {
         },
         actions: JsonSchemas.buildNonEmptyArrayShape(PrincipalPolicyJsonSchemas.buildActionRuleShape()),
       },
-      ['resource', 'actions']
+      ['resource', 'actions'],
     );
   }
 
@@ -86,19 +85,13 @@ class PrincipalPolicyJsonSchemas extends JsonSchemas {
         scope: JsonSchemas.buildScopeString(),
         rules: JsonSchemas.buildNonEmptyArrayShape(PrincipalPolicyJsonSchemas.buildRuleShape()),
         variables: {
-          anyOf: [
-            VariablesJsonSchemas.buildShape(),
-            JsonSchemas.buildInstanceOfShape(Variables),
-          ],
+          anyOf: [VariablesJsonSchemas.buildShape(), JsonSchemas.buildInstanceOfShape(Variables)],
         },
         constants: {
-          anyOf: [
-            ConstantsJsonSchemas.buildShape(),
-            JsonSchemas.buildInstanceOfShape(Constants),
-          ],
+          anyOf: [ConstantsJsonSchemas.buildShape(), JsonSchemas.buildInstanceOfShape(Constants)],
         },
       },
-      ['principal', 'version', 'rules']
+      ['principal', 'version', 'rules'],
     );
   }
 
@@ -107,7 +100,7 @@ class PrincipalPolicyJsonSchemas extends JsonSchemas {
       {
         principalPolicy: PrincipalPolicyJsonSchemas.buildPrincipalPolicyShape(),
       },
-      ['principalPolicy']
+      ['principalPolicy'],
     );
   }
 }
@@ -119,16 +112,10 @@ class PrincipalPolicyTypeBoxSchemas extends TypeBoxSchemas {
       action: t.Union([t.String(), t.Literal(ALL_ACTIONS)]),
       effect: t.Union([t.Literal(Effect.Allow), t.Literal(Effect.Deny)]),
       condition: t.Optional(
-        t.Union([
-          ConditionsTypeBoxSchemas.buildShape(t),
-          TypeBoxSchemas.buildInstanceOfShape(t, Conditions),
-        ])
+        t.Union([ConditionsTypeBoxSchemas.buildShape(t), TypeBoxSchemas.buildInstanceOfShape(t, Conditions)]),
       ),
       output: t.Optional(
-        t.Union([
-          OutputsTypeBoxSchemas.buildShape(t),
-          TypeBoxSchemas.buildInstanceOfShape(t, Outputs),
-        ])
+        t.Union([OutputsTypeBoxSchemas.buildShape(t), TypeBoxSchemas.buildInstanceOfShape(t, Outputs)]),
       ),
     });
   }
@@ -147,16 +134,10 @@ class PrincipalPolicyTypeBoxSchemas extends TypeBoxSchemas {
       scope: t.Optional(TypeBoxSchemas.buildScopeString(t)),
       rules: TypeBoxSchemas.buildNonEmptyArrayShape(t, PrincipalPolicyTypeBoxSchemas.buildRuleShape(t)),
       variables: t.Optional(
-        t.Union([
-          VariablesTypeBoxSchemas.buildShape(t),
-          TypeBoxSchemas.buildInstanceOfShape(t, Variables),
-        ])
+        t.Union([VariablesTypeBoxSchemas.buildShape(t), TypeBoxSchemas.buildInstanceOfShape(t, Variables)]),
       ),
       constants: t.Optional(
-        t.Union([
-          ConstantsTypeBoxSchemas.buildShape(t),
-          TypeBoxSchemas.buildInstanceOfShape(t, Constants),
-        ])
+        t.Union([ConstantsTypeBoxSchemas.buildShape(t), TypeBoxSchemas.buildInstanceOfShape(t, Constants)]),
       ),
     });
   }

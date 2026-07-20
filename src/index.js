@@ -9,6 +9,7 @@ module.exports = {
   ...require('./DerivedRoles/index.js'),
   ...require('./Metadata/schemas/index.js'),
   ...require('./Kerberos.js'),
+  ...require('./errors.js'),
   ...require('./caching/cache.js'),
   ...require('./caching/codec.js'),
   ...require('./schemas'),

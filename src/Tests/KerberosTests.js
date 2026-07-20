@@ -20,7 +20,9 @@ class KerberosTests {
 
   static parseTests(tests, kerberos, options = {}) {
     const parsedTests = [];
-    for (const test of tests) parsedTests.push(test instanceof KerberosTest ? test : new KerberosTest(test, kerberos, options));
+    for (const test of tests) {
+      parsedTests.push(test instanceof KerberosTest ? test : new KerberosTest(test, kerberos, options));
+    }
     return parsedTests;
   }
 
@@ -73,7 +75,7 @@ class KerberosTests {
               resources: [resources],
               effectAsBoolean,
             },
-            { describe, it, assert }
+            { describe, it, assert },
           );
         }
       });

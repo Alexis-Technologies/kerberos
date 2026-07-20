@@ -57,7 +57,7 @@ describe('Constants', () => {
 
   it('should throw an error with an invalid schema if zod is provided', () => {
     assert.throws(() => {
-      // eslint-disable-next-line no-new
+      // oxlint-disable-next-line no-new
       new Constants(new Map(), { z });
     });
   });

@@ -1,6 +1,15 @@
 const { KERBEROS_TYPE_KEYWORD, KERBEROS_INSTANCE_OF_KEYWORD } = require('../validation/keywords.js');
 
+// Wildcard tokens. Both are '*' on the wire, but they are semantically
+// distinct (an action wildcard vs a role/resource wildcard) — use the matching
+// constant so call sites document which meaning is intended.
 const ALL_ACTIONS = '*';
+const ALL_ROLES = '*';
+const ALL_RESOURCES = '*';
+
+// Policy selection defaults.
+const DEFAULT_VERSION = 'default';
+const BASE_SCOPE = '';
 
 const Effect = {
   Allow: 'EFFECT_ALLOW',
@@ -12,7 +21,9 @@ const Effect = {
  */
 class ZodSchemas {
   static buildScopeString(z) {
-    return z.string().regex(/^[a-zA-Z0-9._-]*$/, 'Scope must contain only alphanumeric characters, dots, hyphens and underscores');
+    return z
+      .string()
+      .regex(/^[a-zA-Z0-9._-]*$/, 'Scope must contain only alphanumeric characters, dots, hyphens and underscores');
   }
 
   static buildRequestPrincipal(z) {
@@ -142,7 +153,7 @@ class JsonSchemas {
         roles: JsonSchemas.buildNonEmptyArrayShape({ type: 'string' }),
         attr: JsonSchemas.buildUnknownRecordShape(),
       },
-      ['id', 'roles']
+      ['id', 'roles'],
     );
   }
 
@@ -155,7 +166,7 @@ class JsonSchemas {
         scope: JsonSchemas.buildScopeString(),
         attr: JsonSchemas.buildUnknownRecordShape(),
       },
-      ['id', 'kind']
+      ['id', 'kind'],
     );
   }
 
@@ -171,7 +182,7 @@ class JsonSchemas {
         callId: { type: 'string' },
         includeMeta: { type: 'boolean' },
       },
-      ['principal', 'resource', 'P', 'R', 'actions']
+      ['principal', 'resource', 'P', 'R', 'actions'],
     );
   }
 }
@@ -240,6 +251,10 @@ class TypeBoxSchemas {
 
 module.exports = {
   ALL_ACTIONS,
+  ALL_RESOURCES,
+  ALL_ROLES,
+  BASE_SCOPE,
+  DEFAULT_VERSION,
   Effect,
   JsonSchemas,
   TypeBoxSchemas,

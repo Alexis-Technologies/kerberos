@@ -34,8 +34,8 @@ const SHORT_CIRCUIT_OPS = new Set(['&&', '||', '??']);
 const BINARY_OPS = createDispatch({
   '===': (left, right) => left === right,
   '!==': (left, right) => left !== right,
-  '==': (left, right) => left == right, // eslint-disable-line eqeqeq
-  '!=': (left, right) => left != right, // eslint-disable-line eqeqeq
+  '==': (left, right) => left == right, // oxlint-disable-line eqeqeq
+  '!=': (left, right) => left != right, // oxlint-disable-line eqeqeq
   '<': (left, right) => left < right,
   '>': (left, right) => left > right,
   '<=': (left, right) => left <= right,
@@ -70,16 +70,49 @@ const ALLOWED_UNARY_OPS = new Set(Object.keys(UNARY_OPS));
 // Methods that may be called on string / array / number values. None of these
 // can leak a function reference or constructor.
 const VALUE_METHODS = new Set([
-  'includes', 'indexOf', 'lastIndexOf', 'startsWith', 'endsWith',
-  'toLowerCase', 'toUpperCase', 'trim', 'trimStart', 'trimEnd',
-  'slice', 'substring', 'charAt', 'charCodeAt', 'at', 'concat',
-  'split', 'join', 'padStart', 'padEnd', 'repeat', 'toFixed', 'toString',
+  'includes',
+  'indexOf',
+  'lastIndexOf',
+  'startsWith',
+  'endsWith',
+  'toLowerCase',
+  'toUpperCase',
+  'trim',
+  'trimStart',
+  'trimEnd',
+  'slice',
+  'substring',
+  'charAt',
+  'charCodeAt',
+  'at',
+  'concat',
+  'split',
+  'join',
+  'padStart',
+  'padEnd',
+  'repeat',
+  'toFixed',
+  'toString',
 ]);
 
 // Math is exposed as a safe, side-effect-free global root.
 const MATH_METHODS = new Set([
-  'abs', 'ceil', 'floor', 'round', 'trunc', 'sign',
-  'min', 'max', 'pow', 'sqrt', 'cbrt', 'log', 'log2', 'log10', 'exp', 'hypot',
+  'abs',
+  'ceil',
+  'floor',
+  'round',
+  'trunc',
+  'sign',
+  'min',
+  'max',
+  'pow',
+  'sqrt',
+  'cbrt',
+  'log',
+  'log2',
+  'log10',
+  'exp',
+  'hypot',
 ]);
 
 // Whitelisted `new` targets. Only simple Identifier callees are accepted.
@@ -88,11 +121,27 @@ const ALLOWED_CONSTRUCTORS = { Date };
 const DATE_STATIC_METHODS = new Set(['now', 'parse', 'UTC']);
 
 const DATE_METHODS = new Set([
-  'getTime', 'valueOf', 'toISOString', 'toJSON', 'toString',
-  'getFullYear', 'getMonth', 'getDate', 'getDay',
-  'getHours', 'getMinutes', 'getSeconds', 'getMilliseconds',
-  'getUTCFullYear', 'getUTCMonth', 'getUTCDate', 'getUTCDay',
-  'getUTCHours', 'getUTCMinutes', 'getUTCSeconds', 'getUTCMilliseconds',
+  'getTime',
+  'valueOf',
+  'toISOString',
+  'toJSON',
+  'toString',
+  'getFullYear',
+  'getMonth',
+  'getDate',
+  'getDay',
+  'getHours',
+  'getMinutes',
+  'getSeconds',
+  'getMilliseconds',
+  'getUTCFullYear',
+  'getUTCMonth',
+  'getUTCDate',
+  'getUTCDay',
+  'getUTCHours',
+  'getUTCMinutes',
+  'getUTCSeconds',
+  'getUTCMilliseconds',
 ]);
 
 // Top-level function calls with an Identifier callee (no member access).
@@ -110,20 +159,35 @@ const ALLOWED_GLOBALS = { Math, Date };
 
 const DEFAULT_ROOTS = ['P', 'R', 'V', 'C'];
 
+// Safe-by-default resource limits for expressions loaded from a remote store.
+// All three are overridable via createSafeExprCodec options (set a limit to
+// Infinity to disable it) — a compromised or misbehaving store must not be able
+// to exhaust memory (unbounded AST cache) or the call stack (deep nesting).
+const DEFAULT_LIMITS = Object.freeze({
+  maxCachedExprs: 1000,
+  maxExprLength: 4096,
+  maxDepth: 32,
+});
+
 // AST cache keyed by jsep instance so different instances (different plugins /
 // operators) get their own namespace. WeakMap ensures the cache is GC-able.
 const astCacheByJsep = new WeakMap();
 
 /**
  * Parses an expression once and caches the resulting AST keyed by both the
- * jsep instance and the expression string.
+ * jsep instance and the expression string. The cache is bounded (FIFO
+ * eviction) and expressions are rejected beyond the length/depth limits.
  *
  * @param {string} expr
  * @param {Function} jsepInstance  - a pre-configured jsep callable
+ * @param {{ maxCachedExprs: number, maxExprLength: number, maxDepth: number }} [limits]
  * @returns {Record<string, unknown>}
  */
-function parseExpr(expr, jsepInstance) {
+function parseExpr(expr, jsepInstance, limits = DEFAULT_LIMITS) {
   if (typeof expr !== 'string') throw new KerberosExprError('Expression must be a string');
+  if (expr.length > limits.maxExprLength) {
+    throw new KerberosExprError(`Expression exceeds the maximum length of ${limits.maxExprLength} characters`);
+  }
 
   let cache = astCacheByJsep.get(jsepInstance);
   if (!cache) {
@@ -139,7 +203,11 @@ function parseExpr(expr, jsepInstance) {
   } catch (error) {
     throw new KerberosExprError(`Failed to parse expression: ${error.message}`);
   }
-  validateNode(ast);
+  validateNode(ast, limits.maxDepth);
+
+  // FIFO eviction keeps the cache bounded; Map preserves insertion order, so
+  // the first key is the oldest entry.
+  if (cache.size >= limits.maxCachedExprs) cache.delete(cache.keys().next().value);
   cache.set(expr, ast);
   return ast;
 }
@@ -156,62 +224,72 @@ function parseExpr(expr, jsepInstance) {
 const NODE_VALIDATORS = createDispatch({
   Literal() {},
   Identifier() {},
-  MemberExpression(node) {
-    validateNode(node.object);
-    if (node.computed) validateNode(node.property);
+  MemberExpression(node, maxDepth, depth) {
+    validateNode(node.object, maxDepth, depth + 1);
+    if (node.computed) validateNode(node.property, maxDepth, depth + 1);
   },
-  BinaryExpression(node) {
-    if (!ALLOWED_BINARY_OPS.has(node.operator)) throw new KerberosExprError(`Operator "${node.operator}" is not allowed`);
-    validateNode(node.left);
-    validateNode(node.right);
+  BinaryExpression(node, maxDepth, depth) {
+    if (!ALLOWED_BINARY_OPS.has(node.operator)) {
+      throw new KerberosExprError(`Operator "${node.operator}" is not allowed`);
+    }
+    validateNode(node.left, maxDepth, depth + 1);
+    validateNode(node.right, maxDepth, depth + 1);
   },
-  UnaryExpression(node) {
-    if (!ALLOWED_UNARY_OPS.has(node.operator)) throw new KerberosExprError(`Unary operator "${node.operator}" is not allowed`);
-    validateNode(node.argument);
+  UnaryExpression(node, maxDepth, depth) {
+    if (!ALLOWED_UNARY_OPS.has(node.operator)) {
+      throw new KerberosExprError(`Unary operator "${node.operator}" is not allowed`);
+    }
+    validateNode(node.argument, maxDepth, depth + 1);
   },
-  ConditionalExpression(node) {
-    validateNode(node.test);
-    validateNode(node.consequent);
-    validateNode(node.alternate);
+  ConditionalExpression(node, maxDepth, depth) {
+    validateNode(node.test, maxDepth, depth + 1);
+    validateNode(node.consequent, maxDepth, depth + 1);
+    validateNode(node.alternate, maxDepth, depth + 1);
   },
-  ArrayExpression(node) {
-    for (const element of node.elements) validateNode(element);
+  ArrayExpression(node, maxDepth, depth) {
+    for (const element of node.elements) validateNode(element, maxDepth, depth + 1);
   },
-  ObjectExpression(node) {
+  ObjectExpression(node, maxDepth, depth) {
     for (const property of node.properties) {
-      if (property.computed) validateNode(property.key);
-      validateNode(property.shorthand ? property.key : property.value);
+      if (property.computed) validateNode(property.key, maxDepth, depth + 1);
+      validateNode(property.shorthand ? property.key : property.value, maxDepth, depth + 1);
     }
   },
-  CallExpression(node) {
+  CallExpression(node, maxDepth, depth) {
     if (node.callee.type === 'Identifier') {
       if (!Object.prototype.hasOwnProperty.call(GLOBAL_FUNCTIONS, node.callee.name)) {
         throw new KerberosExprError(`Function "${node.callee.name}" is not allowed`);
       }
     } else if (node.callee.type === 'MemberExpression') {
-      validateNode(node.callee);
+      validateNode(node.callee, maxDepth, depth + 1);
     } else {
       throw new KerberosExprError('Only whitelisted function or method calls are allowed');
     }
-    for (const argument of node.arguments) validateNode(argument);
+    for (const argument of node.arguments) validateNode(argument, maxDepth, depth + 1);
   },
-  NewExpression(node) {
-    if (node.callee.type !== 'Identifier' || !Object.prototype.hasOwnProperty.call(ALLOWED_CONSTRUCTORS, node.callee.name)) {
+  NewExpression(node, maxDepth, depth) {
+    if (
+      node.callee.type !== 'Identifier' ||
+      !Object.prototype.hasOwnProperty.call(ALLOWED_CONSTRUCTORS, node.callee.name)
+    ) {
       throw new KerberosExprError('Only whitelisted constructors are allowed (Date)');
     }
-    for (const argument of node.arguments) validateNode(argument);
+    for (const argument of node.arguments) validateNode(argument, maxDepth, depth + 1);
   },
   Compound() {
     throw new KerberosExprError('Compound expressions (e.g. "a, b", "a in b") are not allowed');
   },
 });
 
-function validateNode(node) {
+function validateNode(node, maxDepth = DEFAULT_LIMITS.maxDepth, depth = 0) {
   if (!node || typeof node !== 'object') throw new KerberosExprError('Invalid expression node');
+  if (depth > maxDepth) {
+    throw new KerberosExprError(`Expression exceeds the maximum nesting depth of ${maxDepth}`);
+  }
 
   const validator = NODE_VALIDATORS[node.type];
   if (!validator) throw new KerberosExprError(`Unsupported expression node: ${node.type}`);
-  validator(node);
+  validator(node, maxDepth, depth);
 }
 
 function safeKey(key) {
@@ -267,7 +345,9 @@ function evalObject(node, ctx, config) {
   for (const property of node.properties) {
     const rawKey = property.computed
       ? evalNode(property.key, ctx, config)
-      : property.key.type === 'Identifier' ? property.key.name : evalNode(property.key, ctx, config);
+      : property.key.type === 'Identifier'
+        ? property.key.name
+        : evalNode(property.key, ctx, config);
     const keyStr = safeKey(rawKey);
     result[keyStr] = evalNode(property.shorthand ? property.key : property.value, ctx, config);
   }
@@ -291,7 +371,9 @@ function evalCall(node, ctx, config) {
     return GLOBAL_FUNCTIONS[callee.name](...args);
   }
 
-  if (callee.type !== 'MemberExpression') throw new KerberosExprError('Only whitelisted function or method calls are allowed');
+  if (callee.type !== 'MemberExpression') {
+    throw new KerberosExprError('Only whitelisted function or method calls are allowed');
+  }
 
   const method = callee.computed ? evalNode(callee.property, ctx, config) : callee.property.name;
   const methodStr = safeKey(method);
@@ -316,7 +398,9 @@ function evalCall(node, ctx, config) {
   }
 
   const isAllowedReceiver = typeof receiver === 'string' || typeof receiver === 'number' || Array.isArray(receiver);
-  if (!isAllowedReceiver) throw new KerberosExprError('Method calls are only allowed on string, number, array or Date values');
+  if (!isAllowedReceiver) {
+    throw new KerberosExprError('Method calls are only allowed on string, number, array or Date values');
+  }
   if (!VALUE_METHODS.has(methodStr)) throw new KerberosExprError(`Method "${methodStr}" is not allowed`);
 
   const fn = receiver[methodStr];
@@ -325,7 +409,9 @@ function evalCall(node, ctx, config) {
 }
 
 function evalNew(node, ctx, config) {
-  if (node.callee.type !== 'Identifier') throw new KerberosExprError('Only whitelisted constructors are allowed (Date)');
+  if (node.callee.type !== 'Identifier') {
+    throw new KerberosExprError('Only whitelisted constructors are allowed (Date)');
+  }
 
   const Constructor = ALLOWED_CONSTRUCTORS[node.callee.name];
   if (!Constructor) throw new KerberosExprError(`Constructor "${node.callee.name}" is not allowed`);
@@ -338,7 +424,7 @@ function evalIdentifier(node, ctx, config) {
   if (Object.prototype.hasOwnProperty.call(ALLOWED_GLOBALS, node.name)) return ALLOWED_GLOBALS[node.name];
   if (config.roots.has(node.name)) return ctx == null ? undefined : ctx[node.name];
   throw new KerberosExprError(
-    `Unknown identifier "${node.name}" (allowed roots: ${[...config.roots].join(', ')}, Math, Date, ${Object.keys(GLOBAL_FUNCTIONS).join(', ')})`
+    `Unknown identifier "${node.name}" (allowed roots: ${[...config.roots].join(', ')}, Math, Date, ${Object.keys(GLOBAL_FUNCTIONS).join(', ')})`,
   );
 }
 
@@ -350,7 +436,9 @@ function evalArray(node, ctx, config) {
 }
 
 function evalConditional(node, ctx, config) {
-  return evalNode(node.test, ctx, config) ? evalNode(node.consequent, ctx, config) : evalNode(node.alternate, ctx, config);
+  return evalNode(node.test, ctx, config)
+    ? evalNode(node.consequent, ctx, config)
+    : evalNode(node.alternate, ctx, config);
 }
 
 function throwCompound() {
@@ -436,21 +524,26 @@ function deepTransform(value, handlers) {
  *   deserialize: (jsonSafe: unknown) => unknown,
  * }}
  */
-function createSafeExprCodec({ jsep, roots } = {}) {
+function createSafeExprCodec({ jsep, roots, maxCachedExprs, maxExprLength, maxDepth } = {}) {
   if (!jsep || typeof jsep !== 'function') {
     throw new KerberosExprError(
       'createSafeExprCodec({ jsep }) requires a pre-configured jsep instance. ' +
-      'Install jsep and its plugins, then pass the instance:\n' +
-      '  const jsep = require(\'jsep\').default;\n' +
-      '  jsep.plugins.register(require(\'@jsep-plugin/object\'), ...);\n' +
-      '  const codec = createSafeExprCodec({ jsep });'
+        'Install jsep and its plugins, then pass the instance:\n' +
+        "  const jsep = require('jsep').default;\n" +
+        "  jsep.plugins.register(require('@jsep-plugin/object'), ...);\n" +
+        '  const codec = createSafeExprCodec({ jsep });',
     );
   }
 
   const config = { roots: new Set(roots || DEFAULT_ROOTS) };
+  const limits = {
+    maxCachedExprs: maxCachedExprs ?? DEFAULT_LIMITS.maxCachedExprs,
+    maxExprLength: maxExprLength ?? DEFAULT_LIMITS.maxExprLength,
+    maxDepth: maxDepth ?? DEFAULT_LIMITS.maxDepth,
+  };
 
   function compileExpr(expr) {
-    const ast = parseExpr(expr, jsep);
+    const ast = parseExpr(expr, jsep, limits);
     return (ctx) => evalNode(ast, ctx, config);
   }
 
@@ -462,13 +555,13 @@ function createSafeExprCodec({ jsep, roots } = {}) {
   const serializeHandlers = {
     expr: (descriptor) => {
       // Full validation: parse and check AST via the provided jsep instance.
-      parseExpr(descriptor.$expr, jsep);
+      parseExpr(descriptor.$expr, jsep, limits);
       return { $expr: descriptor.$expr };
     },
     func: () => {
       throw new KerberosExprError(
         'Cannot serialize a raw JavaScript function. Dynamic/remote policies must express conditions, ' +
-        'variables and outputs as { $expr: "..." } string descriptors (no eval / fn.toString).'
+          'variables and outputs as { $expr: "..." } string descriptors (no eval / fn.toString).',
       );
     },
   };
@@ -505,7 +598,7 @@ function serializePolicy(shape, { jsep } = {}) {
     func: () => {
       throw new KerberosExprError(
         'Cannot serialize a raw JavaScript function. Dynamic/remote policies must express conditions, ' +
-        'variables and outputs as { $expr: "..." } string descriptors (no eval / fn.toString).'
+          'variables and outputs as { $expr: "..." } string descriptors (no eval / fn.toString).',
       );
     },
   };
@@ -524,7 +617,7 @@ function deserializePolicy(json, codec) {
   if (!codec?.deserialize) {
     throw new KerberosExprError(
       'deserializePolicy requires a codec with a deserialize method. ' +
-      'Create one via createSafeExprCodec({ jsep }).'
+        'Create one via createSafeExprCodec({ jsep }).',
     );
   }
   return codec.deserialize(json);

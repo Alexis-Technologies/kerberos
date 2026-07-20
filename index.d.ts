@@ -213,11 +213,24 @@ export class MetadataTypeBoxSchemas {
   static buildShape(typebox: TypeBoxLike): unknown;
 }
 
-type DerivedRolesDefinition = {
+/** Classic condition-backed definition: parentRoles and condition required. */
+type ConditionDerivedRolesDefinition = {
   name: string;
   parentRoles: NonEmptyArray<string>;
   condition: ConditionsSchema | Conditions;
 };
+/**
+ * Relation-backed (ReBAC) definition: the role activates when the configured
+ * `relations` resolver grants the named relation/permission on the request's
+ * resource. `parentRoles` and `condition` become optional synchronous gates.
+ */
+type RelationDerivedRolesDefinition = {
+  name: string;
+  relation: string;
+  parentRoles?: NonEmptyArray<string>;
+  condition?: ConditionsSchema | Conditions;
+};
+type DerivedRolesDefinition = ConditionDerivedRolesDefinition | RelationDerivedRolesDefinition;
 export type DerivedRolesSchema = {
   name: string;
   description?: string;
@@ -228,6 +241,7 @@ export type DerivedRolesSchema = {
 export class DerivedRoles {
   constructor(schema: DerivedRolesSchema, options?: ValidationOptions);
   get(req: BaseRequest): Set<string>;
+  getRelationCandidates(req: BaseRequest): Array<{ name: string; relation: string }>;
 }
 export class DerivedRolesZodSchemas {
   static buildShape(z: unknown): unknown;
@@ -270,7 +284,7 @@ export class ResourcePolicy {
     effects: Map<string, Effect | boolean>;
     outputs: Map<string, unknown>;
     meta: {
-      actions: Record<string, { matchedPolicy: string; matchedRule?: string; matchedScope?: string }>;
+      actions: Record<string, { matchedPolicy?: string; matchedRule?: string; matchedScope?: string; reason?: KerberosDecisionReason }>;
       effectiveDerivedRoles: string[];
     };
   };
@@ -313,7 +327,7 @@ export class PrincipalPolicy {
     effects: Map<string, Effect | boolean>;
     outputs: Map<string, unknown>;
     meta: {
-      actions: Record<string, { matchedPolicy: string; matchedRule?: string; matchedScope?: string }>;
+      actions: Record<string, { matchedPolicy?: string; matchedRule?: string; matchedScope?: string; reason?: KerberosDecisionReason }>;
       effectiveDerivedRoles: string[];
     };
   };
@@ -353,7 +367,7 @@ export class RolePolicy {
     effects: Map<string, Effect | boolean>;
     outputs: Map<string, unknown>;
     meta: {
-      actions: Record<string, { matchedPolicy: string; matchedRule?: string; matchedScope?: string }>;
+      actions: Record<string, { matchedPolicy?: string; matchedRule?: string; matchedScope?: string; reason?: KerberosDecisionReason }>;
     };
   };
 }
@@ -392,13 +406,48 @@ export type KerberosAuditLogEntry = {
   outputs: unknown[];
   meta?: {
     actions: Record<string, {
-      matchedPolicy: string;
+      matchedPolicy?: string;
       matchedRule?: string;
       matchedScope?: string;
+      reason?: KerberosDecisionReason;
     }>;
     effectiveDerivedRoles: string[];
+    resolution?: KerberosResolutionTraceEntry[];
   } | Record<string, unknown>;
 };
+
+/**
+ * Decision-trace reason recorded for denied actions when `includeMeta` is set:
+ * - `'policy-miss'` — no policy source produced a decision at all;
+ * - `'rule-miss'` — a policy matched but no rule targeted the action/roles;
+ * - `'condition-not-met'` — a rule targeted the action but its condition failed.
+ */
+export type KerberosDecisionReason = 'policy-miss' | 'rule-miss' | 'condition-not-met';
+
+/** Relation-resolution record in the decision trace (`meta.resolution`). */
+export type KerberosRelationsTraceEntry = {
+  source: 'relations';
+  /** Derived role name backed by the relation. */
+  name: string;
+  relation: string;
+  matched: boolean;
+  /** Present when a relation-backed role could not resolve at all. */
+  reason?: 'no-relations-resolver';
+};
+
+/** One policy-lookup record in the decision trace (`meta.resolution`). */
+export type KerberosResolutionTraceEntry =
+  | {
+      source: 'principal' | 'role' | 'resource';
+      id: string;
+      version: string;
+      scopesSearched: string[];
+      /** Scope the policy was found at, or null when no policy matched. */
+      matchedScope: string | null;
+      /** Present when the policy was resolved from the cache instead of memory. */
+      origin?: 'cache';
+    }
+  | KerberosRelationsTraceEntry;
 export type KerberosMethodLogEntry = {
   event: string;
   reqKind: string;
@@ -436,6 +485,56 @@ export type CacheLike = {
 };
 
 /**
+ * Minimal structural OpenTelemetry contracts. Kerberos never depends on
+ * `@opentelemetry/api` (not even as a peer dependency) — following the same
+ * delegating philosophy as `logger` and `cache`, the consumer passes either
+ * the api module or pre-created tracer/meter instances.
+ */
+export type KerberosSpan = {
+  setAttribute?(key: string, value: unknown): unknown;
+  addEvent?(name: string, attributes?: Record<string, unknown>): unknown;
+  recordException?(error: unknown): void;
+  setStatus?(status: { code: number; message?: string }): unknown;
+  end(): void;
+};
+export type KerberosTracer = {
+  startSpan?(name: string, options?: unknown): KerberosSpan;
+  startActiveSpan?<T>(name: string, options: unknown, fn: (span: KerberosSpan) => T): T;
+};
+export type KerberosCounter = { add(value: number, attributes?: Record<string, unknown>): void };
+export type KerberosHistogram = { record(value: number, attributes?: Record<string, unknown>): void };
+export type KerberosMeter = {
+  createCounter(name: string, options?: unknown): KerberosCounter;
+  createHistogram(name: string, options?: unknown): KerberosHistogram;
+};
+export type KerberosTelemetryApi = {
+  trace?: { getTracer(name: string, version?: string): KerberosTracer };
+  metrics?: { getMeter(name: string, version?: string): KerberosMeter };
+};
+
+/**
+ * OpenTelemetry integration options.
+ *
+ * Two usage modes (controlled by which fields you supply):
+ *
+ * 1. `{ api }` — pass the `@opentelemetry/api` module itself; Kerberos derives
+ *    its own tracer and meter with the correct instrumentation scope
+ *    (`@alexify/kerberos`). Preferred.
+ * 2. `{ tracer, meter }` — pre-created instances (either may be omitted for
+ *    tracer-only / meter-only setups).
+ *
+ * `includeIdentity` (default `true`) controls whether `kerberos.principal.id`
+ * and `kerberos.resource.id` are recorded on spans/events — set to `false`
+ * when traces are exported to backends where identity data is unwanted.
+ */
+export type KerberosTelemetryOptions = {
+  api?: KerberosTelemetryApi;
+  tracer?: KerberosTracer;
+  meter?: KerberosMeter;
+  includeIdentity?: boolean;
+};
+
+/**
  * Pluggable codec used to (de)serialize dynamic policy documents stored in a
  * remote cache.
  *
@@ -455,10 +554,40 @@ export type PolicyCodec = {
   deserialize?(jsonSafe: unknown): unknown;
   compileExpr?(expr: string): (ctx: Record<string, unknown>) => unknown;
   isExprDescriptor?(value: unknown): boolean;
+  /** Max distinct cached expression ASTs (FIFO eviction). Default 1000. */
+  maxCachedExprs?: number;
+  /** Max expression string length in characters. Default 4096. */
+  maxExprLength?: number;
+  /** Max AST nesting depth. Default 32. */
+  maxDepth?: number;
 };
 
 export class KerberosExprError extends Error {
   name: 'KerberosExprError';
+}
+
+/** Thrown when a cache backend fails after exhausting the configured retry attempts. */
+export class KerberosCacheError extends Error {
+  name: 'KerberosCacheError';
+}
+
+/** Thrown when a cached policy document cannot be deserialized (corrupt entry → treated as a miss). */
+export class KerberosCodecError extends Error {
+  name: 'KerberosCodecError';
+}
+
+/** Thrown when request arguments fail validation. Always propagates regardless of `onError`. */
+export class KerberosValidationError extends Error {
+  name: 'KerberosValidationError';
+}
+
+/**
+ * Thrown for ReBAC relation errors: invalid relation schemas (fail-fast at
+ * construction) and runtime guard violations (`maxDepth`, missing
+ * reverse-index contract).
+ */
+export class KerberosRelationsError extends Error {
+  name: 'KerberosRelationsError';
 }
 
 /**
@@ -481,7 +610,16 @@ export class KerberosExprError extends Error {
  * const kerberos = new Kerberos([], [], { cache, codec: { jsep } });
  * ```
  */
-export function createSafeExprCodec(options: { jsep: (expr: string) => unknown; roots?: string[] }): PolicyCodec & {
+export function createSafeExprCodec(options: {
+  jsep: (expr: string) => unknown;
+  roots?: string[];
+  /** Max distinct cached expression ASTs (FIFO eviction). Default 1000. */
+  maxCachedExprs?: number;
+  /** Max expression string length in characters. Default 4096. */
+  maxExprLength?: number;
+  /** Max AST nesting depth. Default 32. */
+  maxDepth?: number;
+}): PolicyCodec & {
   isExprDescriptor(value: unknown): boolean;
   compileExpr(expr: string): (ctx: Record<string, unknown>) => unknown;
   serialize(policyShape: unknown): unknown;
@@ -501,12 +639,63 @@ export function serializePolicy(shape: unknown, options?: { jsep?: (expr: string
  */
 export function deserializePolicy(json: unknown, codec: PolicyCodec): unknown;
 
+/**
+ * ReBAC delegation contract for the `relations` option. Any object with a
+ * `check` method works — a SQL/ORM-backed resolver of your join tables, or the
+ * built-in Zanzibar-lite resolver from `@alexify/kerberos/relations`. `list`
+ * is an optional batch fast path (called first when present). The `memo` Map
+ * is request-scoped and shared across all resources of a `checkResources`
+ * batch — resolvers may use it to share subproblems.
+ */
+export type KerberosRelationsResolver = {
+  check(
+    args: { principal: RequestPrincipal; resource: RequestResource; relation: string },
+    opts?: { memo?: Map<string, unknown> | null },
+  ): boolean | Promise<boolean>;
+  list?(
+    args: { principal: RequestPrincipal; resource: RequestResource; relations: string[] },
+    opts?: { memo?: Map<string, unknown> | null },
+  ): Set<string> | string[] | Promise<Set<string> | string[]>;
+};
+
 export type KerberosOptions = ValidationOptions & {
   logger?: KerberosLogger | boolean;
+  telemetry?: KerberosTelemetryOptions;
   cache?: CacheLike;
+  /** Retry policy for transient cache.get failures. Default { attempts: 3 }; attempts: 1 disables retrying. */
+  cacheRetry?: { attempts?: number } | null;
   codec?: PolicyCodec;
+  /** ReBAC resolver used for relation-backed derived roles. */
+  relations?: KerberosRelationsResolver | null;
+  /**
+   * Evaluation-phase error handling. `'throw'` (default) propagates errors to
+   * the caller; `'deny'` converts them to fail-closed results (`isAllowed` →
+   * false, `checkResources` → empty results). Malformed arguments always throw
+   * `KerberosValidationError` regardless of this option.
+   */
+  onError?: 'throw' | 'deny';
   getCallId?: () => string;
 };
+
+/** Wildcard action token used in policy rules. */
+export const ALL_ACTIONS: '*';
+/** Wildcard role token used in resource policy rules. */
+export const ALL_ROLES: '*';
+/** Wildcard resource token used in principal/role policy rules. */
+export const ALL_RESOURCES: '*';
+/** Default policy version used when a request omits `policyVersion`. */
+export const DEFAULT_VERSION: 'default';
+/** The base (empty) scope every scope search chain ends with. */
+export const BASE_SCOPE: '';
+
+/**
+ * Wraps a CacheLike into the internal read-only reader used by Kerberos
+ * (retry loop + typed KerberosCacheError). Exposed for advanced composition.
+ */
+export function createCacheReader(
+  cache: CacheLike | false | null | undefined,
+  retry?: { attempts?: number } | null,
+): { enabled: boolean; get(key: string): Promise<unknown> };
 
 export class Kerberos {
   constructor(policies: KerberosPolicy[], derivedRoles: KerberosDerivedRoles[], options?: KerberosOptions);
@@ -537,11 +726,13 @@ export class Kerberos {
       outputs: unknown[];
       meta?: {
         actions: Record<string, {
-          matchedPolicy: string;
+          matchedPolicy?: string;
           matchedRule?: string;
           matchedScope?: string;
+          reason?: KerberosDecisionReason;
         }>;
         effectiveDerivedRoles: string[];
+        resolution?: KerberosResolutionTraceEntry[];
       };
     }[];
   }>;

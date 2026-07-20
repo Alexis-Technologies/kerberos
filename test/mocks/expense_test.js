@@ -125,7 +125,7 @@ const expenseTestPolicy = {
             approve: 'EFFECT_DENY',
           },
         },
-      ]
+      ],
     },
     {
       name: 'Sales Manager Role',
@@ -343,7 +343,7 @@ const expenseTestPolicy = {
         },
       ],
     },
-  ]
+  ],
 };
 
 module.exports = { expenseTestPolicy };

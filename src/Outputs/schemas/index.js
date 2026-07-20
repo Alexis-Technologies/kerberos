@@ -45,10 +45,10 @@ class OutputsJsonSchemas extends JsonSchemas {
                 ruleActivated: JsonSchemas.buildFunctionShape(),
                 conditionNotMet: JsonSchemas.buildFunctionShape(),
               },
-              []
+              [],
             ),
           },
-          ['when']
+          ['when'],
         ),
         JsonSchemas.buildFunctionShape(),
       ],

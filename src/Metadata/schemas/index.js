@@ -35,7 +35,7 @@ class MetadataJsonSchemas extends JsonSchemas {
         matchedRule: { type: 'string' },
         matchedScope: { type: 'string' },
       },
-      ['matchedPolicy']
+      ['matchedPolicy'],
     );
   }
 
@@ -52,7 +52,7 @@ class MetadataJsonSchemas extends JsonSchemas {
           items: { type: 'string' },
         },
       },
-      ['actions']
+      ['actions'],
     );
   }
 }

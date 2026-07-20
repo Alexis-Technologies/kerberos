@@ -5,6 +5,179 @@ All notable changes to **`@alexify/kerberos`** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **ReBAC (relationship-based access control)**, inspired by SpiceDB/Zanzibar:
+  - **`relations` engine option** — a delegation contract
+    (`{ check, list? }`) like `logger`/`cache`/`codec`; any resolver works,
+    including one backed by your own SQL join tables. Derived-role definitions
+    gain an optional **`relation:`** field: the role activates when the
+    resolver grants that relation/permission on the request's resource
+    (`parentRoles`/`condition` become optional synchronous gates). Resolution
+    happens on the engine's existing async derived-roles phase — list-first,
+    parallel `check` fallback, one shared request memo across a whole
+    `checkResources` batch, `onError` semantics and per-resource isolation
+    apply, and `includeMeta` traces every resolution as
+    `{ source: 'relations', name, relation, matched }`.
+  - **Built-in in-process "Zanzibar-lite" resolver** — the `RelationResolver`
+    class on the new **`@alexify/kerberos/relations` subpath** (kept out of
+    the main entry so non-ReBAC bundles do not grow): a JSON relation-schema
+    DSL compiled to SpiceDB's userset-rewrite algebra (union `anyOf` /
+    intersection `allOf` / exclusion `exclude` / arrows `{ via, permission }`
+    incl. `.all`, wildcard subjects `user:*`, subject relations
+    `group#member`, fail-fast compile checks + a precomputed O(1)
+    admission-key Set per relation), static tuples indexed in both directions
+    (zero IO) plus dynamic tuples via the same read-only cache fallback as
+    policies (`rel:<type>:<id>:<relation>` documents; opt-in
+    `rel:rev:<subject>` reverse documents with `reverseIndex: true`),
+    **caveats** (ABAC-on-ReBAC: named conditions with write-time context
+    precedence, `{ $expr }` support through the eval-free codec), recursive
+    `check` with short-circuiting, per-request memoization and a SpiceDB-style
+    `maxDepth` guard (default 50), and **reverse APIs** — `lookupSubjects`
+    (group-expanding, with wildcard-exclusion entries) and `lookupResources`
+    (reachability entrypoints + candidate verification). Engineered
+    performance-first: O(1) strategy tables over rewrite-node kinds instead of
+    switch dispatch, constructor-precompiled argument validators, per-type
+    Map/Set subject-set algebra, cursor/level-based BFS (no `shift()`), and
+    `Promise.allSettled` waves for lookup paths that need every branch
+    (candidate verification, closure levels, collect expansions) while check
+    paths stay sequential to preserve short-circuit cache-read savings.
+    Optional **resolver telemetry** via the same `telemetry` option shapes:
+    spans per public call (`Kerberos.relations.*`), a
+    `kerberos.relations.checks` counter and tuple-document cache reads tagged
+    `kerberos.cache.kind: relation`. New typed `KerberosRelationsError`.
+  - Deliberately **not** implemented (documented in README/SECURITY.md):
+    ZedTokens/consistency levels (freshness is delegated to the cache
+    invalidation layer), CEL, partial caveat evaluation, cursors/streaming.
+  - **Code-review hardening** (second-pass review of the unreleased module):
+    session-memo entries are scoped by resolver instance + principal/context
+    object identity (sharing one memo across principals, contexts or resolver
+    instances is safe by construction); **data errors are never read as
+    answers** — corrupt tuple/reverse documents throw `KerberosCodecError`
+    and a caveat whose condition throws raises `KerberosRelationsError`
+    (silently treating them as empty/not-matched would widen access in
+    exclusion subtract positions); exclusion in `lookupSubjects` no longer
+    mutates the memoized base set; subject-relation refs must reference
+    relations (permissions rejected at compile — keeps `check` and
+    `lookupResources` consistent); `|` is a reserved name character
+    (admission-key delimiter); compiled refs/rewrite nodes are frozen and
+    schema introspection getters return copies; `list()` validates its
+    arguments through the configured backend; object-form resource/principal
+    ids are sanitized (no `:`/`#`, no literal `*` principal id); caveats
+    always receive a copied context; argument errors are recorded on
+    telemetry spans; `lookupSubjects` omits concrete subjects covered by an
+    unexcluded wildcard.
+- **`onError: 'throw' | 'deny'` option** (default `'throw'`) — error semantics
+  are no longer coupled to logger presence. Malformed arguments always throw
+  the new typed `KerberosValidationError` regardless of this option.
+- **Typed errors**: `KerberosCacheError`, `KerberosCodecError`,
+  `KerberosValidationError` exported from the main entry.
+- **`cacheRetry: { attempts }` option** (default 3 attempts) — transient
+  `cache.get` failures are retried; exhausted retries surface as
+  `KerberosCacheError`. Corrupt cache entries (deserialize/constructor
+  failures) are logged and treated as a cache miss instead of failing the
+  request.
+- **Configurable safe-codec limits**: `codec: { jsep, maxCachedExprs?,
+  maxExprLength?, maxDepth? }` (defaults: 1000 cached ASTs with FIFO eviction,
+  4 KB expressions, depth 32) — a compromised policy store can no longer grow
+  the AST cache without bound or overflow the stack with deep nesting.
+- CI (GitHub Actions): lint + format check + tests with c8 coverage + type
+  tests on Node 18/20/22.
+- **Decision tracing** (`includeMeta: true`): denied actions now carry a
+  `reason` (`'policy-miss'` / `'rule-miss'` / `'condition-not-met'`) and `meta`
+  gains a `resolution` array recording every policy lookup (scopes searched,
+  where the policy matched, memory vs cache origin) — "why was this denied" is
+  now answerable from the response.
+- **Cache observability**: debug log events + `kerberos.cache.requests` OTel
+  counter with `result: hit|miss|error`.
+- **Benchmarks**: zero-dependency `pnpm bench` harness; results documented in
+  the README "Benchmarks" section.
+- `SECURITY.md` with the threat model and the opt-in safety-layers philosophy.
+- Test DSL: expected entries now support an optional `outputs` array asserted
+  against the `checkResources` response.
+- New exported constants: `ALL_ROLES`, `ALL_RESOURCES`, `DEFAULT_VERSION`,
+  `BASE_SCOPE` (plus `ALL_ACTIONS` and `createCacheReader` are now typed).
+
+### Performance
+
+- **`checkResources` evaluates resources concurrently** via
+  `Promise.allSettled`: N cache-backed resources cost one parallel wave of
+  lookups instead of N sequential round-trips (~8x faster with a 2ms-latency
+  store and 10 resources). A rejected resource fail-closes (all its actions
+  `EFFECT_DENY`) without failing the batch.
+- Scope search chains are memoized per instance (bounded); role-policy memo
+  keys are computed once per evaluation instead of per inheritance node; the
+  rule `actions`/`allowActions` are precompiled into non-enumerable Sets at
+  policy construction (O(1) hot-path membership instead of repeated
+  `includes` scans, invisible in serialized shapes); the
+  response effect map is built directly instead of double-allocating via
+  `Object.fromEntries`.
+- Internal evaluation now always works with canonical effect strings —
+  `effectAsBoolean` is applied once at the response boundary instead of being
+  threaded through every policy class (audit logs now always contain canonical
+  `EFFECT_*` values).
+
+### Changed
+
+- **BREAKING (bug fix): logger no longer changes error semantics.** Previously
+  errors were silently converted to DENY when a logger was enabled and thrown
+  otherwise; a throwing logger could even flip a computed ALLOW to DENY. All
+  logger calls are now internally guarded (a broken logger can never affect
+  authorization results), and failure behavior is controlled solely by
+  `onError`. To restore the old fail-closed behavior, pass `onError: 'deny'`.
+- **BREAKING (security fix): duplicate policy keys now throw at construction.**
+  Two policies with the same kind/principal/role + version + scope previously
+  last-wins overwrote each other, which could silently drop a deny rule.
+  Duplicate derived-roles definition names also throw.
+- **Derived-role definitions without a `condition` (and without a `relation`)
+  now throw at construction** instead of crashing later during evaluation —
+  every definition must be either condition-backed or relation-backed.
+- `pnpm-lock.yaml` is no longer published in the npm tarball.
+
+- **Native OpenTelemetry support (traces + metrics)** via the new `telemetry`
+  constructor option, following the same zero-dependency delegation philosophy
+  as `logger`/`cache`: pass `{ api }` (the `@opentelemetry/api` module — Kerberos
+  derives its own tracer/meter with the `@alexify/kerberos` instrumentation
+  scope) or pre-created `{ tracer, meter }` instances. One span per
+  `isAllowed`/`checkResources` call (started **active**, so auto-instrumented
+  cache spans nest under it), per-decision `kerberos.decision` events, `ERROR`
+  span status + exception events on failures, plus two metrics:
+  `kerberos.decisions` counter and `kerberos.request.duration` histogram.
+  Identity attributes (`kerberos.principal.id`, `kerberos.resource.id`) are on
+  by default and can be stripped with `telemetry.includeIdentity: false`.
+  Telemetry failures never affect authorization results, and the
+  logger-controlled error contract (fallback vs rethrow) is unchanged. New
+  structural types (`KerberosTelemetryOptions`, `KerberosTracer`,
+  `KerberosMeter`, …) are exported from `index.d.ts`.
+
+- **Browser/server entrypoint split** (pino-style). New root `browser.js` entry
+  plus a package.json `browser` field (object map) and a `browser` condition in
+  `exports`: browser bundlers (webpack, Vite, esbuild `platform: browser`,
+  Rollup node-resolve with `browser: true`, Parcel, Bun) now automatically pick
+  a build with **zero Node.js builtins**.
+- New `src/runtime/node.js` / `src/runtime/browser.js` platform modules holding
+  the only platform-specific code (`generateCallId`, `getNow`). The Node
+  runtime uses `node:crypto` / `node:perf_hooks` directly; the browser runtime
+  uses `globalThis.crypto.randomUUID` (with a pseudo-UUID fallback for insecure
+  contexts) and `globalThis.performance` (falling back to `Date.now`).
+- `engines.node >= 18` — documents the already-implicit runtime floor.
+
+### Changed
+
+- Removed the try/catch `require('crypto')` / `require('node:perf_hooks')`
+  feature detection from `src/Kerberos.js` — each platform entry now targets
+  its runtime directly. Node behavior is unchanged; browser bundles get
+  smaller and webpack 5 browser builds no longer need `resolve.fallback`
+  workarounds.
+- **Tooling: migrated linting/formatting from ESLint (neostandard) + Prettier
+  to [Oxlint](https://oxc.rs/docs/guide/usage/linter) + Oxfmt** (`.oxlintrc.json` / `.oxfmtrc.json`). `pnpm lint` now runs
+  `oxlint src test` (test files are linted too, previously only `src/`), and new
+  `pnpm format` / `pnpm format:check` scripts run Oxfmt. The whole codebase was
+  reformatted to `printWidth: 120` with trailing commas; inline suppressions
+  renamed to `oxlint-disable-*`. Dev-only change — no runtime impact.
+
 ## [2.0.1] - 2026-06-01
 
 ### Fixed

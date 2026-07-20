@@ -42,11 +42,14 @@ function createPinoCollector(level = 'info') {
     },
   });
 
-  const logger = pino({
-    level,
-    base: null,
-    timestamp: false,
-  }, destination);
+  const logger = pino(
+    {
+      level,
+      base: null,
+      timestamp: false,
+    },
+    destination,
+  );
 
   return {
     logger,
@@ -83,21 +86,26 @@ describe('Kerberos logger support', () => {
 
     const kerberos = createKerberosWithLogger(true);
 
-    await withPatchedConsole({
-      group: (...args) => events.group.push(args),
-      log: (...args) => events.log.push(args),
-      table: (...args) => events.table.push(args),
-      debug: (...args) => events.debug.push(args),
-      groupEnd: () => { events.groupEnd++; },
-    }, async () => {
-      const isAllowed = await kerberos.isAllowed({
-        principal: principalsPolicy.sally,
-        action: 'view',
-        resource: resourcesPolicy.expense1,
-      });
+    await withPatchedConsole(
+      {
+        group: (...args) => events.group.push(args),
+        log: (...args) => events.log.push(args),
+        table: (...args) => events.table.push(args),
+        debug: (...args) => events.debug.push(args),
+        groupEnd: () => {
+          events.groupEnd++;
+        },
+      },
+      async () => {
+        const isAllowed = await kerberos.isAllowed({
+          principal: principalsPolicy.sally,
+          action: 'view',
+          resource: resourcesPolicy.expense1,
+        });
 
-      assert.strictEqual(isAllowed, true);
-    });
+        assert.strictEqual(isAllowed, true);
+      },
+    );
 
     assert.deepStrictEqual(events.group, [['Kerberos.js']]);
     assert.deepStrictEqual(events.log, [['Principal sally is ALLOWED to perform action view on resource expense1']]);
@@ -158,7 +166,9 @@ describe('Kerberos logger support', () => {
       table: (...args) => events.table.push(args),
       debug: (...args) => events.debug.push(args),
       error: (...args) => events.error.push(args),
-      groupEnd: () => { events.groupEnd++; },
+      groupEnd: () => {
+        events.groupEnd++;
+      },
     };
 
     const kerberos = createKerberosWithLogger(logger);
@@ -288,16 +298,20 @@ describe('Kerberos logger support', () => {
     assert.strictEqual(auditEntries[0].msg, 'Kerberos.js authorization decision for sally on expense1');
   });
 
-  it('should log structured method errors with pino and return fallback result', async () => {
+  it('should log structured method errors with pino and rethrow validation errors', async () => {
     const collector = createPinoCollector('debug');
     const kerberos = createKerberosWithLogger(collector.logger, { z });
 
-    const result = await kerberos.isAllowed({
-      principal: principalsPolicy.sally,
-      resource: resourcesPolicy.expense1,
-    });
-
-    assert.strictEqual(result, false);
+    // Malformed arguments are programming errors: they always throw
+    // (KerberosValidationError), regardless of logger presence or `onError`.
+    await assert.rejects(
+      () =>
+        kerberos.isAllowed({
+          principal: principalsPolicy.sally,
+          resource: resourcesPolicy.expense1,
+        }),
+      { name: 'KerberosValidationError' },
+    );
 
     await collector.flush();
 

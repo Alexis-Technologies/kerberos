@@ -1,32 +1,31 @@
-const { Outputs } = require('../Outputs');
 const { parsePrincipalPolicyShape } = require('./validation');
 
-const { ALL_ACTIONS, Effect } = require('../schemas');
-const { Variables } = require('../Variables');
-const { Conditions } = require('../Conditions');
-const { Constants } = require('../Constants');
+const { ALL_ACTIONS, ALL_RESOURCES, Effect } = require('../schemas');
+const { parseConditions, parseConstants, parseOutputs, parseVariables } = require('../policyParsers.js');
 
+/**
+ * Represents a Cerbos-style principal policy: principal-specific overrides
+ * bound to a single principal, targeting resource + action directly.
+ */
 class PrincipalPolicy {
   static parseShape(shape, options = {}) {
     return parsePrincipalPolicyShape(shape, options);
   }
 
   static parseConstants(constants, options = {}) {
-    return constants instanceof Constants ? constants : new Constants(constants, options);
+    return parseConstants(constants, options);
   }
 
   static parseVariables(variables, options = {}) {
-    return variables instanceof Variables ? variables : new Variables(variables, options);
+    return parseVariables(variables, options);
   }
 
   static parseConditions(conditions, options = {}) {
-    if (!conditions) return undefined;
-    return conditions instanceof Conditions ? conditions : new Conditions(conditions, options);
+    return parseConditions(conditions, options);
   }
 
   static parseOutputs(outputs, options = {}) {
-    if (!outputs) return undefined;
-    return outputs instanceof Outputs ? outputs : new Outputs(outputs, options);
+    return parseOutputs(outputs, options);
   }
 
   #shape = null;
@@ -34,10 +33,16 @@ class PrincipalPolicy {
   constructor(shape, options = {}) {
     this.#shape = PrincipalPolicy.parseShape(shape, options);
     if (this.#shape.principalPolicy.constants) {
-      this.#shape.principalPolicy.constants = PrincipalPolicy.parseConstants(this.#shape.principalPolicy.constants, options);
+      this.#shape.principalPolicy.constants = PrincipalPolicy.parseConstants(
+        this.#shape.principalPolicy.constants,
+        options,
+      );
     }
     if (this.#shape.principalPolicy.variables) {
-      this.#shape.principalPolicy.variables = PrincipalPolicy.parseVariables(this.#shape.principalPolicy.variables, options);
+      this.#shape.principalPolicy.variables = PrincipalPolicy.parseVariables(
+        this.#shape.principalPolicy.variables,
+        options,
+      );
     }
     if (this.#shape.principalPolicy.rules?.length) {
       const rules = [];
@@ -78,7 +83,14 @@ class PrincipalPolicy {
     return this.#shape;
   }
 
-  check(req, effectAsBoolean = false) {
+  /**
+   * Evaluates a request. Effects are always canonical
+   * `EFFECT_ALLOW`/`EFFECT_DENY` strings — the `effectAsBoolean` response
+   * format is applied at the response boundary. Actions with no fulfilled
+   * rule are intentionally left unset so evaluation falls through to the
+   * role/resource policy layers.
+   */
+  check(req) {
     const effects = new Map();
     const outputs = new Map();
     const metaSrcPrefix = `principal.${this.principal}.v${this.version}`;
@@ -93,8 +105,6 @@ class PrincipalPolicy {
     const variables = this.#shape.principalPolicy.variables?.get(reqWithConstants);
     const reqWithVariables = { ...reqWithConstants, variables, V: variables };
 
-    const denyValue = !effectAsBoolean ? Effect.Deny : false;
-    const allowValue = !effectAsBoolean ? Effect.Allow : true;
     const rules = this.rules;
 
     for (const action of reqWithVariables.actions) {
@@ -109,7 +119,7 @@ class PrincipalPolicy {
 
       for (let i = 0; i < rules.length; i++) {
         const rule = rules[i];
-        if (rule.resource !== ALL_ACTIONS && rule.resource !== reqWithVariables.R.kind) continue;
+        if (rule.resource !== ALL_RESOURCES && rule.resource !== reqWithVariables.R.kind) continue;
 
         const actionRules = rule.actions;
         for (let j = 0; j < actionRules.length; j++) {
@@ -143,8 +153,8 @@ class PrincipalPolicy {
       meta.actions[action] = { matchedPolicy: metaSrcBase, matchedRule };
       if (this.scope) meta.actions[action].matchedScope = this.scope;
 
-      if (hasDeny) effects.set(action, denyValue);
-      else if (hasAllow) effects.set(action, allowValue);
+      if (hasDeny) effects.set(action, Effect.Deny);
+      else if (hasAllow) effects.set(action, Effect.Allow);
     }
 
     return { effects, outputs, meta };

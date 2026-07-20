@@ -23,7 +23,7 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
 - [x] Conditions;
 - [x] Variables and constants;
 - [x] Outputs;
-- [x] Testing;
+- [x] Testing (`@alexify/kerberos/tests`);
 - [x] APIs:
   - [x] isAllowed API;
   - [x] CheckResourceSet API;
@@ -34,6 +34,8 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
 - [x] Metadata;
 - [x] Pluggable schema validation (Zod, JSON Schema + Ajv, TypeBox + Ajv);
 - [x] Caching / storing dynamic policies (cache-agnostic, with a safe AST-based serialization codec);
+- [x] OpenTelemetry (traces + metrics, zero-dependency delegation);
+- [x] ReBAC — relation-backed derived roles + a built-in in-process "Zanzibar-lite" resolver inspired by SpiceDB (`@alexify/kerberos/relations`);
 
 ---
 **_P.S. We are tying to keep the API as close as possible to Cerbos. If you are familiar with Cerbos, you will feel at home with Kerberos.js._**
@@ -52,19 +54,34 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
   - [Mixed Policy Evaluation](#mixed-policy-evaluation)
 - [Configuration Options](#configuration-options)
   - [Using Pino for Production Logging](#using-pino-for-production-logging)
+- [OpenTelemetry](#opentelemetry)
 - [Schema Validation](#schema-validation)
   - [Zod](#using-zod) · [JSON Schema + Ajv](#using-json-schema--ajv) · [TypeBox + Ajv](#using-typebox--ajv) · [Explicit Builders](#using-explicit-builders)
 - [Outputs](#outputs)
 - [Scopes and Policy Versions](#scopes-and-policy-versions)
 - [Metadata](#metadata)
 - [Caching / Storing Policies](#caching--storing-policies)
+- [ReBAC (Relations)](#rebac-relations)
 - [Testing](#testing)
+- [Benchmarks](#benchmarks)
 
 ## Installation
 
 ```bash
 npm install @alexify/kerberos
 ```
+
+### Browser usage
+
+The package ships two entrypoints: a Node.js entry (`index.js`, uses `node:crypto` / `node:perf_hooks` directly) and a browser entry (`browser.js`) declared via the package.json `browser` field and the `browser` condition in `exports`. Browser bundlers pick the browser build automatically — **no configuration needed** for webpack 5, Vite, esbuild (`platform: 'browser'`), Parcel or Bun. Rollup users need [`@rollup/plugin-node-resolve`](https://github.com/rollup/plugins/tree/master/packages/node-resolve) with `browser: true`.
+
+The browser build contains **zero Node.js builtins** — the only platform-specific code (`generateCallId`, `getNow`) is swapped to a browser implementation backed by `globalThis.crypto.randomUUID` and `globalThis.performance`.
+
+Notes:
+
+- In insecure contexts (plain HTTP), where `crypto.randomUUID` is unavailable, call IDs fall back to a `Math.random`-based pseudo UUID. Call IDs are **correlation identifiers, not security tokens**, so this is safe.
+- The package is CommonJS, so browser usage requires a bundler (no bare `<script>` tag).
+- Node.js itself ignores the `browser` field entirely — server-side usage (with or without a bundler) always resolves the Node entry.
 
 ## Usage
 
@@ -355,7 +372,7 @@ When mixed policy types are present, Kerberos resolves each action in this order
 2. If it returns an explicit `EFFECT_ALLOW` or `EFFECT_DENY`, use that result.
 3. Otherwise, evaluate all matching `RolePolicy` entries for the principal roles.
 4. If multiple role policies apply to the same action, `EFFECT_DENY` wins over `EFFECT_ALLOW`.
-5. If the role layer is not applicable for that action, fall back to the matching `ResourcePolicy`.
+5. If the role layer is not applicable for that action, fall back to the matching `ResourcePolicy`. Before its rules are matched, the imported **derived roles are resolved**: condition-backed definitions evaluate synchronously, and relation-backed definitions (the `relation:` field) resolve through the configured [`relations` resolver](#rebac-relations) (ReBAC) — `list`-first with parallel `check` fallback, one shared memo per request. The resulting `effectiveDerivedRoles` then participate in rule matching alongside plain `roles`.
 6. If nothing matches, return `EFFECT_DENY`.
 
 The decision is computed **per action** — different actions in the same request may be resolved by different policy layers. Each lookup (principal / role / resource) walks the [scope search chain](#scopes-and-policy-versions) and `policyVersion`, and checks in-memory policies first, then the optional `cache`.
@@ -368,7 +385,15 @@ flowchart TD
 
     R -->|"EFFECT_DENY (wins over Allow)"| DONE
     R -->|"EFFECT_ALLOW"| DONE
-    R -->|role layer not applicable| RES{{"ResourcePolicy<br/>(by resource.kind)"}}
+    R -->|role layer not applicable| DR
+
+    subgraph DR ["Derived-roles resolution (importDerivedRoles)"]
+        direction TB
+        SYNC["Condition-backed definitions<br/>(sync: parentRoles + condition)"] --> EDR([effectiveDerivedRoles])
+        REL["Relation-backed definitions (relation: field)<br/>async via the relations resolver (ReBAC):<br/>list-first, parallel check fallback, shared memo"] --> EDR
+    end
+
+    EDR --> RES{{"ResourcePolicy<br/>(by resource.kind — rules match roles / derivedRoles)"}}
 
     RES -->|"EFFECT_ALLOW / EFFECT_DENY"| DONE
     RES -->|no rule matched| DEF([Default: EFFECT_DENY])
@@ -386,6 +411,7 @@ The Kerberos constructor accepts an optional third parameter with configuration 
 ```javascript
 const kerberos = new Kerberos(policies, derivedRoles, {
   logger: true, // Legacy console audit logging with summary + table + debug(json)
+  telemetry, // Optional: OpenTelemetry traces + metrics ({ api } or { tracer, meter })
   cache, // Optional: any cache solution exposing get(key) (keyv, cacheable, ...)
   codec, // Optional: custom (de)serialization codec for dynamic policies
   z, // Optional: validate with Zod
@@ -397,6 +423,7 @@ const kerberos = new Kerberos(policies, derivedRoles, {
 
 ### Options:
 
+- **`telemetry`** (KerberosTelemetryOptions): Enable OpenTelemetry traces and metrics. Pass `{ api }` (the `@opentelemetry/api` module) or `{ tracer, meter }` instances — see [OpenTelemetry](#opentelemetry).
 - **`logger`** (boolean | KerberosLogger): Enable audit logging.
   - `true` keeps the legacy console behavior with `group + summary + table + debug(json)`
   - `false` or omitted disables logging
@@ -433,6 +460,45 @@ const kerberos = new Kerberos(policies, derivedRoles, {
 With `Pino`, Kerberos emits structured audit entries that include `callId`, `reqId`, `reqKind`, `principalId`, `resourceId`, `action`, `effect`, `outputs`, and `meta`. This mode is better suited for production ingestion than the default console table output.
 
 It also emits lifecycle logs such as `IsAllowed.start`, `IsAllowed.error`, `IsAllowed.finish`, `CheckResources.start`, and `CheckResources.finish`. When an error happens with logging enabled, Kerberos logs that error and returns a fallback response instead of throwing.
+
+## OpenTelemetry
+
+Kerberos.js ships native OpenTelemetry support (traces + metrics) following the same delegating philosophy as `logger` and `cache`: **the package never depends on `@opentelemetry/api`** (not even as a peer dependency). You pass either the api module or pre-created instances:
+
+```javascript
+import * as api from '@opentelemetry/api';
+import { Kerberos } from '@alexify/kerberos';
+
+// Preferred: pass the api module — Kerberos derives its own tracer/meter with
+// the correct instrumentation scope ('@alexify/kerberos').
+const kerberos = new Kerberos(policies, derivedRoles, { telemetry: { api } });
+
+// Escape hatch: pre-created instances (either may be omitted).
+const kerberos2 = new Kerberos(policies, derivedRoles, {
+  telemetry: { tracer: myTracer, meter: myMeter },
+});
+```
+
+Works out of the box with any registered SDK (e.g. `NodeSDK` from `@opentelemetry/sdk-node`); with no SDK registered, everything no-ops.
+
+**Spans** — one per public call: `Kerberos.isAllowed` (decision attributes on the span) and `Kerberos.checkResources` (one `kerberos.decision` event per resource × action); the built-in ReBAC resolver adds `Kerberos.relations.check` / `.list` / `.lookupSubjects` / `.lookupResources` when given its own `telemetry` option (see [Resolver telemetry](#resolver-telemetry)). The span is started **active**, so spans created inside — e.g. an auto-instrumented Redis cache behind the `cache` option, or resolver spans under an engine span — nest correctly. Attributes include `kerberos.call_id`, `kerberos.req_id`, `kerberos.resource.kind`, `kerberos.action`, `kerberos.allowed` / `kerberos.effect`, `kerberos.matched_policy` / `kerberos.matched_rule` / `kerberos.matched_scope`, and identity attributes `kerberos.principal.id` / `kerberos.resource.id`. On errors the span gets `ERROR` status plus an exception event — error-handling behavior itself is controlled solely by the [`onError`](#configuration-options) option, never by telemetry or logging.
+
+**Metrics** — four instruments:
+
+| Instrument | Type | Unit | Attributes |
+| ---------- | ---- | ---- | ---------- |
+| `kerberos.decisions` | Counter | `{decision}` | `kerberos.effect`, `kerberos.resource.kind` |
+| `kerberos.request.duration` | Histogram | `ms` | `kerberos.req_kind`, `error` |
+| `kerberos.cache.requests` | Counter | `{request}` | `kerberos.cache.result` (`hit`/`miss`/`error`), `kerberos.cache.kind` (only for ReBAC tuple reads: `relation`) |
+| `kerberos.relations.checks` | Counter | `{check}` | `kerberos.relations.result` (`allow`/`deny`) |
+
+> Metric attributes deliberately exclude actions and principals to keep cardinality bounded — they assume a bounded set of resource kinds.
+
+Notes:
+
+- **Identity attributes are on by default** (parity with audit logs). Set `telemetry: { includeIdentity: false }` to strip `kerberos.principal.id` / `kerberos.resource.id` from spans and events when traces are exported to backends where identity data is unwanted.
+- Telemetry failures (a broken tracer, exporter bugs) are swallowed internally — they can never affect authorization results.
+- `@opentelemetry/api` is browser-compatible, so telemetry works in browser builds too.
 
 ## Schema Validation
 
@@ -749,7 +815,7 @@ const results = await kerberos.checkResources({
 console.log(results);
 // {
 //   reqId: 'test-request',
-//   kerberosCallId: '01HHENANTHFD5DV3HZGDKB87PJ',
+//   kerberosCallId: 'b9c4362d-b92a-4c2b-9d49-845f00d7a372',
 //   results: [
 //     {
 //       resource: {
@@ -1055,6 +1121,160 @@ To skip deserialization entirely (e.g. your cached documents are already plain J
 const kerberos = new Kerberos([], [], { cache }); // values passed as-is to policy constructors
 ```
 
+## ReBAC (Relations)
+
+Kerberos supports **relationship-based access control** (ReBAC) — "Google Drive-style" authorization where access flows through relationships (`viewer of the parent folder`, `member of the team that owns the document`) instead of attributes alone. The design is heavily inspired by [SpiceDB](https://github.com/authzed/spicedb) (the mature open-source implementation of Google's Zanzibar), adapted to the Kerberos philosophy: **in-process, zero-infra**, static data blazing fast, dynamic data through the same read-only `cache` fallback used for policies.
+
+It comes in two layers:
+
+1. **The `relations` engine option** — a delegation contract like `logger`/`cache`/`codec`. ANY object with a `check` method works, including a resolver backed by the join tables your database already has.
+2. **The built-in "Zanzibar-lite" resolver** — the `RelationResolver` class from the **`@alexify/kerberos/relations`** subpath (kept out of the main entry so non-ReBAC browser bundles do not grow).
+
+### Relation-backed derived roles
+
+A derived-role definition may declare a `relation` instead of a `condition`. When the engine resolves derived roles for a resource policy (its only async phase), it asks the configured `relations` resolver whether the principal holds that relation/permission on the request's resource — and the role activates like any other derived role:
+
+```javascript
+const derivedRoles = {
+  name: 'doc_roles',
+  definitions: [
+    // Classic (condition-backed) definitions still work unchanged:
+    { name: 'OWNER', parentRoles: ['USER'], condition: { match: ({ P, R }) => R.attr.ownerId === P.id } },
+    // Relation-backed: activates when relations.check grants `view`.
+    // `parentRoles` and `condition` become optional synchronous gates.
+    { name: 'DOC_VIEWER', relation: 'view' },
+  ],
+};
+
+const policy = {
+  resourcePolicy: {
+    version: 'default',
+    resource: 'document',
+    importDerivedRoles: ['doc_roles'],
+    rules: [{ actions: ['view'], effect: 'EFFECT_ALLOW', derivedRoles: ['DOC_VIEWER', 'OWNER'] }],
+  },
+};
+```
+
+The delegation contract (bring your own resolver — e.g. SQL joins over your own tables):
+
+```javascript
+const kerberos = new Kerberos([policy], [derivedRoles], {
+  relations: {
+    // Required. `memo` is a request-scoped Map shared across a whole
+    // checkResources batch — use it to share subproblems if you want.
+    async check({ principal, resource, relation }, { memo }) {
+      return db.hasRelation(principal.id, resource.kind, resource.id, relation);
+    },
+    // Optional batch fast path — called first when present.
+    async list({ principal, resource, relations }, { memo }) {
+      return db.grantedRelations(principal.id, resource.kind, resource.id, relations); // Set<string>
+    },
+  },
+});
+```
+
+Resolver failures follow the [`onError`](#configuration-options) semantics, per-resource isolation in `checkResources` applies as usual, and with `includeMeta` every relation resolution is visible in `meta.resolution` as `{ source: 'relations', name, relation, matched }`.
+
+### The built-in Zanzibar-lite resolver
+
+```javascript
+import { RelationResolver } from '@alexify/kerberos/relations';
+
+const relations = new RelationResolver({
+  schema: {
+    relationSchema: {
+      caveats: {
+        // ABAC-on-ReBAC: a named condition evaluated against { P, ctx }.
+        valid_ip: { match: ({ P, ctx }) => ctx.allowed_ips.includes(P.attr.ip) },
+      },
+      definitions: {
+        user: {},
+        group: { relations: { member: ['user', 'group#member'] } }, // nested groups
+        folder: {
+          relations: { parent: ['folder'], viewer: ['user', 'group#member'] },
+          permissions: { view: { anyOf: ['viewer', { via: 'parent', permission: 'view' }] } }, // recursive!
+        },
+        document: {
+          relations: {
+            parent: ['folder'],
+            owner: ['user'],
+            editor: ['user', { type: 'user', caveat: 'valid_ip' }], // caveated subjects
+            viewer: ['user', 'user:*', 'group#member'],             // incl. the wildcard
+            auditor: ['user'],
+          },
+          permissions: {
+            edit: { anyOf: ['owner', 'editor'] },                                  // union (+)
+            view: { anyOf: ['edit', 'viewer', { via: 'parent', permission: 'view' }] }, // arrow (->)
+            audit: { allOf: ['viewer', 'auditor'] },                               // intersection (&)
+            read_only: { exclude: { base: 'viewer', subtract: ['editor'] } },      // exclusion (-)
+            review_all: { via: 'parent', permission: 'view', all: true },          // intersection arrow (.all)
+          },
+        },
+      },
+    },
+  },
+  // Static tuples: canonical SpiceDB strings or objects (with caveat context).
+  tuples: [
+    'document:readme#owner@user:olga',
+    'document:readme#viewer@group:eng#member',
+    'group:eng#member@user:sara',
+    'document:readme#parent@folder:docs',
+    'document:readme#auditor@user:vera',
+    { resource: 'document:readme', relation: 'editor', subject: 'user:cara', caveat: { name: 'valid_ip', context: { allowed_ips: ['10.0.0.1'] } } },
+  ],
+});
+
+// Standalone SpiceDB-flavoured API:
+await relations.check({ resource: 'document:readme', permission: 'view', subject: 'user:sara' }); // true
+await relations.lookupSubjects({ resource: 'document:readme', permission: 'view' }); // who can view?
+await relations.lookupResources({ subject: 'user:sara', permission: 'view', resourceType: 'document' }); // what can sara view?
+
+// And it IS a `relations` resolver:
+const kerberos = new Kerberos([policy], [derivedRoles], { relations });
+```
+
+What it borrows from SpiceDB (see [`src/Relations/`](./src/Relations)):
+
+- the **userset-rewrite algebra** (`union` / `intersection` / `exclusion` / arrows incl. `.all`, wildcard subjects `user:*`, subject relations `group#member`) with fail-fast schema compilation (unknown references, relation↔permission collisions and invalid arrows throw at construction);
+- the **recursive check** with short-circuiting (union stops at the first ALLOW, intersection at the first DENY, exclusion is base-first and order-sensitive);
+- **per-request memoization** of subproblems (`(resource#relation@subject)`), shared across a whole `checkResources` batch; concurrent identical document reads coalesce (the in-process analog of SpiceDB's singleflight);
+- **depth limiting instead of cycle tracking** (`maxDepth`, default 50) — visited-sets are semantically unsound under exclusions, so cyclic relationship data throws a typed `KerberosRelationsError`;
+- **caveats** (ABAC-on-ReBAC): named conditions bound to tuples with write-time context; at check time the written context takes precedence over the check-time `context` argument, and the condition sees `{ P, ctx }`. Caveats are ordinary Kerberos `Conditions` — for JSON/cache-stored schemas author them as `{ match: { $expr: '...' } }` and pass a codec built with `createSafeExprCodec({ jsep, roots: ['P', 'ctx'] })` (same eval-free guarantees as dynamic policies). A throwing or false caveat fails closed. There is deliberately no CEL and no partial evaluation (`CONDITIONAL` results) — in-process, the full context is available at check time;
+- **reverse lookups**: `lookupSubjects` walks the permission tree forward and expands groups (wildcards come back as `'user:*'`, or `{ subject: 'user:*', exclusions: [...] }` under exclusions; caveated tuples are treated as present — an upper bound); `lookupResources` uses compile-time reachability entrypoints plus candidate verification for intersection/exclusion/caveat paths (the LookupResources2 pattern).
+
+### Resolver telemetry
+
+The resolver takes the same `telemetry` option as the engine (`{ api }` or `{ tracer, meter }`, see [OpenTelemetry](#opentelemetry)): one span per public call (`Kerberos.relations.check` / `.list` / `.lookupSubjects` / `.lookupResources`, with resource/relation attributes and identity attributes gated by `includeIdentity`), a `kerberos.relations.checks` counter (`kerberos.relations.result: allow|deny`), the shared `kerberos.request.duration` histogram, and tuple-document cache reads counted in `kerberos.cache.requests` with `kerberos.cache.kind: relation`. When the resolver runs inside a Kerberos engine that also has telemetry, resolver spans nest under the `isAllowed`/`checkResources` span automatically (active span context). As everywhere else, telemetry failures are swallowed and can never affect resolution.
+
+```javascript
+const relations = new RelationResolver({ schema, tuples, telemetry: { api: require('@opentelemetry/api') } });
+```
+
+### Dynamic tuples (cache-backed)
+
+Exactly like dynamic policies, tuples can live in your cache/store — Kerberos **only reads**; storage, TTL, invalidation and multi-host sync are the backend's job (keyv → cacheable → qified works here too):
+
+- **Forward documents** (required): key **`rel:<resourceType>:<id>:<relation>`** → JSON array of subject entries:
+
+  ```json
+  ["user:emilia", "group:eng#member", { "subject": "user:bob", "caveat": { "name": "valid_ip", "context": { "allowed_ips": ["10.0.0.1"] } } }]
+  ```
+
+- **Reverse documents** (opt-in, only needed for `lookupResources` over cache-backed tuples): key **`rel:rev:<subjectKey>`** (e.g. `rel:rev:user:emilia`, `rel:rev:group:eng#member`) → JSON array of `{ "resource": "document:readme", "relation": "viewer" }` entries. Enable with `reverseIndex: true`; without it `lookupResources` throws a typed error when a cache is configured (`check`/`list`/`lookupSubjects` never need reverse documents).
+
+Static tuples always win per `(resource, relation)` key — the cache is only consulted on a static miss, and sources for the same key are never merged. **A corrupt document throws a typed `KerberosCodecError`** (propagating per the engine's `onError` semantics) instead of resolving as empty — an "empty" read would silently *widen* access in exclusion positions (`read_only = viewer − editor`: a real editor whose editor document fails to parse would gain `read_only`). The same rule applies to a caveat whose condition **throws** (→ `KerberosRelationsError`): an evaluation error is never read as an answer; a caveat that cleanly evaluates to `false` simply does not match. Genuine absence (cache miss) still resolves as an empty set, and entries the schema does not admit are skipped with an operator log. Transient cache failures retry per `cacheRetry` and then surface as `KerberosCacheError`.
+
+**Session memo contract** (`opts.memo` on `check`/`list`/`lookupSubjects`/`lookupResources`): pass one `Map` to share work across calls — document reads are shared whenever the same resolver instance is used, and decision entries are automatically scoped by resolver instance plus the *identity* of the `principal`/`context` objects, so reusing a memo across different principals, contexts or resolver instances is safe by construction (reuse the same object references to maximize sharing — that is exactly what the Kerberos engine does across a `checkResources` batch).
+
+### Consistency (honest limitations)
+
+This is deliberately **not** full Zanzibar. The hard part of Zanzibar is distributed consistency — ZedTokens/zookies, snapshot reads, the [New Enemy Problem](https://authzed.com/docs/spicedb/concepts/consistency) — and an in-process engine sidesteps it rather than solving it:
+
+- checks always read the **current** in-memory state plus whatever your cache returns *right now*;
+- the staleness window for dynamic tuples equals your cache-invalidation window (e.g. qified pub/sub propagation). Until an invalidation propagates, a just-revoked subject may still pass on another host — if that window matters for your threat model, put revocation-sensitive checks behind static tuples, shorten TTLs, or use a centralized authorization service (SpiceDB) instead;
+- there are no per-request consistency levels and no revision tokens.
+
 ## Testing
 
 ```javascript
@@ -1180,6 +1400,30 @@ describe('Outputs functionality', () => {
   });
 });
 ```
+
+## Benchmarks
+
+Measured with the zero-dependency harness in [`bench/bench.js`](./bench/bench.js) (1s timed run after 2k warmup iterations per scenario). Reproduce with:
+
+```bash
+pnpm bench
+```
+
+Apple Silicon (M-series), Node v24:
+
+| Scenario |  ops/sec |
+| -------- |---------:|
+| `isAllowed` — simple role match | ~320,000 |
+| `isAllowed` — derived roles + variables + condition | ~300,000 |
+| `checkResources` — 10 resources × 3 actions |  ~41,000 |
+| `isAllowed` — cache-backed dynamic policy (`$expr`, in-memory Map) | ~150,000 |
+| `relations.check` — direct tuple (flat) | ~850,000 |
+| `relations.check` — deep walk (3 arrows + nested groups) | ~120,000 |
+| `isAllowed` — relation-backed derived role (deep walk) |  ~80,000 |
+
+`checkResources` evaluates resources **concurrently** (`Promise.allSettled`): with a remote policy store, N resources cost one parallel wave of lookups instead of N sequential round-trips (measured ~8x faster with a 2ms-latency cache and 10 resources), and one failing resource never fails the batch — it fail-closes to `EFFECT_DENY` for its actions only.
+
+Numbers vary by hardware and Node version — treat them as relative guidance, not absolutes. The harness exists primarily to catch performance regressions between releases.
 
 ## Changelog
 
