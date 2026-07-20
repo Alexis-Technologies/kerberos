@@ -276,6 +276,7 @@ const plan = await kerberos.planResources({
 | `ResourcePolicy`, `PrincipalPolicy`, `RolePolicy`, `DerivedRoles` | Policy classes (rarely constructed directly). |
 | `Conditions`, `Variables`, `Constants`, `Outputs` | DSL building blocks. |
 | `createSafeExprCodec`, `serializePolicy`, `deserializePolicy` | Safe AST codec for [dynamic/stored policies](#caching--storing-policies). |
+| `PlanKind` | `{ AlwaysAllowed, AlwaysDenied, Conditional }` — [query plan](#query-plans-planresources) filter kinds. |
 | `expandRelationOperands` | Materializes ReBAC `relation` operands of a [query plan](#query-plans-planresources) into id filters. |
 | `registerAjvKeywords`, `createAjvAdapter` | [Validation](#schema-validation) helpers. |
 | `JsonSchemas`, `TypeBoxSchemas`, `ZodSchemas`, `KerberosJsonSchemas`, `ResourcePolicyJsonSchemas`, `PrincipalPolicyJsonSchemas`, `RolePolicyJsonSchemas`, … | Schema builders for the three backends. |

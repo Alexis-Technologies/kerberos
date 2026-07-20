@@ -60,6 +60,13 @@ function buildResourcePlan({
 }) {
   const principalRoleSet = new Set(principal.roles);
 
+  function matchesPrincipalRoles(roles) {
+    for (const role of roles) {
+      if (role === ALL_ROLES || principalRoleSet.has(role)) return true;
+    }
+    return false;
+  }
+
   // One expression planner per policy: each policy evaluates conditions
   // against its own constants/variables context, exactly like check().
   const planners = new Map();
@@ -90,7 +97,8 @@ function buildResourcePlan({
       for (const actionRule of rule.actions) {
         if (actionRule.action !== ALL_ACTIONS && actionRule.action !== action) continue;
         const node = planner.planCondition(actionRule.condition);
-        (actionRule.effect === Effect.Deny ? denyParts : allowParts).push(node);
+        if (actionRule.effect === Effect.Deny) denyParts.push(node);
+        else allowParts.push(node);
       }
     }
     return { allow: orNode(allowParts), deny: orNode(denyParts) };
@@ -105,7 +113,10 @@ function buildResourcePlan({
     return false;
   }
 
-  const applicableRolePolicies = rolePolicies.filter(roleMatchesResource);
+  const applicableRolePolicies = [];
+  for (const policy of rolePolicies) {
+    if (roleMatchesResource(policy)) applicableRolePolicies.push(policy);
+  }
 
   /**
    * Effective role allow: the child's fulfilled allowlist OR, intersected
@@ -149,7 +160,10 @@ function buildResourcePlan({
   function roleLayerNode(action) {
     // Deny-wins across roles: every applicable role must effectively allow.
     const memo = new Map();
-    const parts = applicableRolePolicies.map((policy) => roleAllowNode(policy, action, memo, new Set()));
+    const parts = new Array(applicableRolePolicies.length);
+    for (let i = 0; i < applicableRolePolicies.length; i++) {
+      parts[i] = roleAllowNode(applicableRolePolicies[i], action, memo, new Set());
+    }
     return andNode(parts);
   }
 
@@ -209,15 +223,18 @@ function buildResourcePlan({
 
       let rolesGate = FALSE;
       if (Array.isArray(rule.roles)) {
-        rolesGate = constNode(rule.roles.some((role) => role === ALL_ROLES || principalRoleSet.has(role)));
+        rolesGate = constNode(matchesPrincipalRoles(rule.roles));
       }
       let derivedGate = FALSE;
       if (Array.isArray(rule.derivedRoles)) {
-        derivedGate = orNode(rule.derivedRoles.map(derivedRoleNode));
+        const derivedParts = new Array(rule.derivedRoles.length);
+        for (let i = 0; i < rule.derivedRoles.length; i++) derivedParts[i] = derivedRoleNode(rule.derivedRoles[i]);
+        derivedGate = orNode(derivedParts);
       }
       const gate = orNode([rolesGate, derivedGate]);
       const node = andNode([gate, planner.planCondition(rule.condition)]);
-      (rule.effect === Effect.Deny ? denyParts : allowParts).push(node);
+      if (rule.effect === Effect.Deny) denyParts.push(node);
+      else allowParts.push(node);
     }
     // Deny-over-Allow with default deny: allowed ⇔ some allow ∧ no deny.
     return andNode([orNode(allowParts), notNode(orNode(denyParts))]);
@@ -233,12 +250,17 @@ function buildResourcePlan({
     return orNode([andNode([allow, notNode(deny)]), andNode([notNode(allow), notNode(deny), layer])]);
   }
 
-  const perAction = new Map();
-  for (const action of actions) perAction.set(action, planAction(action));
   // Multi-action requests plan the conjunction (Cerbos semantics: the rows
-  // where ALL requested actions are allowed).
-  const node = andNode([...perAction.values()]);
-  return { node, perAction };
+  // where ALL requested actions are allowed). One pass fills both the
+  // per-action map and the conjunction input.
+  const perAction = new Map();
+  const actionNodes = new Array(actions.length);
+  for (let i = 0; i < actions.length; i++) {
+    const node = planAction(actions[i]);
+    perAction.set(actions[i], node);
+    actionNodes[i] = node;
+  }
+  return { node: andNode(actionNodes), perAction };
 }
 
 module.exports = { buildResourcePlan };

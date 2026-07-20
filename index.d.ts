@@ -698,7 +698,11 @@ export function createCacheReader(
 ): { enabled: boolean; get(key: string): Promise<unknown> };
 
 /** planResources filter outcome (Cerbos-compatible). */
-export type PlanKind = 'KIND_ALWAYS_ALLOWED' | 'KIND_ALWAYS_DENIED' | 'KIND_CONDITIONAL';
+export enum PlanKind {
+  AlwaysAllowed = 'KIND_ALWAYS_ALLOWED',
+  AlwaysDenied = 'KIND_ALWAYS_DENIED',
+  Conditional = 'KIND_CONDITIONAL',
+}
 
 /**
  * One operand of a planResources condition tree: a literal, a reference to an

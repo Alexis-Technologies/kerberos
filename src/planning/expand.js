@@ -12,13 +12,43 @@
  * folds the branch to FALSE, which can collapse the whole plan.
  */
 
-const { andNode, constNode, exprNode, fromOperand, notNode, orNode, toDebugString, toFilter } = require('./nodes.js');
+const {
+  andNode,
+  constNode,
+  createDispatch,
+  exprNode,
+  fromOperand,
+  notNode,
+  orNode,
+  toDebugString,
+  toFilter,
+} = require('./nodes.js');
 
-async function resolveRelationIds(lookup, detail) {
-  const ids = await lookup({ name: detail.name, relation: detail.relation });
-  const list = ids instanceof Set ? [...ids] : Array.isArray(ids) ? ids : [];
+async function resolveRelationIds(lookup, node) {
+  const ids = await lookup({ name: node.name, relation: node.relation });
+  const list = [];
+  // Any iterable of ids works (array, Set, generator); strings are scalars,
+  // not id lists.
+  if (ids !== null && ids !== undefined && typeof ids !== 'string' && typeof ids[Symbol.iterator] === 'function') {
+    for (const id of ids) list.push(id);
+  }
   return list;
 }
+
+async function expandLogical(node, expandOne) {
+  const children = new Array(node.children.length);
+  for (let i = 0; i < node.children.length; i++) children[i] = await expandNode(node.children[i], expandOne);
+  return node.t === 'and' ? andNode(children) : orNode(children);
+}
+
+// O(1) node-kind dispatch; kinds outside the table (expr/opaque/const) hold no
+// relation nodes and pass through untouched.
+const NODE_EXPANDERS = createDispatch({
+  and: expandLogical,
+  or: expandLogical,
+  not: async (node, expandOne) => notNode(await expandNode(node.child, expandOne)),
+  relation: (node, expandOne) => expandOne(node),
+});
 
 /**
  * Walks a plan node and replaces every `relation` node with the looked-up
@@ -26,20 +56,8 @@ async function resolveRelationIds(lookup, detail) {
  * relations, and `expandOne` memoizes by `name|relation`.
  */
 async function expandNode(node, expandOne) {
-  switch (node.t) {
-    case 'and':
-    case 'or': {
-      const children = [];
-      for (const child of node.children) children.push(await expandNode(child, expandOne));
-      return node.t === 'and' ? andNode(children) : orNode(children);
-    }
-    case 'not':
-      return notNode(await expandNode(node.child, expandOne));
-    case 'relation':
-      return expandOne(node);
-    default:
-      return node;
-  }
+  const expander = NODE_EXPANDERS[node.t];
+  return expander ? expander(node, expandOne) : node;
 }
 
 /**

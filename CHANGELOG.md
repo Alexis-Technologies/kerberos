@@ -42,11 +42,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (s-expression rendering), `matchedScopes` and the `resolution` trace;
     `onError: 'deny'` fail-closes to `KIND_ALWAYS_DENIED`; wildcard `'*'`
     actions are rejected at validation.
+  - Policy sources resolve as one concurrent `Promise.allSettled` wave
+    (principal / roles+parent-closure / resource+derived-roles) — with a
+    cache-backed store, one round-trip wave instead of three sequential ones;
+    the `meta.resolution` trace order stays deterministic.
   - `buildPlanResourcesArgs` schema builders across all three validation
     backends (Zod / JSON Schema / TypeBox), `Kerberos.parsePlanResourcesArgs`,
-    hand-maintained types (`PlanKind`, `PlanFilter`, `PlanExpressionOperand`,
-    `PlanResourcesArgs`, `PlanResourcesResponse`), a `planResources` bench
-    scenario and a README section with the planning flow diagram.
+    the exported **`PlanKind` enum** (`AlwaysAllowed` / `AlwaysDenied` /
+    `Conditional`, mirroring `Effect`), hand-maintained types (`PlanFilter`,
+    `PlanExpressionOperand`, `PlanResourcesArgs`, `PlanResourcesResponse`), a
+    `planResources` bench scenario and a README section with the planning
+    flow diagram.
 
 ## [3.0.0] - 2026-07-20
 

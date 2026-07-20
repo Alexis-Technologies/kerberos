@@ -25,10 +25,24 @@
  * )} PlanNode
  */
 
-const PLAN_KINDS = Object.freeze({
-  ALWAYS_ALLOWED: 'KIND_ALWAYS_ALLOWED',
-  ALWAYS_DENIED: 'KIND_ALWAYS_DENIED',
-  CONDITIONAL: 'KIND_CONDITIONAL',
+/**
+ * Builds a prototype-less dispatch table (same rationale as the codec's
+ * interpreter tables: lookups can never resolve to inherited members and the
+ * hot path stays O(1) instead of a switch scan). Shared by the planning
+ * modules.
+ *
+ * @param {Record<string, unknown>} entries
+ * @returns {Record<string, unknown>}
+ */
+function createDispatch(entries) {
+  return Object.assign(Object.create(null), entries);
+}
+
+// Runtime enum (typed as `enum PlanKind` in index.d.ts, like `Effect`).
+const PlanKind = Object.freeze({
+  AlwaysAllowed: 'KIND_ALWAYS_ALLOWED',
+  AlwaysDenied: 'KIND_ALWAYS_DENIED',
+  Conditional: 'KIND_CONDITIONAL',
 });
 
 const TRUE = Object.freeze({ t: 'const', v: true });
@@ -60,7 +74,8 @@ function dedupKey(node) {
 /**
  * Shared normalization for `and`/`or`. `absorbing` is the constant that
  * decides the whole node (`false` for and, `true` for or); the opposite
- * constant is the identity and is dropped.
+ * constant is the identity and is dropped. Flattening, dedup and the
+ * constant checks all happen in the same single pass over the children.
  *
  * @param {'and' | 'or'} kind
  * @param {PlanNode[]} children
@@ -104,6 +119,27 @@ function notNode(child) {
   return { t: 'not', child };
 }
 
+function buildLogicalOperand(node) {
+  const operands = new Array(node.children.length);
+  for (let i = 0; i < node.children.length; i++) operands[i] = toOperand(node.children[i]);
+  return { expression: { operator: node.t, operands } };
+}
+
+// O(1) node-kind dispatch for serialization into Cerbos operands.
+const OPERAND_BUILDERS = createDispatch({
+  const: (node) => ({ value: node.v }),
+  expr: (node) => node.e,
+  and: buildLogicalOperand,
+  or: buildLogicalOperand,
+  not: (node) => ({ expression: { operator: 'not', operands: [toOperand(node.child)] } }),
+  opaque: (node) => ({
+    expression: { operator: 'opaque', operands: [{ value: { src: node.src, reason: node.reason } }] },
+  }),
+  relation: (node) => ({
+    expression: { operator: 'relation', operands: [{ value: { name: node.name, relation: node.relation } }] },
+  }),
+});
+
 /**
  * Serializes a plan node into a Cerbos condition operand.
  *
@@ -111,25 +147,9 @@ function notNode(child) {
  * @returns {PlanOperand}
  */
 function toOperand(node) {
-  switch (node.t) {
-    case 'const':
-      return { value: node.v };
-    case 'expr':
-      return node.e;
-    case 'and':
-    case 'or':
-      return { expression: { operator: node.t, operands: node.children.map(toOperand) } };
-    case 'not':
-      return { expression: { operator: 'not', operands: [toOperand(node.child)] } };
-    case 'opaque':
-      return { expression: { operator: 'opaque', operands: [{ value: { src: node.src, reason: node.reason } }] } };
-    case 'relation':
-      return {
-        expression: { operator: 'relation', operands: [{ value: { name: node.name, relation: node.relation } }] },
-      };
-    default:
-      throw new TypeError(`Unknown plan node: ${node.t}`);
-  }
+  const build = OPERAND_BUILDERS[node.t];
+  if (!build) throw new TypeError(`Unknown plan node: ${node.t}`);
+  return build(node);
 }
 
 /**
@@ -140,10 +160,32 @@ function toOperand(node) {
  */
 function toFilter(node) {
   if (node.t === 'const') {
-    return { kind: node.v ? PLAN_KINDS.ALWAYS_ALLOWED : PLAN_KINDS.ALWAYS_DENIED };
+    return { kind: node.v ? PlanKind.AlwaysAllowed : PlanKind.AlwaysDenied };
   }
-  return { kind: PLAN_KINDS.CONDITIONAL, condition: toOperand(node) };
+  return { kind: PlanKind.Conditional, condition: toOperand(node) };
 }
+
+function fromOperandList(operands) {
+  const nodes = new Array(operands.length);
+  for (let i = 0; i < operands.length; i++) nodes[i] = fromOperand(operands[i]);
+  return nodes;
+}
+
+// O(1) operator dispatch for reconstruction; operators outside this table are
+// opaque-to-us expression leaves kept verbatim.
+const FROM_EXPRESSION_BUILDERS = createDispatch({
+  and: (operands) => andNode(fromOperandList(operands)),
+  or: (operands) => orNode(fromOperandList(operands)),
+  not: (operands) => notNode(fromOperand(operands[0])),
+  opaque: (operands) => {
+    const detail = operands[0]?.value ?? {};
+    return opaqueNode(detail.src, detail.reason);
+  },
+  relation: (operands) => {
+    const detail = operands[0]?.value ?? {};
+    return relationNode(detail.name, detail.relation);
+  },
+});
 
 /**
  * Rebuilds a plan node from a Cerbos condition operand. Boolean positions
@@ -163,25 +205,8 @@ function fromOperand(operand) {
     }
     return exprNode(operand);
   }
-  const { operator, operands } = expression;
-  switch (operator) {
-    case 'and':
-      return andNode(operands.map(fromOperand));
-    case 'or':
-      return orNode(operands.map(fromOperand));
-    case 'not':
-      return notNode(fromOperand(operands[0]));
-    case 'opaque': {
-      const detail = operands[0]?.value ?? {};
-      return opaqueNode(detail.src, detail.reason);
-    }
-    case 'relation': {
-      const detail = operands[0]?.value ?? {};
-      return relationNode(detail.name, detail.relation);
-    }
-    default:
-      return exprNode(operand);
-  }
+  const build = FROM_EXPRESSION_BUILDERS[expression.operator];
+  return build ? build(expression.operands) : exprNode(operand);
 }
 
 function renderOperand(operand) {
@@ -190,7 +215,9 @@ function renderOperand(operand) {
     if ('value' in operand) return JSON.stringify(operand.value);
     if (operand.expression && typeof operand.expression === 'object') {
       const { operator, operands } = operand.expression;
-      return `(${operator} ${operands.map(renderOperand).join(' ')})`;
+      let out = `(${operator}`;
+      for (const child of operands) out += ` ${renderOperand(child)}`;
+      return `${out})`;
     }
   }
   return JSON.stringify(operand);
@@ -209,11 +236,12 @@ function toDebugString(node) {
 }
 
 module.exports = {
-  PLAN_KINDS,
-  TRUE,
   FALSE,
+  PlanKind,
+  TRUE,
   andNode,
   constNode,
+  createDispatch,
   exprNode,
   fromOperand,
   notNode,

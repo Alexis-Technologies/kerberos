@@ -1,7 +1,8 @@
-import { expectType } from 'tsd';
+import { expectAssignable, expectType } from 'tsd';
 import {
   Effect,
   Kerberos,
+  PlanKind,
   expandRelationOperands,
   type KerberosDerivedRoles,
   type KerberosPolicy,
@@ -9,7 +10,6 @@ import {
   type KerberosTelemetryOptions,
   type PlanExpressionOperand,
   type PlanFilter,
-  type PlanKind,
   type PlanResourcesResponse,
 } from '../index.js';
 
@@ -115,6 +115,8 @@ kerberos.planResources({
 declare const planResponse: PlanResourcesResponse;
 expectType<PlanFilter>(planResponse.filter);
 expectType<PlanKind>(planResponse.filter.kind);
+expectAssignable<PlanKind>(PlanKind.AlwaysAllowed);
+expectType<PlanKind.Conditional>(PlanKind.Conditional);
 // The operand union accepts nested expressions, variables and literals.
 const conditionalOperand: PlanExpressionOperand = {
   expression: {

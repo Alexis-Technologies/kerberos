@@ -10,6 +10,7 @@ const {
   Effect,
   Kerberos,
   KerberosValidationError,
+  PlanKind,
   createSafeExprCodec,
   deserializePolicy,
   expandRelationOperands,
@@ -26,9 +27,10 @@ const codec = createSafeExprCodec({ jsep });
 const user = { id: 'u1', roles: ['USER'] };
 const docKind = { kind: 'document' };
 
-const ALLOWED = 'KIND_ALWAYS_ALLOWED';
-const DENIED = 'KIND_ALWAYS_DENIED';
-const CONDITIONAL = 'KIND_CONDITIONAL';
+// The runtime PlanKind enum members are the canonical Cerbos strings.
+const ALLOWED = PlanKind.AlwaysAllowed;
+const DENIED = PlanKind.AlwaysDenied;
+const CONDITIONAL = PlanKind.Conditional;
 
 function dynamicPolicy(shape) {
   return deserializePolicy(shape, codec);

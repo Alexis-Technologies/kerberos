@@ -11,6 +11,9 @@
  * `&&`/`||`/`?:` laziness (short-circuits are planned explicitly and a branch
  * is only folded once it is known to be reachable).
  *
+ * Node/operator dispatch uses prototype-less strategy tables (mirroring the
+ * codec's NODE_EVALUATORS) and all collection walks are single-pass loops.
+ *
  * Soundness rule: when in doubt, produce `opaque` — never guess a value. The
  * one deliberate exception is a bare residual value in boolean position
  * (`R.attr.isPublic`), which becomes `eq(variable, true)`: Cerbos-compatible,
@@ -18,12 +21,12 @@
  */
 
 const { EXPR_META, evalExprAst } = require('../caching/codec.js');
-const { andNode, constNode, exprNode, notNode, opaqueNode, orNode, toOperand } = require('./nodes.js');
+const { andNode, constNode, createDispatch, exprNode, notNode, opaqueNode, orNode, toOperand } = require('./nodes.js');
 
 const BLOCKED_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 
 // jsep binary operators that translate 1:1 into Cerbos filter operators.
-const JS_TO_CERBOS_BINARY = Object.assign(Object.create(null), {
+const JS_TO_CERBOS_BINARY = createDispatch({
   '===': 'eq',
   '==': 'eq',
   '!==': 'ne',
@@ -168,109 +171,129 @@ function createExprPlanner({ principal, resource, actions, constants, variables 
     return { base: current, segments };
   }
 
-  /** Resolves computed segments to const keys where possible. */
-  function resolveSegments(segments) {
-    const resolved = [];
-    for (const segment of segments) {
+  /**
+   * Resolves computed segments to const keys where possible. One pass also
+   * answers "is any segment residual" so callers never re-scan the list.
+   * Returns null when a segment makes the whole member unplannable (blocked
+   * key, opaque or non-scalar computed key).
+   *
+   * @returns {{ segments: Array<{ key?: string, residual?: object }>, hasResidual: boolean } | null}
+   */
+  function resolveSegments(rawSegments) {
+    const segments = [];
+    let hasResidual = false;
+    for (const segment of rawSegments) {
       if (segment.key !== undefined) {
         if (BLOCKED_KEYS.has(segment.key)) return null;
-        resolved.push({ key: segment.key });
+        segments.push({ key: segment.key });
         continue;
       }
       const keyPlan = planValue(segment.node);
       if (keyPlan.k === 'const') {
         const key = keyPlan.v;
         if ((typeof key !== 'string' && typeof key !== 'number') || BLOCKED_KEYS.has(String(key))) return null;
-        resolved.push({ key: String(key) });
+        segments.push({ key: String(key) });
       } else if (keyPlan.k === 'opaque') {
         return null;
       } else {
-        resolved.push({ residual: keyPlan.operand });
+        hasResidual = true;
+        segments.push({ residual: keyPlan.operand });
       }
     }
-    return resolved;
+    return { segments, hasResidual };
   }
 
   /** Appends the remaining segments to an operand as `index` operations. */
-  function indexChain(operand, segments) {
+  function indexChain(operand, segments, from) {
     let current = operand;
-    for (const segment of segments) {
+    for (let i = from; i < segments.length; i++) {
+      const segment = segments[i];
       const keyOperand = segment.key !== undefined ? { value: segment.key } : segment.residual;
       current = { expression: { operator: 'index', operands: [current, keyOperand] } };
     }
     return residualPV(current);
   }
 
-  function planResourceMember(node, segments) {
+  function planResourceMember(node, resolved) {
+    const { segments, hasResidual } = resolved;
     if (!segments.length || segments[0].key === undefined) return OPAQUE;
-    const [head, ...rest] = segments;
-    if (head.key === 'kind' || head.key === 'scope' || head.key === 'policyVersion') {
-      return rest.some((segment) => segment.key === undefined) ? OPAQUE : constPV(evalConst(node));
+    const head = segments[0].key;
+    if (head === 'kind' || head === 'scope' || head === 'policyVersion') {
+      // The first segment is a const key, so any residual lives in the rest.
+      return hasResidual ? OPAQUE : constPV(evalConst(node));
     }
-    if (head.key === 'id') {
-      return rest.length ? OPAQUE : residualPV({ variable: 'request.resource.id' });
+    if (head === 'id') {
+      return segments.length === 1 ? residualPV({ variable: 'request.resource.id' }) : OPAQUE;
     }
-    if (head.key !== 'attr' || !rest.length) return OPAQUE;
+    if (head !== 'attr' || segments.length === 1) return OPAQUE;
 
     // Leading run of const keys after `attr` decides known vs residual.
-    let splitIndex = 0;
-    while (splitIndex < rest.length && rest[splitIndex].key !== undefined) splitIndex++;
-    if (!splitIndex) return OPAQUE; // R.attr[<residual>]
-    if (Object.prototype.hasOwnProperty.call(knownAttr, rest[0].key)) {
+    let splitIndex = 1;
+    while (splitIndex < segments.length && segments[splitIndex].key !== undefined) splitIndex++;
+    if (splitIndex === 1) return OPAQUE; // R.attr[<residual>]
+    if (Object.prototype.hasOwnProperty.call(knownAttr, segments[1].key)) {
       // Known attr: fully-const paths fold through the interpreter (throws
       // propagate — runtime parity); residual keys into a known value are a
       // rarity not worth planning.
-      return splitIndex === rest.length ? constPV(evalConst(node)) : OPAQUE;
+      return splitIndex === segments.length ? constPV(evalConst(node)) : OPAQUE;
     }
-    const path = rest.slice(0, splitIndex).map((segment) => segment.key);
-    const variable = { variable: `request.resource.attr.${path.join('.')}` };
-    return indexChain(variable, rest.slice(splitIndex));
+    let path = `request.resource.attr.${segments[1].key}`;
+    for (let i = 2; i < splitIndex; i++) path += `.${segments[i].key}`;
+    return indexChain({ variable: path }, segments, splitIndex);
   }
 
-  function planVariableMember(node, segments) {
+  function planVariableMember(node, resolved) {
+    const { segments, hasResidual } = resolved;
     if (!segments.length || segments[0].key === undefined) return OPAQUE;
     if (planningVariable) return OPAQUE; // runtime variables never see V
     const plan = variablePlan(segments[0].key);
-    const rest = segments.slice(1);
     if (plan.k === 'opaque') return OPAQUE;
     if (plan.k === 'const') {
-      return rest.some((segment) => segment.key === undefined) ? OPAQUE : constPV(evalConst(node));
+      // The first segment is a const key, so any residual lives in the rest.
+      return hasResidual ? OPAQUE : constPV(evalConst(node));
     }
-    return indexChain(plan.operand, rest);
+    return indexChain(plan.operand, segments, 1);
   }
+
+  function planKnownRootMember(node, resolved) {
+    return resolved.hasResidual ? OPAQUE : constPV(evalConst(node));
+  }
+
+  // O(1) member-base dispatch; unknown roots (bare custom roots, whole-R
+  // usage) fall through to opaque in planMember.
+  const memberPlanners = createDispatch({
+    R: planResourceMember,
+    V: planVariableMember,
+    P: planKnownRootMember,
+    C: planKnownRootMember,
+    Math: planKnownRootMember,
+    Date: planKnownRootMember,
+  });
 
   function planMember(node) {
     const { base, segments } = peelChain(node);
     if (base.type !== 'Identifier') return OPAQUE;
+    const planner = memberPlanners[base.name];
+    if (!planner) return OPAQUE;
     const resolved = resolveSegments(segments);
     if (!resolved) return OPAQUE;
-    switch (base.name) {
-      case 'R':
-        return planResourceMember(node, resolved);
-      case 'V':
-        return planVariableMember(node, resolved);
-      case 'P':
-      case 'C':
-      case 'Math':
-      case 'Date':
-        return resolved.some((segment) => segment.key === undefined) ? OPAQUE : constPV(evalConst(node));
-      default:
-        return OPAQUE;
-    }
+    return planner(node, resolved);
   }
 
-  function planShortCircuit(node) {
-    const left = planValue(node.left);
-    if (left.k !== 'const') return OPAQUE; // value-position semantics are not boolean — cannot residualize
-    const { operator } = node;
-    if (operator === '&&') return left.v ? planValue(node.right) : left;
-    if (operator === '||') return left.v ? left : planValue(node.right);
-    return left.v === null || left.v === undefined ? planValue(node.right) : left; // ??
-  }
+  // Value-position short-circuits keep the interpreter's laziness: the right
+  // branch is only planned once the left side is a known constant.
+  const shortCircuitPlanners = createDispatch({
+    '&&': (node, left) => (left.v ? planValue(node.right) : left),
+    '||': (node, left) => (left.v ? left : planValue(node.right)),
+    '??': (node, left) => (left.v === null || left.v === undefined ? planValue(node.right) : left),
+  });
 
   function planBinary(node) {
-    if (node.operator === '&&' || node.operator === '||' || node.operator === '??') {
-      return planShortCircuit(node);
+    const shortCircuit = shortCircuitPlanners[node.operator];
+    if (shortCircuit) {
+      const left = planValue(node.left);
+      // Non-const left: value-position semantics are not boolean — opaque.
+      return left.k === 'const' ? shortCircuit(node, left) : OPAQUE;
     }
     const left = planValue(node.left);
     const right = planValue(node.right);
@@ -282,8 +305,16 @@ function createExprPlanner({ principal, resource, actions, constants, variables 
 
   function planCall(node) {
     const { callee } = node;
-    const argPlans = node.arguments.map((argument) => planValue(argument));
-    const argsConst = argPlans.every((plan) => plan.k === 'const');
+    // One pass over the arguments: plan + const/opaque flags together.
+    const argPlans = new Array(node.arguments.length);
+    let argsConst = true;
+    let argsOpaque = false;
+    for (let i = 0; i < node.arguments.length; i++) {
+      const plan = planValue(node.arguments[i]);
+      argPlans[i] = plan;
+      if (plan.k !== 'const') argsConst = false;
+      if (plan.k === 'opaque') argsOpaque = true;
+    }
 
     if (callee.type === 'Identifier') {
       return argsConst ? constPV(evalConst(node)) : OPAQUE;
@@ -295,7 +326,7 @@ function createExprPlanner({ principal, resource, actions, constants, variables 
       return constPV(evalConst(node));
     }
     const isIncludes = !callee.computed && callee.property.name === 'includes' && node.arguments.length === 1;
-    if (!isIncludes || receiver.k === 'opaque' || argPlans[0].k === 'opaque') return OPAQUE;
+    if (!isIncludes || receiver.k === 'opaque' || argsOpaque) return OPAQUE;
     // `in` is list membership. A const string receiver would mean substring
     // semantics — not expressible; a residual receiver is assumed to be a
     // list (documented plannability constraint).
@@ -304,10 +335,17 @@ function createExprPlanner({ principal, resource, actions, constants, variables 
   }
 
   function planArray(node) {
-    const plans = node.elements.map((element) => planValue(element));
-    if (plans.every((plan) => plan.k === 'const')) return constPV(evalConst(node));
-    if (plans.some((plan) => plan.k === 'opaque')) return OPAQUE;
-    return residualPV({ expression: { operator: 'list', operands: plans.map(toOp) } });
+    // One pass: element operands + const/opaque flags together.
+    const operands = new Array(node.elements.length);
+    let allConst = true;
+    for (let i = 0; i < node.elements.length; i++) {
+      const plan = planValue(node.elements[i]);
+      if (plan.k === 'opaque') return OPAQUE;
+      if (plan.k !== 'const') allConst = false;
+      operands[i] = toOp(plan);
+    }
+    if (allConst) return constPV(evalConst(node));
+    return residualPV({ expression: { operator: 'list', operands } });
   }
 
   // ObjectExpression / NewExpression: fold when fully known, otherwise opaque.
@@ -338,6 +376,31 @@ function createExprPlanner({ principal, resource, actions, constants, variables 
     return planValue(test.v ? node.consequent : node.alternate);
   }
 
+  const identifierPlanners = createDispatch({
+    P: () => constPV(principal),
+    C: () => constPV(C),
+    Math: () => constPV(Math),
+    Date: () => constPV(Date),
+  });
+
+  // O(1) node-type dispatch — the planning analog of the codec's
+  // NODE_EVALUATORS. Unknown node types degrade to opaque (always sound).
+  const valuePlanners = createDispatch({
+    Literal: (node) => constPV(node.value),
+    Identifier: (node) => {
+      const planner = identifierPlanners[node.name];
+      return planner ? planner() : OPAQUE; // bare R / V / custom roots
+    },
+    MemberExpression: planMember,
+    BinaryExpression: planBinary,
+    UnaryExpression: planUnary,
+    CallExpression: planCall,
+    ArrayExpression: planArray,
+    ConditionalExpression: planConditionalValue,
+    ObjectExpression: planObjectOrNew,
+    NewExpression: planObjectOrNew,
+  });
+
   /**
    * Value-level partial evaluation: PlanValue for any expression node.
    *
@@ -345,31 +408,8 @@ function createExprPlanner({ principal, resource, actions, constants, variables 
    * @returns {{ k: 'const', v: unknown } | { k: 'residual', operand: object } | { k: 'opaque' }}
    */
   function planValue(node) {
-    switch (node.type) {
-      case 'Literal':
-        return constPV(node.value);
-      case 'Identifier':
-        if (node.name === 'P' || node.name === 'C') return constPV(ctx[node.name]);
-        if (node.name === 'Math' || node.name === 'Date') return constPV(node.name === 'Math' ? Math : Date);
-        return OPAQUE; // bare R / V / custom roots
-      case 'MemberExpression':
-        return planMember(node);
-      case 'BinaryExpression':
-        return planBinary(node);
-      case 'UnaryExpression':
-        return planUnary(node);
-      case 'CallExpression':
-        return planCall(node);
-      case 'ArrayExpression':
-        return planArray(node);
-      case 'ConditionalExpression':
-        return planConditionalValue(node);
-      case 'ObjectExpression':
-      case 'NewExpression':
-        return planObjectOrNew(node);
-      default:
-        return OPAQUE;
-    }
+    const planner = valuePlanners[node.type];
+    return planner ? planner(node) : OPAQUE;
   }
 
   function valueToBool(planned) {
@@ -384,6 +424,31 @@ function createExprPlanner({ principal, resource, actions, constants, variables 
     return opaqueNode(currentSrc, 'unsupported-expression');
   }
 
+  // Boolean-position dispatch: logical operators become plan nodes directly
+  // (preserving laziness), everything else goes through the value layer.
+  const boolPlanners = createDispatch({
+    BinaryExpression: (node) => {
+      if (node.operator === '&&') {
+        const left = planBool(node.left);
+        if (left.t === 'const' && !left.v) return left;
+        return andNode([left, planBool(node.right)]);
+      }
+      if (node.operator === '||') {
+        const left = planBool(node.left);
+        if (left.t === 'const' && left.v) return left;
+        return orNode([left, planBool(node.right)]);
+      }
+      return valueToBool(planValue(node));
+    },
+    UnaryExpression: (node) =>
+      node.operator === '!' ? notNode(planBool(node.argument)) : valueToBool(planValue(node)),
+    ConditionalExpression: (node) => {
+      const test = planValue(node.test);
+      if (test.k !== 'const') return opaqueNode(currentSrc, 'unsupported-expression');
+      return planBool(test.v ? node.consequent : node.alternate);
+    },
+  });
+
   /**
    * Boolean-level partial evaluation: PlanNode for a condition expression.
    *
@@ -391,24 +456,8 @@ function createExprPlanner({ principal, resource, actions, constants, variables 
    * @returns {import('./nodes.js').PlanNode}
    */
   function planBool(node) {
-    if (node.type === 'BinaryExpression' && (node.operator === '&&' || node.operator === '||')) {
-      const left = planBool(node.left);
-      if (node.operator === '&&') {
-        if (left.t === 'const' && !left.v) return left;
-        return andNode([left, planBool(node.right)]);
-      }
-      if (left.t === 'const' && left.v) return left;
-      return orNode([left, planBool(node.right)]);
-    }
-    if (node.type === 'UnaryExpression' && node.operator === '!') {
-      return notNode(planBool(node.argument));
-    }
-    if (node.type === 'ConditionalExpression') {
-      const test = planValue(node.test);
-      if (test.k !== 'const') return opaqueNode(currentSrc, 'unsupported-expression');
-      return planBool(test.v ? node.consequent : node.alternate);
-    }
-    return valueToBool(planValue(node));
+    const planner = boolPlanners[node.type];
+    return planner ? planner(node) : valueToBool(planValue(node));
   }
 
   function planLeaf(fn) {
@@ -423,6 +472,24 @@ function createExprPlanner({ principal, resource, actions, constants, variables 
     }
   }
 
+  function planMatchList(conds) {
+    const nodes = new Array(conds.length);
+    for (let i = 0; i < conds.length; i++) nodes[i] = planMatch(conds[i]);
+    return nodes;
+  }
+
+  // Strategy table mirroring Conditions' #strategies; the empty/non-array
+  // fail-closed guard runs before dispatch (shared by all three).
+  const matchStrategies = createDispatch({
+    any: (conds) => orNode(planMatchList(conds)),
+    all: (conds) => andNode(planMatchList(conds)),
+    none: (conds) => {
+      const nodes = new Array(conds.length);
+      for (let i = 0; i < conds.length; i++) nodes[i] = notNode(planMatch(conds[i]));
+      return andNode(nodes);
+    },
+  });
+
   /**
    * Plans a Conditions match tree. Exact parity with Conditions.isFulfilled:
    * empty/invalid strategy payloads fail closed to FALSE, unknown keys are
@@ -436,12 +503,11 @@ function createExprPlanner({ principal, resource, actions, constants, variables 
     if (typeof match !== 'object' || match === null) return constNode(false);
     const parts = [];
     for (const key of Object.keys(match)) {
+      const strategy = matchStrategies[key];
+      if (!strategy) continue; // forward-compat: ignore unknown keys
       const conds = match[key];
-      if (key !== 'any' && key !== 'all' && key !== 'none') continue; // forward-compat: ignore unknown keys
       if (!Array.isArray(conds) || !conds.length) return constNode(false);
-      if (key === 'any') parts.push(orNode(conds.map(planMatch)));
-      else if (key === 'all') parts.push(andNode(conds.map(planMatch)));
-      else parts.push(andNode(conds.map((cond) => notNode(planMatch(cond)))));
+      parts.push(strategy(conds));
     }
     if (!parts.length) return constNode(false);
     return andNode(parts);

@@ -9,7 +9,7 @@ const { createTelemetryWriter } = require('./telemetry.js');
 const { createCacheReader } = require('./caching/cache.js');
 const { KerberosCodecError, KerberosValidationError } = require('./errors.js');
 const { createSafeExprCodec } = require('./caching/codec.js');
-const { PLAN_KINDS, toDebugString, toFilter } = require('./planning/nodes.js');
+const { PlanKind, toDebugString, toFilter } = require('./planning/nodes.js');
 const { buildResourcePlan } = require('./planning/planner.js');
 const { createAjvAdapter, parseWithValidation, registerAjvKeywords } = require('./validation');
 // Platform runtime: bundlers swap this for `./runtime/browser.js` via the
@@ -859,17 +859,61 @@ class Kerberos {
     return sets;
   }
 
+  // The two dependent planning chains (roles → parent closure; resource →
+  // derived-roles sets) — split out so #planPolicySources can run all three
+  // sources as one concurrent allSettled wave.
+  async #planRoleSources(req, trace) {
+    const rolePolicies = await this.#getRolePolicies(req, trace);
+    const rolePolicyClosure = await this.#resolveRolePolicyClosure(rolePolicies, req);
+    return { rolePolicies, rolePolicyClosure };
+  }
+
+  async #planResourceSources(req, trace) {
+    const resourcePolicy = await this.#getResourcePolicy(req, trace);
+    const derivedRolesSets = resourcePolicy ? await this.#resolveDerivedRolesSets(resourcePolicy) : [];
+    return { resourcePolicy, derivedRolesSets };
+  }
+
   /**
    * Resolves every policy source the planner needs (async, cache-aware); the
    * planner itself (`buildResourcePlan`) is pure and synchronous.
+   *
+   * The three independent chains (principal / role+closure / resource+derived
+   * roles) resolve concurrently: in-memory lookups stay synchronous-fast, but
+   * with a cache-backed store this turns up to three sequential round-trip
+   * waves into one. `Promise.allSettled` follows the engine's parallelism
+   * policy — every sibling settles, then the first rejection rethrows. Each
+   * chain records into its own trace buffer, concatenated in the canonical
+   * principal → roles → resource order, so `meta.resolution` stays
+   * deterministic regardless of cache-read completion order.
    */
   async #planPolicySources(principal, resource, actions, trace) {
     const req = { principal, resource, P: principal, R: resource, actions };
-    const principalPolicy = await this.#getPrincipalPolicy(req, trace);
-    const rolePolicies = await this.#getRolePolicies(req, trace);
-    const rolePolicyClosure = await this.#resolveRolePolicyClosure(rolePolicies, req);
-    const resourcePolicy = await this.#getResourcePolicy(req, trace);
-    const derivedRolesSets = resourcePolicy ? await this.#resolveDerivedRolesSets(resourcePolicy) : [];
+    const principalTrace = trace ? [] : null;
+    const roleTrace = trace ? [] : null;
+    const resourceTrace = trace ? [] : null;
+
+    const settled = await Promise.allSettled([
+      this.#getPrincipalPolicy(req, principalTrace),
+      this.#planRoleSources(req, roleTrace),
+      this.#planResourceSources(req, resourceTrace),
+    ]);
+
+    if (trace) {
+      for (const entry of principalTrace) trace.push(entry);
+      for (const entry of roleTrace) trace.push(entry);
+      for (const entry of resourceTrace) trace.push(entry);
+    }
+
+    for (const outcome of settled) {
+      if (outcome.status === 'rejected') {
+        throw outcome.reason instanceof Error ? outcome.reason : new Error(String(outcome.reason));
+      }
+    }
+
+    const principalPolicy = settled[0].value;
+    const { rolePolicies, rolePolicyClosure } = settled[1].value;
+    const { resourcePolicy, derivedRolesSets } = settled[2].value;
     return { principalPolicy, rolePolicies, rolePolicyClosure, resourcePolicy, derivedRolesSets };
   }
 
@@ -1286,7 +1330,7 @@ class Kerberos {
           args?.resource,
           typeof args?.action === 'string' ? args.action : undefined,
           Array.isArray(args?.actions) ? [...args.actions] : undefined,
-          { kind: PLAN_KINDS.ALWAYS_DENIED },
+          { kind: PlanKind.AlwaysDenied },
         ),
     );
   }
