@@ -697,6 +697,80 @@ export function createCacheReader(
   retry?: { attempts?: number } | null,
 ): { enabled: boolean; get(key: string): Promise<unknown> };
 
+/** planResources filter outcome (Cerbos-compatible). */
+export type PlanKind = 'KIND_ALWAYS_ALLOWED' | 'KIND_ALWAYS_DENIED' | 'KIND_CONDITIONAL';
+
+/**
+ * One operand of a planResources condition tree: a literal, a reference to an
+ * unknown resource field (`request.resource.id` / `request.resource.attr.*`)
+ * or a nested expression. Operators follow the Cerbos vocabulary
+ * (`and/or/not/eq/ne/lt/le/gt/ge/in/add/sub/mult/div/mod/index/list`) plus the
+ * Kerberos extensions `opaque` (statically unplannable condition — post-filter
+ * required) and `relation` (ReBAC dependency — see expandRelationOperands).
+ */
+export type PlanExpressionOperand =
+  | { value: unknown }
+  | { variable: string }
+  | { expression: { operator: string; operands: PlanExpressionOperand[] } };
+
+export type PlanFilter = {
+  kind: PlanKind;
+  /** Present only for KIND_CONDITIONAL. */
+  condition?: PlanExpressionOperand;
+};
+
+/** planResources plans over a resource KIND: no `id`, `attr` = KNOWN fields. */
+export type RequestPlanResource = {
+  kind: string;
+  policyVersion?: string;
+  scope?: string;
+  attr?: Record<string, unknown>;
+};
+
+export type PlanResourcesArgs = {
+  reqId?: string;
+  principal: RequestPrincipal;
+  resource: RequestPlanResource;
+  /** Exactly one of `action` / `actions` must be provided. */
+  action?: string;
+  /** Multiple actions plan the conjunction (Cerbos AND semantics). */
+  actions?: string[];
+  includeMeta?: boolean;
+};
+
+export type PlanResourcesResponse = {
+  reqId?: string;
+  kerberosCallId: string;
+  /** Echo of the request form: `action` for single-action requests… */
+  action?: string;
+  /** …or `actions` for multi-action requests. */
+  actions?: string[];
+  resourceKind: string;
+  policyVersion: string;
+  filter: PlanFilter;
+  meta?: {
+    /** Human-readable s-expression rendering of the condition. */
+    filterDebug: string;
+    matchedScopes: {
+      principal: string | null;
+      resource: string | null;
+      roles: Record<string, string | null>;
+    };
+    resolution: KerberosResolutionTraceEntry[];
+  };
+};
+
+/**
+ * Replaces every `relation` operand of a plan with
+ * `in(request.resource.id, [ids])` via the supplied lookup (typically backed
+ * by `RelationResolver.lookupResources` from `@alexify/kerberos/relations`),
+ * then re-normalizes the filter. Returns a new response object.
+ */
+export function expandRelationOperands(
+  planResponse: PlanResourcesResponse,
+  lookup: (args: { name: string; relation: string }) => Promise<Iterable<string>> | Iterable<string>,
+): Promise<PlanResourcesResponse>;
+
 export class Kerberos {
   constructor(policies: KerberosPolicy[], derivedRoles: KerberosDerivedRoles[], options?: KerberosOptions);
   static generateCallId(): string;
@@ -736,6 +810,7 @@ export class Kerberos {
       };
     }[];
   }>;
+  planResources(args: PlanResourcesArgs): Promise<PlanResourcesResponse>;
 }
 export class KerberosZodSchemas {
   static buildResourcePolicyInstance(z: unknown): unknown;
@@ -744,6 +819,7 @@ export class KerberosZodSchemas {
   static buildDerivedRolesInstance(z: unknown): unknown;
   static buildIsAllowedArgs(z: unknown): unknown;
   static buildCheckResourcesArgs(z: unknown): unknown;
+  static buildPlanResourcesArgs(z: unknown): unknown;
 }
 export class KerberosJsonSchemas {
   static buildResourcePolicyInstance(): Record<string, unknown>;
@@ -752,6 +828,7 @@ export class KerberosJsonSchemas {
   static buildDerivedRolesInstance(): Record<string, unknown>;
   static buildIsAllowedArgs(): Record<string, unknown>;
   static buildCheckResourcesArgs(): Record<string, unknown>;
+  static buildPlanResourcesArgs(): Record<string, unknown>;
 }
 export class KerberosTypeBoxSchemas {
   static buildResourcePolicyInstance(typebox: TypeBoxLike): unknown;
@@ -760,6 +837,7 @@ export class KerberosTypeBoxSchemas {
   static buildDerivedRolesInstance(typebox: TypeBoxLike): unknown;
   static buildIsAllowedArgs(typebox: TypeBoxLike): unknown;
   static buildCheckResourcesArgs(typebox: TypeBoxLike): unknown;
+  static buildPlanResourcesArgs(typebox: TypeBoxLike): unknown;
 }
 
 export function registerAjvKeywords(ajv: AjvLike): AjvLike;

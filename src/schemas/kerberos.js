@@ -46,6 +46,19 @@ class KerberosZodSchemas extends ZodSchemas {
       includeMeta: z.boolean().optional(),
     });
   }
+
+  // Exactly-one-of action/actions is enforced in planResources itself (a
+  // manual check keeps the three backends' schemas simple and identical).
+  static buildPlanResourcesArgs(z) {
+    return z.object({
+      reqId: z.string().optional(),
+      principal: ZodSchemas.buildRequestPrincipal(z),
+      resource: ZodSchemas.buildRequestPlanResource(z),
+      action: z.string().optional(),
+      actions: z.array(z.string()).nonempty().optional(),
+      includeMeta: z.boolean().optional(),
+    });
+  }
 }
 
 class KerberosJsonSchemas extends JsonSchemas {
@@ -97,6 +110,20 @@ class KerberosJsonSchemas extends JsonSchemas {
       ['principal', 'resources'],
     );
   }
+
+  static buildPlanResourcesArgs() {
+    return JsonSchemas.buildObjectShape(
+      {
+        reqId: { type: 'string' },
+        principal: JsonSchemas.buildRequestPrincipal(),
+        resource: JsonSchemas.buildRequestPlanResource(),
+        action: { type: 'string' },
+        actions: JsonSchemas.buildNonEmptyArrayShape({ type: 'string' }),
+        includeMeta: { type: 'boolean' },
+      },
+      ['principal', 'resource'],
+    );
+  }
 }
 
 class KerberosTypeBoxSchemas extends TypeBoxSchemas {
@@ -137,6 +164,17 @@ class KerberosTypeBoxSchemas extends TypeBoxSchemas {
           actions: TypeBoxSchemas.buildNonEmptyArrayShape(t, t.String()),
         }),
       ),
+      includeMeta: t.Optional(t.Boolean()),
+    });
+  }
+
+  static buildPlanResourcesArgs(t) {
+    return t.Object({
+      reqId: t.Optional(t.String()),
+      principal: TypeBoxSchemas.buildRequestPrincipal(t),
+      resource: TypeBoxSchemas.buildRequestPlanResource(t),
+      action: t.Optional(t.String()),
+      actions: t.Optional(TypeBoxSchemas.buildNonEmptyArrayShape(t, t.String())),
       includeMeta: t.Optional(t.Boolean()),
     });
   }

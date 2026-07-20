@@ -1,10 +1,16 @@
+import { expectType } from 'tsd';
 import {
   Effect,
   Kerberos,
+  expandRelationOperands,
   type KerberosDerivedRoles,
   type KerberosPolicy,
   type KerberosTelemetryApi,
   type KerberosTelemetryOptions,
+  type PlanExpressionOperand,
+  type PlanFilter,
+  type PlanKind,
+  type PlanResourcesResponse,
 } from '../index.js';
 
 const policy = {
@@ -90,3 +96,33 @@ kerberos.isAllowed({
   action: 'read',
   resource: { id: 'doc1', kind: 'document' },
 });
+
+// planResources: kind-level resource (no id), single action or actions[]
+expectType<Promise<PlanResourcesResponse>>(
+  kerberos.planResources({
+    principal: { id: 'user1', roles: ['USER'] },
+    resource: { kind: 'document', attr: { status: 'OPEN' } },
+    action: 'read',
+    includeMeta: true,
+  }),
+);
+kerberos.planResources({
+  principal: { id: 'user1', roles: ['USER'] },
+  resource: { kind: 'document' },
+  actions: ['read', 'edit'],
+});
+
+declare const planResponse: PlanResourcesResponse;
+expectType<PlanFilter>(planResponse.filter);
+expectType<PlanKind>(planResponse.filter.kind);
+// The operand union accepts nested expressions, variables and literals.
+const conditionalOperand: PlanExpressionOperand = {
+  expression: {
+    operator: 'eq',
+    operands: [{ variable: 'request.resource.attr.status' }, { value: 'OPEN' }],
+  },
+};
+void conditionalOperand;
+
+expectType<Promise<PlanResourcesResponse>>(expandRelationOperands(planResponse, async () => ['id1']));
+expectType<Promise<PlanResourcesResponse>>(expandRelationOperands(planResponse, () => new Set(['id1'])));

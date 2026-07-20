@@ -159,6 +159,12 @@ const ALLOWED_GLOBALS = { Math, Date };
 
 const DEFAULT_ROOTS = ['P', 'R', 'V', 'C'];
 
+// Compiled `{ $expr }` closures carry their source/AST under this symbol so the
+// query planner (src/planning/) can partially evaluate them. Non-enumerable and
+// frozen: invisible to serialization, and consumers must never mutate the AST —
+// it is the same object the closure evaluates (and lives in the shared cache).
+const EXPR_META = Symbol('kerberos.exprMeta');
+
 // Safe-by-default resource limits for expressions loaded from a remote store.
 // All three are overridable via createSafeExprCodec options (set a limit to
 // Infinity to disable it) — a compromised or misbehaving store must not be able
@@ -544,7 +550,11 @@ function createSafeExprCodec({ jsep, roots, maxCachedExprs, maxExprLength, maxDe
 
   function compileExpr(expr) {
     const ast = parseExpr(expr, jsep, limits);
-    return (ctx) => evalNode(ast, ctx, config);
+    const fn = (ctx) => evalNode(ast, ctx, config);
+    Object.defineProperty(fn, EXPR_META, {
+      value: Object.freeze({ expr, ast, roots: config.roots }),
+    });
+    return fn;
   }
 
   const deserializeHandlers = {
@@ -576,6 +586,22 @@ function createSafeExprCodec({ jsep, roots, maxCachedExprs, maxExprLength, maxDe
       return deepTransform(jsonSafe, deserializeHandlers);
     },
   };
+}
+
+/**
+ * Evaluates an already-validated jsep AST (e.g. one taken from a compiled
+ * closure's EXPR_META) against a context, using the same strict allowlist
+ * interpreter the codec compiles to. Exists for the query planner to fold
+ * fully-known subtrees; not part of the public package surface.
+ *
+ * @param {Record<string, unknown>} node
+ * @param {Record<string, unknown>} ctx
+ * @param {{ roots?: Iterable<string> | Set<string> }} [options]
+ * @returns {unknown}
+ */
+function evalExprAst(node, ctx, { roots } = {}) {
+  const config = { roots: roots instanceof Set ? roots : new Set(roots || DEFAULT_ROOTS) };
+  return evalNode(node, ctx, config);
 }
 
 /**
@@ -624,8 +650,12 @@ function deserializePolicy(json, codec) {
 }
 
 module.exports = {
+  // EXPR_META and evalExprAst are internal seams for src/planning/ — they are
+  // intentionally NOT re-exported from src/index.js.
+  EXPR_META,
   KerberosExprError,
   createSafeExprCodec,
+  evalExprAst,
   serializePolicy,
   deserializePolicy,
 };

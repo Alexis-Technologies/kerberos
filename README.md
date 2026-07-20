@@ -6,7 +6,7 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
 
 - Cerbos is a powerful authorization engine, but it is written in Go and requires a separate server to run.
 - We all know that gRPC is faster than REST API because it uses protobuf. But it can be even faster—by avoiding network requests altogether. Often, maintaining a separate service just for your permissions can be unnecessary, don’t you think?
-- Kerberos.js is a lightweight alternative that can be used in the browser or server-side JavaScript applications (only up to 6 KB).
+- Kerberos.js is a lightweight alternative that can be used in the browser or server-side JavaScript applications (only up to 8 KB, query planner included).
 - Some features that are only available in the paid version of Cerbos(Cerbos Hub) are available here for free.
   - Embedded Cerbos features:
     - In-browser/serverless authorization;
@@ -27,6 +27,7 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
 - [x] APIs:
   - [x] isAllowed API;
   - [x] CheckResourceSet API;
+  - [x] PlanResources API (Cerbos-compatible [query plans](#query-plans-planresources));
 - [x] Audit logs;
 - [x] Logger (legacy console + structured / Pino);
 - [x] In-browser/serverless authorization;
@@ -62,6 +63,7 @@ Kerberos.js is a JavaScript library for authorization solutions. It is a simple 
 - [Metadata](#metadata)
 - [Caching / Storing Policies](#caching--storing-policies)
 - [ReBAC (Relations)](#rebac-relations)
+- [Query Plans (planResources)](#query-plans-planresources)
 - [Testing](#testing)
 - [Benchmarks](#benchmarks)
 
@@ -244,6 +246,27 @@ const response = await kerberos.checkResources({
 // }
 ```
 
+### `kerberos.planResources(args) => Promise<PlanResourcesResponse>`
+
+Builds a **resources query plan**: instead of a yes/no decision for one resource, it returns a *filter* describing **which** resources of a kind the principal may act on — ready to translate into a database query. See [Query Plans](#query-plans-planresources).
+
+- `args.principal` — the principal (`id`, `roles`, optional `policyVersion`, `scope`, `attr`).
+- `args.resource` — the resource **kind** (`kind`, optional `policyVersion`, `scope`, `attr`). No `id`: `attr` carries only the *known* attributes; everything else stays unknown and surfaces in the filter.
+- `args.action` **or** `args.actions` — exactly one of them; multiple actions plan the conjunction (Cerbos AND semantics). The wildcard `'*'` cannot be planned.
+- `args.reqId` / `args.includeMeta` — as in `checkResources`; `includeMeta` adds `filterDebug`, `matchedScopes` and the `resolution` trace.
+
+```javascript
+const plan = await kerberos.planResources({
+  principal: { id: 'user1', roles: ['USER'] },
+  resource: { kind: 'expense' },
+  action: 'view',
+});
+// {
+//   kerberosCallId: '…', action: 'view', resourceKind: 'expense', policyVersion: 'default',
+//   filter: { kind: 'KIND_ALWAYS_ALLOWED' | 'KIND_ALWAYS_DENIED' | 'KIND_CONDITIONAL', condition? },
+// }
+```
+
 ### Exports
 
 | Export | Purpose |
@@ -253,6 +276,7 @@ const response = await kerberos.checkResources({
 | `ResourcePolicy`, `PrincipalPolicy`, `RolePolicy`, `DerivedRoles` | Policy classes (rarely constructed directly). |
 | `Conditions`, `Variables`, `Constants`, `Outputs` | DSL building blocks. |
 | `createSafeExprCodec`, `serializePolicy`, `deserializePolicy` | Safe AST codec for [dynamic/stored policies](#caching--storing-policies). |
+| `expandRelationOperands` | Materializes ReBAC `relation` operands of a [query plan](#query-plans-planresources) into id filters. |
 | `registerAjvKeywords`, `createAjvAdapter` | [Validation](#schema-validation) helpers. |
 | `JsonSchemas`, `TypeBoxSchemas`, `ZodSchemas`, `KerberosJsonSchemas`, `ResourcePolicyJsonSchemas`, `PrincipalPolicyJsonSchemas`, `RolePolicyJsonSchemas`, … | Schema builders for the three backends. |
 
@@ -1240,7 +1264,7 @@ What it borrows from SpiceDB (see [`src/Relations/`](./src/Relations)):
 - the **recursive check** with short-circuiting (union stops at the first ALLOW, intersection at the first DENY, exclusion is base-first and order-sensitive);
 - **per-request memoization** of subproblems (`(resource#relation@subject)`), shared across a whole `checkResources` batch; concurrent identical document reads coalesce (the in-process analog of SpiceDB's singleflight);
 - **depth limiting instead of cycle tracking** (`maxDepth`, default 50) — visited-sets are semantically unsound under exclusions, so cyclic relationship data throws a typed `KerberosRelationsError`;
-- **caveats** (ABAC-on-ReBAC): named conditions bound to tuples with write-time context; at check time the written context takes precedence over the check-time `context` argument, and the condition sees `{ P, ctx }`. Caveats are ordinary Kerberos `Conditions` — for JSON/cache-stored schemas author them as `{ match: { $expr: '...' } }` and pass a codec built with `createSafeExprCodec({ jsep, roots: ['P', 'ctx'] })` (same eval-free guarantees as dynamic policies). A throwing or false caveat fails closed. There is deliberately no CEL and no partial evaluation (`CONDITIONAL` results) — in-process, the full context is available at check time;
+- **caveats** (ABAC-on-ReBAC): named conditions bound to tuples with write-time context; at check time the written context takes precedence over the check-time `context` argument, and the condition sees `{ P, ctx }`. Caveats are ordinary Kerberos `Conditions` — for JSON/cache-stored schemas author them as `{ match: { $expr: '...' } }` and pass a codec built with `createSafeExprCodec({ jsep, roots: ['P', 'ctx'] })` (same eval-free guarantees as dynamic policies). A throwing or false caveat fails closed. There is deliberately no CEL and no partial evaluation of caveats (`CONDITIONAL` results) — in-process, the full context is available at check time (engine-level query planning is a separate, explicit API: [`planResources`](#query-plans-planresources));
 - **reverse lookups**: `lookupSubjects` walks the permission tree forward and expands groups (wildcards come back as `'user:*'`, or `{ subject: 'user:*', exclusions: [...] }` under exclusions; caveated tuples are treated as present — an upper bound); `lookupResources` uses compile-time reachability entrypoints plus candidate verification for intersection/exclusion/caveat paths (the LookupResources2 pattern).
 
 ### Resolver telemetry
@@ -1274,6 +1298,154 @@ This is deliberately **not** full Zanzibar. The hard part of Zanzibar is distrib
 - checks always read the **current** in-memory state plus whatever your cache returns *right now*;
 - the staleness window for dynamic tuples equals your cache-invalidation window (e.g. qified pub/sub propagation). Until an invalidation propagates, a just-revoked subject may still pass on another host — if that window matters for your threat model, put revocation-sensitive checks behind static tuples, shorten TTLs, or use a centralized authorization service (SpiceDB) instead;
 - there are no per-request consistency levels and no revision tokens.
+
+## Query Plans (planResources)
+
+`isAllowed` answers *"may this principal act on **this** resource?"*. `planResources` answers the inverse — *"**which** resources may this principal act on?"* — by **partially evaluating** the policies against everything known at plan time (the full principal, `resource.kind`, any known `attr`) and returning a *filter* over the unknown resource fields. Translate that filter into a `WHERE` clause and the database returns exactly the permitted rows — no fetch-all-then-filter.
+
+The response is shaped like the [Cerbos PlanResources API](https://docs.cerbos.dev/cerbos/latest/api/#resources-query-plan) (`filter.kind` + `condition` operand tree, same operator vocabulary), so Cerbos-ecosystem query-plan adapters ([queryPlanToPrisma](https://github.com/cerbos/query-plan-adapters), etc.) understand the shape. Kerberos adds two operators of its own: [`opaque`](#opaque-conditions-post-filtering) and [`relation`](#relation-operands-rebac).
+
+```javascript
+const { Kerberos, createSafeExprCodec, deserializePolicy } = require('@alexify/kerberos');
+
+const codec = createSafeExprCodec({ jsep });
+const policy = deserializePolicy({
+  resourcePolicy: {
+    resource: 'expense',
+    version: 'default',
+    rules: [
+      { actions: ['view'], effect: 'EFFECT_ALLOW', roles: ['USER'],
+        condition: { match: { $expr: "R.attr.ownerId === P.id || R.attr.status === 'APPROVED'" } } },
+    ],
+  },
+}, codec);
+
+const kerberos = new Kerberos([policy], []);
+const plan = await kerberos.planResources({
+  principal: { id: 'u1', roles: ['USER'] },
+  resource: { kind: 'expense' },
+  action: 'view',
+});
+// plan.filter:
+// {
+//   kind: 'KIND_CONDITIONAL',
+//   condition: { expression: { operator: 'or', operands: [
+//     { expression: { operator: 'eq', operands: [{ variable: 'request.resource.attr.ownerId' }, { value: 'u1' }] } },
+//     { expression: { operator: 'eq', operands: [{ variable: 'request.resource.attr.status' }, { value: 'APPROVED' }] } },
+//   ] } },
+// }
+```
+
+Unconditional outcomes short-circuit: `filter.kind` is `KIND_ALWAYS_ALLOWED` / `KIND_ALWAYS_DENIED` with no `condition` (skip the query, or return everything/nothing).
+
+### How a plan is composed
+
+The planner mirrors [Mixed Policy Evaluation](#mixed-policy-evaluation) symbolically, layer by layer. Which layer decides is already known at plan time (it depends only on the principal and `resource.kind`); what stays *unknown* is only whether rule conditions over unknown `R.attr` / `R.id` hold — those become the residual filter:
+
+```mermaid
+flowchart TD
+    A([planResources: principal · resource.kind + known attr · action]) --> P{{"PrincipalPolicy<br/>(by principal.id)"}}
+
+    P -->|"conditions fold to a constant:<br/>unconditional ALLOW / DENY"| SC([Short-circuit: KIND_ALWAYS_ALLOWED / KIND_ALWAYS_DENIED])
+    P -->|"conditions read unknown R.attr →<br/>residual branches AND(PA,¬PD) ∨ AND(¬PA,¬PD,next layer ↓)"| RL
+    P -->|no principal policy| RL{{"RolePolicy layer<br/>(applicability is a constant: P.roles × R.kind)"}}
+
+    RL -->|"applicable: AND across roles<br/>(allowlist, implicit deny, parentRoles intersection)"| NORM
+    RL -->|not applicable| DRI
+
+    subgraph DRI ["Derived-roles inlining (importDerivedRoles)"]
+        direction TB
+        CB["Condition-backed: constant parentRoles gate (P known)<br/>+ the definition's condition inlined (residual)"] --> EDR([derived-role plan nodes])
+        RB["Relation-backed: sync gates + relation operand<br/>(materialized later via expandRelationOperands)"] --> EDR
+    end
+
+    EDR --> RES{{"ResourcePolicy<br/>(AND(OR allow rules, NOT(OR deny rules)))"}}
+    RES --> NORM["Normalization: constant folding · flattening · dedup"]
+
+    NORM -->|TRUE| AA([KIND_ALWAYS_ALLOWED])
+    NORM -->|FALSE| AD([KIND_ALWAYS_DENIED])
+    NORM -->|residual tree| COND(["KIND_CONDITIONAL + condition<br/>(operators and/or/not/eq/…/in + opaque/relation)"])
+```
+
+Every layer keeps its runtime semantics: principal rules override (Deny wins), the role layer is an allowlist with implicit deny and `parentRoles` intersection, the resource layer is Deny-over-Allow with default deny — the parity is enforced by a property-style test suite ([`test/PlanParity.test.js`](./test/PlanParity.test.js)) that grid-samples unknown attributes and compares the filter against real `isAllowed` results.
+
+### Operators
+
+`condition` is a tree of `{ expression: { operator, operands } }` / `{ variable }` / `{ value }` operands. Variables are Cerbos-named: `request.resource.id` and `request.resource.attr.<path>`.
+
+| Operators | Meaning |
+| --------- | ------- |
+| `and`, `or`, `not` | Boolean composition. |
+| `eq`, `ne`, `lt`, `le`, `gt`, `ge` | Comparisons (`===`, `!==`, `<`, `<=`, `>`, `>=`). |
+| `in` | List membership (`list.includes(x)`). |
+| `add`, `sub`, `mult`, `div`, `mod` | Arithmetic (`+`, `-`, `*`, `/`, `%`). |
+| `index`, `list` | Computed member access, list literals. |
+| `opaque` **(Kerberos)** | Statically unplannable condition — [post-filter](#opaque-conditions-post-filtering). |
+| `relation` **(Kerberos)** | ReBAC dependency — [expand or post-check](#relation-operands-rebac). |
+
+### Writing plannable policies
+
+The planner works on the codec's `{ $expr }` ASTs, so **plannable conditions are the ones the [safe expression codec](#serialization-mechanism-security--performance) compiled** — cache-loaded policies, or static policies passed through `deserializePolicy(json, codec)` first. Rules of thumb:
+
+- **Author conditions as `{ $expr: '…' }`**, not JS functions — a plain function is a black box and plans as `opaque`.
+- **Prefer `===` over `==`** — both map to `eq`, but SQL `=` has no JS coercion semantics.
+- **Compare booleans explicitly** (`R.attr.isPublic === true`): a bare `R.attr.isPublic` leaf is planned as `eq(attr, true)`, which diverges for truthy non-boolean values.
+- **`.includes` means list membership** — use it on array attrs (a residual receiver is assumed to be a list; a constant *string* receiver would mean substring semantics and plans as `opaque`).
+- Not plannable (always sound, degrade to `opaque`): `??`, `**`, bitwise ops, `typeof`, ternaries whose test reads unknown attrs, method calls other than `.includes`, `Math`/`Date` over unknown values, object/`new` expressions over unknown values.
+- An attr **missing** from `resource.attr` means *unknown*, not `undefined` — it becomes a filter variable, never a folded value.
+- `Date.now()` (and friends) evaluate **at plan time** — same trade-off as Cerbos; re-plan when time matters.
+
+`variables` are partially evaluated and inlined at their `V.*` use sites; `C.*` constants and everything derivable from `P` fold into literal values. Plain JS-function *variables* still fold when they only touch known fields (they are executed against a guard that marks any unknown-field access as `opaque`).
+
+### Opaque conditions (post-filtering)
+
+`{ operator: 'opaque', operands: [{ value: { src, reason } }] }` marks a spot the planner could not translate (`reason: 'js-function' | 'unsupported-expression'`, `src` identifies the condition). A translator must treat it as *unknown*: fetch the candidate rows matching the rest of the filter, then post-filter each row with a real `isAllowed` call. Everything AND-ed around an opaque node still narrows the fetch.
+
+### Relation operands (ReBAC)
+
+[Relation-backed derived roles](#relation-backed-derived-roles) plan as `{ operator: 'relation', operands: [{ value: { name, relation } }] }` — the ABAC part of the filter is complete, the ReBAC part depends on relationship data. Materialize it with `expandRelationOperands`:
+
+```javascript
+const { expandRelationOperands } = require('@alexify/kerberos');
+const { RelationResolver } = require('@alexify/kerberos/relations');
+
+const resolver = new RelationResolver({ schema, tuples });
+const expanded = await expandRelationOperands(plan, ({ relation }) =>
+  resolver.lookupResources({ subject: `user:${principal.id}`, permission: relation, resourceType: 'document' }));
+// every relation operand becomes: in(request.resource.id, ['doc1', 'doc7', …])
+// (an empty id list folds the branch to FALSE — possibly the whole plan to KIND_ALWAYS_DENIED)
+```
+
+The lookup is any `({ name, relation }) => ids` function — resolver-agnostic, like the engine's `relations` seam. Without expansion, treat `relation` like `opaque`: post-check the rows.
+
+### Translating a plan
+
+Translators are deliberately **not** part of the package (same delegation philosophy as caching/validation). A hand-rolled SQL mapping is a ~40-line recursive walk:
+
+```javascript
+const OPS = { and: 'AND', or: 'OR', eq: '=', ne: '<>', lt: '<', le: '<=', gt: '>', ge: '>=' };
+
+function toSql(operand, params) {
+  if ('value' in operand) return params.push(operand.value), `$${params.length}`;
+  if ('variable' in operand) {
+    if (operand.variable === 'request.resource.id') return 'id';
+    return operand.variable.replace('request.resource.attr.', ''); // map to your column names
+  }
+  const { operator, operands } = operand.expression;
+  if (operator === 'not') return `NOT (${toSql(operands[0], params)})`;
+  if (operator === 'in') return `${toSql(operands[0], params)} = ANY(${toSql(operands[1], params)})`;
+  if (OPS[operator]) return `(${operands.map((op) => toSql(op, params)).join(` ${OPS[operator]} `)})`;
+  throw new Error(`post-filter required: ${operator}`); // opaque / relation / index / list…
+}
+
+const params = [];
+const where =
+  plan.filter.kind === 'KIND_ALWAYS_ALLOWED' ? 'TRUE'
+  : plan.filter.kind === 'KIND_ALWAYS_DENIED' ? 'FALSE'
+  : toSql(plan.filter.condition, params);
+```
+
+Since the shape matches Cerbos, the [Cerbos ORM adapters](https://docs.cerbos.dev/cerbos/latest/recipes/orm/) (Prisma, Drizzle, Mongoose, SQLAlchemy…) accept the `filter` for the shared operator vocabulary — route `opaque`/`relation` operands to a post-filter (or pre-expand `relation` as shown above).
 
 ## Testing
 
@@ -1417,6 +1589,7 @@ Apple Silicon (M-series), Node v24:
 | `isAllowed` — derived roles + variables + condition | ~300,000 |
 | `checkResources` — 10 resources × 3 actions |  ~41,000 |
 | `isAllowed` — cache-backed dynamic policy (`$expr`, in-memory Map) | ~150,000 |
+| `planResources` — `$expr` policy (variables + deny rule) |  ~54,000 |
 | `relations.check` — direct tuple (flat) | ~850,000 |
 | `relations.check` — deep walk (3 arrows + nested groups) | ~120,000 |
 | `isAllowed` — relation-backed derived role (deep walk) |  ~80,000 |

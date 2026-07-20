@@ -9,6 +9,8 @@ const { createTelemetryWriter } = require('./telemetry.js');
 const { createCacheReader } = require('./caching/cache.js');
 const { KerberosCodecError, KerberosValidationError } = require('./errors.js');
 const { createSafeExprCodec } = require('./caching/codec.js');
+const { PLAN_KINDS, toDebugString, toFilter } = require('./planning/nodes.js');
+const { buildResourcePlan } = require('./planning/planner.js');
 const { createAjvAdapter, parseWithValidation, registerAjvKeywords } = require('./validation');
 // Platform runtime: bundlers swap this for `./runtime/browser.js` via the
 // package.json `browser` field map when targeting the browser.
@@ -161,6 +163,22 @@ class Kerberos {
     });
   }
 
+  /**
+   * Parses `planResources` arguments using the configured validation backend.
+   *
+   * @param {unknown} args
+   * @param {object} [options]
+   * @returns {unknown}
+   */
+  static parsePlanResourcesArgs(args, options = {}) {
+    return parseWithValidation(args, {
+      ...options,
+      buildJson: () => KerberosJsonSchemas.buildPlanResourcesArgs(),
+      buildTypeBox: (t) => KerberosTypeBoxSchemas.buildPlanResourcesArgs(t),
+      buildZod: (z) => KerberosZodSchemas.buildPlanResourcesArgs(z),
+    });
+  }
+
   #resourcePolicies = new Map();
 
   #principalPolicies = new Map();
@@ -197,6 +215,8 @@ class Kerberos {
   #isAllowedArgsValidator = null;
 
   #checkResourcesArgsValidator = null;
+
+  #planResourcesArgsValidator = null;
 
   #getCallId = null;
 
@@ -276,6 +296,7 @@ class Kerberos {
       this.#requestValidator = ZodSchemas.buildRequest(z);
       this.#isAllowedArgsValidator = KerberosZodSchemas.buildIsAllowedArgs(z);
       this.#checkResourcesArgsValidator = KerberosZodSchemas.buildCheckResourcesArgs(z);
+      this.#planResourcesArgsValidator = KerberosZodSchemas.buildPlanResourcesArgs(z);
     } else if (this.#ajv && this.#typebox) {
       this.#resourcePolicyValidator = createAjvAdapter(
         this.#ajv,
@@ -302,6 +323,10 @@ class Kerberos {
         this.#ajv,
         KerberosTypeBoxSchemas.buildCheckResourcesArgs(this.#typebox),
       );
+      this.#planResourcesArgsValidator = createAjvAdapter(
+        this.#ajv,
+        KerberosTypeBoxSchemas.buildPlanResourcesArgs(this.#typebox),
+      );
     } else if (this.#ajv) {
       this.#resourcePolicyValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildResourcePolicyInstance());
       this.#principalPolicyValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildPrincipalPolicyInstance());
@@ -310,6 +335,7 @@ class Kerberos {
       this.#requestValidator = createAjvAdapter(this.#ajv, JsonSchemas.buildRequest());
       this.#isAllowedArgsValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildIsAllowedArgs());
       this.#checkResourcesArgsValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildCheckResourcesArgs());
+      this.#planResourcesArgsValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildPlanResourcesArgs());
     }
 
     const { resourcePolicies, principalPolicies, rolePolicies } = this.#getPoliciesMaps(policies);
@@ -458,17 +484,21 @@ class Kerberos {
     return derivedRolesMap;
   }
 
+  /**
+   * Resolves one derived-roles definition set by name: in-memory first, then
+   * the cache fallback. Shared by runtime evaluation and query planning.
+   */
+  async #resolveDerivedRolesSetByName(name) {
+    const role = this.#derivedRoles.get(name);
+    if (role) return role;
+    return this.#resolveFromCache(`derivedRoles:${name}`, (shape) => new DerivedRoles(shape, this.#policyOptions()));
+  }
+
   async #getImportedDerivedRoles(policy, req, relationsMemo, trace) {
     const importedRoles = new Set();
     const relationCandidates = [];
     for (const name of policy.importDerivedRoles) {
-      let role = this.#derivedRoles.get(name);
-      if (!role) {
-        role = await this.#resolveFromCache(
-          `derivedRoles:${name}`,
-          (shape) => new DerivedRoles(shape, this.#policyOptions()),
-        );
-      }
+      const role = await this.#resolveDerivedRolesSetByName(name);
       if (!role) continue;
       const derivedRoles = role.get(req);
       if (derivedRoles) for (const derivedRole of derivedRoles) importedRoles.add(derivedRole);
@@ -796,6 +826,54 @@ class Kerberos {
   }
 
   /**
+   * Resolves the transitive parentRoles closure for the query planner: every
+   * role reachable from the principal's role policies, mapped to its resolved
+   * policy (or null). Parent lookups are untraced — runtime parity with
+   * `#evaluateRolePolicy`, which resolves parents without a trace.
+   */
+  async #resolveRolePolicyClosure(rolePolicies, req) {
+    const closure = new Map();
+    const queue = [];
+    for (const policy of rolePolicies) {
+      closure.set(policy.role, policy);
+      for (const parentRole of policy.parentRoles) queue.push(parentRole);
+    }
+    // Cursor-based BFS (no shift); the closure map doubles as the visited set,
+    // so parentRoles cycles terminate here and are reported by the planner.
+    for (let i = 0; i < queue.length; i++) {
+      const role = queue[i];
+      if (closure.has(role)) continue;
+      const policy = await this.#getRolePolicyByName(role, req);
+      closure.set(role, policy ?? null);
+      if (policy) for (const parentRole of policy.parentRoles) queue.push(parentRole);
+    }
+    return closure;
+  }
+
+  async #resolveDerivedRolesSets(policy) {
+    const sets = [];
+    for (const name of policy.importDerivedRoles) {
+      const set = await this.#resolveDerivedRolesSetByName(name);
+      if (set) sets.push(set);
+    }
+    return sets;
+  }
+
+  /**
+   * Resolves every policy source the planner needs (async, cache-aware); the
+   * planner itself (`buildResourcePlan`) is pure and synchronous.
+   */
+  async #planPolicySources(principal, resource, actions, trace) {
+    const req = { principal, resource, P: principal, R: resource, actions };
+    const principalPolicy = await this.#getPrincipalPolicy(req, trace);
+    const rolePolicies = await this.#getRolePolicies(req, trace);
+    const rolePolicyClosure = await this.#resolveRolePolicyClosure(rolePolicies, req);
+    const resourcePolicy = await this.#getResourcePolicy(req, trace);
+    const derivedRolesSets = resourcePolicy ? await this.#resolveDerivedRolesSets(resourcePolicy) : [];
+    return { principalPolicy, rolePolicies, rolePolicyClosure, resourcePolicy, derivedRolesSets };
+  }
+
+  /**
    * Evaluates all policy sources for a request. Effects are always canonical
    * `EFFECT_ALLOW`/`EFFECT_DENY` strings — the `effectAsBoolean` response
    * format is applied at the response boundary by `checkResources`.
@@ -1090,6 +1168,126 @@ class Kerberos {
         return response;
       },
       (callId) => ({ results: [], kerberosCallId: callId, reqId: args?.reqId }),
+    );
+  }
+
+  // Response scaffold shared by the success path and the onError:'deny'
+  // fallback: echoes the request form (`action` vs `actions`) like Cerbos.
+  static #buildPlanResponse(callId, reqId, resource, action, actions, filter) {
+    const response = { kerberosCallId: callId };
+    if (reqId) response.reqId = reqId;
+    if (action !== undefined) response.action = action;
+    else if (actions !== undefined) response.actions = actions;
+    response.resourceKind = resource?.kind;
+    response.policyVersion = resource?.policyVersion ?? DEFAULT_VERSION;
+    response.filter = filter;
+    return response;
+  }
+
+  /**
+   * Builds a Cerbos-compatible resources query plan: which resources of a
+   * kind the principal could act on, as a filter to translate into a data
+   * query. `resource.attr` carries the KNOWN attributes; everything else is
+   * treated as unknown and surfaces in the residual condition as
+   * `request.resource.attr.*` / `request.resource.id` operands. Kerberos
+   * extensions: the `opaque` operator (statically unplannable condition —
+   * translators must post-filter) and `relation` (ReBAC dependency — see
+   * `expandRelationOperands`).
+   *
+   * @param {Record<string, unknown>} args
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  async planResources(args) {
+    const reqKind = 'PlanResources';
+
+    return this.#runRequest(
+      reqKind,
+      args?.reqId,
+      async (callId) => {
+        const parsedArgs = this.#parseValidated('Invalid planResources arguments', () =>
+          Kerberos.parsePlanResourcesArgs(args, {
+            schema: this.#planResourcesArgsValidator,
+            z: this.#z,
+            ajv: this.#ajv,
+            typebox: this.#typebox,
+          }),
+        );
+
+        // The schemas keep `action`/`actions` independently optional; the
+        // exactly-one-of invariant (and the wildcard rejection) are enforced
+        // here so the rule also holds without a validation backend.
+        const hasAction = parsedArgs.action !== undefined;
+        const hasActions = parsedArgs.actions !== undefined;
+        if (hasAction === hasActions) {
+          throw new KerberosValidationError(
+            'Invalid planResources arguments: provide exactly one of "action" or "actions"',
+          );
+        }
+        const actions = hasAction ? [parsedArgs.action] : [...parsedArgs.actions];
+        // Guarded here too (not only in the schemas): with no validation
+        // backend an empty list would otherwise plan an empty conjunction —
+        // KIND_ALWAYS_ALLOWED, a fail-open.
+        if (!actions.length) {
+          throw new KerberosValidationError('Invalid planResources arguments: "actions" must not be empty');
+        }
+        for (const action of actions) {
+          if (typeof action !== 'string' || !action.length) {
+            throw new KerberosValidationError('Invalid planResources arguments: actions must be non-empty strings');
+          }
+          if (action === ALL_ACTIONS) {
+            throw new KerberosValidationError(
+              `Invalid planResources arguments: the wildcard action "${ALL_ACTIONS}" cannot be planned`,
+            );
+          }
+        }
+
+        const trace = parsedArgs.includeMeta ? [] : null;
+        const sources = await this.#planPolicySources(parsedArgs.principal, parsedArgs.resource, actions, trace);
+        const { node } = buildResourcePlan({
+          principal: parsedArgs.principal,
+          resource: parsedArgs.resource,
+          actions,
+          ...sources,
+          hasRelations: Boolean(this.#relations),
+          trace,
+        });
+
+        const response = Kerberos.#buildPlanResponse(
+          callId,
+          parsedArgs.reqId,
+          parsedArgs.resource,
+          hasAction ? parsedArgs.action : undefined,
+          actions,
+          toFilter(node),
+        );
+
+        if (parsedArgs.includeMeta) {
+          const matchedScopes = {
+            principal: sources.principalPolicy ? (sources.principalPolicy.scope ?? '') : null,
+            resource: sources.resourcePolicy ? (sources.resourcePolicy.scope ?? '') : null,
+            roles: {},
+          };
+          const seenRoles = new Set();
+          for (const role of parsedArgs.principal.roles) {
+            if (seenRoles.has(role)) continue;
+            seenRoles.add(role);
+            const policy = sources.rolePolicyClosure.get(role);
+            matchedScopes.roles[role] = policy ? (policy.scope ?? '') : null;
+          }
+          response.meta = { filterDebug: toDebugString(node), matchedScopes, resolution: trace };
+        }
+
+        return response;
+      },
+      (callId) =>
+        Kerberos.#buildPlanResponse(
+          callId,
+          args?.reqId,
+          args?.resource,
+          typeof args?.action === 'string' ? args.action : undefined,
+          Array.isArray(args?.actions) ? [...args.actions] : undefined,
+          { kind: PLAN_KINDS.ALWAYS_DENIED },
+        ),
     );
   }
 }

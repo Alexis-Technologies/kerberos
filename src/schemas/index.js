@@ -46,6 +46,17 @@ class ZodSchemas {
     });
   }
 
+  // planResources plans over a resource KIND, not an instance: no `id`, and
+  // `attr` holds only the KNOWN attributes (everything else stays unknown).
+  static buildRequestPlanResource(z) {
+    return z.object({
+      kind: z.string(),
+      policyVersion: z.string().optional(),
+      scope: ZodSchemas.buildScopeString(z).optional(),
+      attr: z.record(z.string(), z.unknown()).optional(),
+    });
+  }
+
   static buildRequest(z) {
     return z.object({
       principal: ZodSchemas.buildRequestPrincipal(z),
@@ -170,6 +181,19 @@ class JsonSchemas {
     );
   }
 
+  // See ZodSchemas.buildRequestPlanResource — kind-level resource, no `id`.
+  static buildRequestPlanResource() {
+    return JsonSchemas.buildObjectShape(
+      {
+        kind: { type: 'string' },
+        policyVersion: { type: 'string' },
+        scope: JsonSchemas.buildScopeString(),
+        attr: JsonSchemas.buildUnknownRecordShape(),
+      },
+      ['kind'],
+    );
+  }
+
   static buildRequest() {
     return JsonSchemas.buildObjectShape(
       {
@@ -228,6 +252,16 @@ class TypeBoxSchemas {
   static buildRequestResource(t) {
     return t.Object({
       id: t.String(),
+      kind: t.String(),
+      policyVersion: t.Optional(t.String()),
+      scope: t.Optional(TypeBoxSchemas.buildScopeString(t)),
+      attr: t.Optional(TypeBoxSchemas.buildUnknownRecordShape(t)),
+    });
+  }
+
+  // See ZodSchemas.buildRequestPlanResource — kind-level resource, no `id`.
+  static buildRequestPlanResource(t) {
+    return t.Object({
       kind: t.String(),
       policyVersion: t.Optional(t.String()),
       scope: t.Optional(TypeBoxSchemas.buildScopeString(t)),

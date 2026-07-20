@@ -139,6 +139,46 @@ async function main() {
         cached.isAllowed({ principal, action: 'view', resource: docResource }),
       ),
     );
+
+    // Query planning: partial evaluation of a rich $expr policy (variables +
+    // constants + allow/deny rules) into a Cerbos-shaped filter.
+    const { createSafeExprCodec, deserializePolicy } = require('../src/index.js');
+    const codec = createSafeExprCodec({ jsep });
+    const plannable = new Kerberos(
+      [
+        deserializePolicy(
+          {
+            resourcePolicy: {
+              version: 'default',
+              resource: 'document',
+              constants: { minQty: 10 },
+              variables: { isOwner: { $expr: 'R.attr.ownerId === P.id' } },
+              rules: [
+                {
+                  actions: ['view'],
+                  effect: 'EFFECT_ALLOW',
+                  roles: ['USER'],
+                  condition: { match: { all: [{ $expr: 'V.isOwner' }, { $expr: 'R.attr.qty > C.minQty' }] } },
+                },
+                {
+                  actions: ['*'],
+                  effect: 'EFFECT_DENY',
+                  roles: ['*'],
+                  condition: { match: { $expr: "R.attr.status === 'ARCHIVED'" } },
+                },
+              ],
+            },
+          },
+          codec,
+        ),
+      ],
+      [],
+    );
+    results.push(
+      await bench('planResources — $expr policy (variables + deny rule)', () =>
+        plannable.planResources({ principal, resource: { kind: 'document' }, action: 'view' }),
+      ),
+    );
   }
 
   // ReBAC scenarios: the built-in Zanzibar-lite resolver over static tuples.
