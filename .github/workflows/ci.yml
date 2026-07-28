@@ -36,3 +36,19 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:coverage
       - run: pnpm test:types
+
+  # Node 22 only: the docs build exercises VitePress, not the package runtime,
+  # so the 18/20/22 matrix would just repeat the same work three times.
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # A broken docs build (including dead links) should fail the PR, not the deploy.
+      - run: pnpm run docs:build

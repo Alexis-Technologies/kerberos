@@ -19,9 +19,10 @@ pnpm test:coverage     # c8 coverage over src/
 pnpm lint              # oxlint src test
 pnpm format            # oxfmt src test (format:check for CI)
 pnpm bench             # ops/sec benchmark harness (bench/bench.js)
+pnpm docs:dev          # VitePress dev server for docs/ (docs:build / docs:preview too)
 ```
 
-Linting/formatting is **oxlint/oxfmt** (`.oxlintrc.json`, `.oxfmtrc.json`; the `correctness` category is intentionally off) — their native bindings require Node ≥20.19, so CI (`.github/workflows/ci.yml`) runs `lint`/`format:check` in a single job pinned to Node 22, separate from the `test` job, which runs `test:coverage` + `test:types` across the Node 18/20/22 matrix.
+Linting/formatting is **oxlint/oxfmt** (`.oxlintrc.json`, `.oxfmtrc.json`; the `correctness` category is intentionally off) — their native bindings require Node ≥20.19, so CI (`.github/workflows/ci.yml`) runs `lint`/`format:check` in a single job pinned to Node 22, separate from the `test` job, which runs `test:coverage` + `test:types` across the Node 18/20/22 matrix, and a `docs` job (Node 22) that runs `docs:build`. Lint/format deliberately target `src test scripts bench` only, so `docs/` is not covered by them.
 
 Style: 2-space indent, single quotes, semicolons, 120-char lines (see `.editorconfig`, `.oxfmtrc.json`).
 
@@ -92,7 +93,19 @@ Two layers, both SpiceDB-inspired (see the "borrow vs skip" notes in `README.md`
 
 ### Public exports
 
-The full package surface is assembled in `src/index.js` (main entry), `tests.js` (dev-only `/tests` subpath) and `relations.js` (`/relations` subpath) — check all three when adding a new export, and update `index.d.ts` / `tests.d.ts` / `relations.d.ts` in the repo root accordingly, since types are hand-maintained (not generated).
+The full package surface is assembled in `src/index.js` (main entry), `tests.js` (dev-only `/tests` subpath) and `relations.js` (`/relations` subpath) — check all three when adding a new export, and update `index.d.ts` / `tests.d.ts` / `relations.d.ts` in the repo root accordingly, since types are hand-maintained (not generated). Also update `docs/api/exports.md`, which mirrors those three tables for the docs site.
+
+### Documentation site (`docs/`)
+
+VitePress site deployed to Vercel (`vercel.json` at the repo root pins the build command and output dir); `docs/` is never published to npm — the `files` field in `package.json` is an explicit list that omits it. Structure follows the migronaut sibling repo: a single `docs/.vitepress/config.mts`, a `theme/` that only extends `DefaultTheme` with a `custom.css` of brand CSS variables (Cerbos-style amber `#FFC11E` on ink `#1B1C1E`), local MiniSearch, and `docs/public/` for `robots.txt` / `llms.txt` / logo assets.
+
+Conventions and gotchas:
+
+- Only `docs/index.md` carries frontmatter (`layout: home`); every other page starts directly with its `# H1`. Links between pages are absolute and extensionless (`/guide/scopes#…`) to match `cleanUrls: true`.
+- `README.md` deliberately keeps the full narrative (npm renders it) — the docs pages duplicate it. When you change a documented behavior, update both.
+- `ignoreDeadLinks` is intentionally off: `pnpm docs:build` failing on a dead link is the check that cross-page anchors are still valid.
+- Mermaid comes from `vitepress-plugin-mermaid`. Its transitive deps (`@braintree/sanitize-url`, `dayjs`, `debug`, `cytoscape`, `cytoscape-cose-bilkent`) are direct devDependencies **because** the plugin hardcodes them into `optimizeDeps.include` and pnpm's strict linking otherwise leaves them unresolvable in `docs:dev`. Diagram labels also need the `line-height` override at the bottom of `custom.css` — mermaid sizes nodes without knowing VitePress' global line-height, so multi-line labels get clipped without it.
+- The version in the nav dropdown (`v3.1.0`) and the `hostname` constant are hand-synced — bump the former with `package.json` at release time.
 
 ### Why the package doesn't ship a separate ESM build
 
