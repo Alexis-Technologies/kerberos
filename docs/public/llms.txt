@@ -1,0 +1,46 @@
+# Kerberos.js (@alexify/kerberos)
+
+> An embedded, zero-dependency authorization engine for Node.js and the browser. Cerbos-style RBAC + ABAC policies, a SpiceDB-inspired "Zanzibar-lite" ReBAC resolver, and Cerbos-compatible resources query plans — all in-process, with no policy server to deploy.
+
+Key facts:
+
+- npm: `@alexify/kerberos` — zero runtime dependencies, CommonJS, ships `src/` as-is (no build step).
+- Size: ~25.1 KB min+gzip for the main entry; 15.1 KB for the opt-in `/relations` subpath.
+- Runtimes: Node.js >= 18 and modern browsers (bundler required; the browser build has zero Node builtins).
+- Entry points: `@alexify/kerberos` (engine), `@alexify/kerberos/relations` (built-in ReBAC resolver), `@alexify/kerberos/tests` (declarative test DSL).
+- Public API: `isAllowed(args)`, `checkResources(args, effectAsBoolean?)`, `planResources(args)`.
+- Policy model: `resourcePolicy` / `principalPolicy` / `rolePolicy` documents, derived roles, conditions, variables, constants, outputs, scopes and policy versions.
+- Optional integrations (never dependencies): Zod / Ajv / TypeBox for validation, any `get(key)` cache for dynamic policies, `@opentelemetry/api` for traces and metrics, Pino for structured audit logs.
+- Source: https://github.com/Alexis-Technologies/kerberos
+
+## Guide
+
+- [Why Kerberos.js?](https://kerberosjs.vercel.app/guide/why): The case for in-process authorization, positioning against Cerbos and SpiceDB, and when NOT to use it.
+- [Installation](https://kerberosjs.vercel.app/guide/installation): Install commands, bundle-size table, and browser/bundler setup.
+- [Quick Start](https://kerberosjs.vercel.app/guide/getting-started): A resource policy with a derived role, checked through both `isAllowed` and `checkResources`.
+- [Policy Types](https://kerberosjs.vercel.app/guide/policy-types): ResourcePolicy, PrincipalPolicy, RolePolicy and the per-action resolution order between them.
+- [Scopes and Policy Versions](https://kerberosjs.vercel.app/guide/scopes): Hierarchical scope search chains crossed with `policyVersion`.
+- [Configuration Options](https://kerberosjs.vercel.app/guide/configuration): Every constructor option, Pino logging, and call-ID generation.
+- [Outputs](https://kerberosjs.vercel.app/guide/outputs): Emitting structured data alongside a decision.
+- [Decision metadata](https://kerberosjs.vercel.app/guide/decision-metadata): `includeMeta` — deny reasons and the full policy-resolution trace.
+- [Schema Validation](https://kerberosjs.vercel.app/guide/schema-validation): Pluggable validation via Zod, JSON Schema + Ajv, or TypeBox + Ajv.
+- [Testing](https://kerberosjs.vercel.app/guide/testing): The Cerbos-style declarative test runner on the `/tests` subpath.
+- [Caching / Storing policies](https://kerberosjs.vercel.app/guide/caching): Cache-agnostic dynamic policies and the `{ $expr }` JSON policy format.
+- [Serialization & security](https://kerberosjs.vercel.app/guide/serialization): Why the codec is an eval-free AST interpreter, and how to plug in your own.
+- [ReBAC (Relations)](https://kerberosjs.vercel.app/guide/rebac): Relation-backed derived roles and the resolver delegation contract.
+- [Built-in resolver](https://kerberosjs.vercel.app/guide/relations-resolver): The Zanzibar-lite `RelationResolver` — schema DSL, caveats, lookupSubjects/lookupResources, consistency limits.
+- [Query Plans](https://kerberosjs.vercel.app/guide/query-plans): `planResources` — turning policies into a database filter instead of over-fetching.
+- [OpenTelemetry](https://kerberosjs.vercel.app/guide/telemetry): Opt-in spans and metrics that can never affect a decision.
+- [Benchmarks](https://kerberosjs.vercel.app/guide/benchmarks): Ops/sec numbers and how to reproduce them.
+
+## API
+
+- [Kerberos class](https://kerberosjs.vercel.app/api/kerberos): Constructor, `isAllowed`, `checkResources`, `planResources`.
+- [Errors](https://kerberosjs.vercel.app/api/errors): The five typed error classes and when each is thrown.
+- [Exports](https://kerberosjs.vercel.app/api/exports): Every export of the main entry and the two subpaths.
+
+## Reference
+
+- [Plan operators](https://kerberosjs.vercel.app/reference/plan-operators): The query-plan condition vocabulary, including the `opaque` and `relation` extensions.
+- [Safe builtins](https://kerberosjs.vercel.app/reference/safe-builtins): What a `{ $expr }` string may reference.
+- [Security](https://kerberosjs.vercel.app/reference/security): Threat model, trust boundaries, and the opt-in safety layers.
