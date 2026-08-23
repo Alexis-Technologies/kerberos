@@ -256,6 +256,15 @@ class Kerberos {
   // (hang protection is the resolver's responsibility then).
   #relationsTimeoutMs = 0;
 
+  // Engine-level audit enrichment (`audit: { includeMeta: true }`): decision
+  // tracing runs for EVERY request when a logger is attached, so audit entries
+  // carry meta.resolution and the policy-miss reason regardless of the
+  // caller's per-request includeMeta response flag. The RESPONSE stays gated
+  // on the request flag — this only enriches what the audit sink sees.
+  #auditIncludeMeta = false;
+
+  #warnedObservabilityFailure = false;
+
   /** @type {{ check: Function, list?: Function } | null} */
   #relations = null;
 
@@ -288,6 +297,7 @@ class Kerberos {
     {
       logger,
       telemetry,
+      audit,
       cache,
       cacheRetry,
       cacheKeyPrefix,
@@ -302,6 +312,7 @@ class Kerberos {
     } = {
       logger: false,
       telemetry: null,
+      audit: null,
       cache: null,
       cacheRetry: null,
       cacheKeyPrefix: '',
@@ -338,6 +349,13 @@ class Kerberos {
         throw new TypeError('Invalid relationsTimeoutMs option — expected a non-negative finite number');
       }
       this.#relationsTimeoutMs = relationsTimeoutMs;
+    }
+
+    if (audit !== undefined && audit !== null) {
+      if (typeof audit !== 'object') {
+        throw new TypeError('Invalid audit option — expected an object like { includeMeta: true }');
+      }
+      this.#auditIncludeMeta = audit.includeMeta === true;
     }
 
     // ReBAC delegation seam: any object with `check` (and optionally `list`)
@@ -457,8 +475,9 @@ class Kerberos {
         { timestamp: new Date().toISOString(), event: `Cache.${result}`, key },
         `Kerberos.js cache ${result} for ${key}`,
       );
-    } catch {
+    } catch (sinkError) {
       // Audit logging must never break authorization.
+      this.#observabilityFailure(sinkError);
     }
   }
 
@@ -570,9 +589,12 @@ class Kerberos {
    * Resolves one derived-roles definition set by name: in-memory first, then
    * the cache fallback. Shared by runtime evaluation and query planning.
    */
-  async #resolveDerivedRolesSetByName(name, lookups) {
+  async #resolveDerivedRolesSetByName(name, lookups, trace) {
     const role = this.#derivedRoles.get(name);
-    if (role) return role;
+    if (role) {
+      trace?.push({ source: 'derivedRoles', name, matched: true });
+      return role;
+    }
     // Same per-call singleflight memo as policy lookups ('derivedRoles:' can
     // never collide with the 'principal'/'role'/'resource' source prefixes).
     const memoKey = `derivedRoles:${name}`;
@@ -584,14 +606,23 @@ class Kerberos {
       );
       lookups?.set(memoKey, promise);
     }
-    return promise;
+    const resolved = await promise;
+    // Imports were the one cache-backed resolution step invisible to
+    // meta.resolution: a vanished/corrupt derived-roles document silently
+    // stops rules from matching, so the outcome must be traceable.
+    trace?.push(
+      resolved
+        ? { source: 'derivedRoles', name, matched: true, origin: 'cache' }
+        : { source: 'derivedRoles', name, matched: false },
+    );
+    return resolved;
   }
 
-  async #getImportedDerivedRoles(policy, req, relationsMemo, trace, lookups) {
+  async #getImportedDerivedRoles(policy, req, relationsMemo, trace, lookups, otel) {
     const importedRoles = new Set();
     const relationCandidates = [];
     for (const name of policy.importDerivedRoles) {
-      const role = await this.#resolveDerivedRolesSetByName(name, lookups);
+      const role = await this.#resolveDerivedRolesSetByName(name, lookups, trace);
       if (!role) continue;
       const derivedRoles = role.get(req);
       if (derivedRoles) for (const derivedRole of derivedRoles) importedRoles.add(derivedRole);
@@ -600,7 +631,7 @@ class Kerberos {
 
     if (relationCandidates.length) {
       if (this.#relations) {
-        const granted = await this.#resolveRelationCandidates(relationCandidates, req, relationsMemo, trace);
+        const granted = await this.#resolveRelationCandidates(relationCandidates, req, relationsMemo, trace, otel);
         for (const name of granted) importedRoles.add(name);
       } else if (trace) {
         // Relation-backed definitions without a configured `relations`
@@ -628,7 +659,12 @@ class Kerberos {
    * resolution in the request (and across all resources of a batch), so a
    * resolver that honors it evaluates each subproblem once.
    */
-  async #resolveRelationCandidates(candidates, req, memo, trace) {
+  async #resolveRelationCandidates(candidates, req, memo, trace, otel) {
+    // Seam-level visibility: with a CUSTOM resolver, relation latency was
+    // previously unattributable from the request span — measure the whole
+    // resolution and annotate the span (built-in-resolver metrics stay inside
+    // the resolver itself to avoid double counting).
+    const startedAt = this.#telemetry.enabled ? getNow() : 0;
     // Several derived roles may point at the same relation — resolve each
     // relation once.
     const relationNames = [];
@@ -684,6 +720,13 @@ class Kerberos {
       if (firstError) throw firstError instanceof Error ? firstError : new Error(String(firstError));
     }
 
+    if (this.#telemetry.enabled) {
+      this.#telemetry.recordRelationResolution(otel, {
+        count: relationNames.length,
+        duration: getNow() - startedAt,
+      });
+    }
+
     const grantedRoles = [];
     for (const candidate of candidates) {
       const matched = granted.has(candidate.relation);
@@ -710,12 +753,31 @@ class Kerberos {
     }
   }
 
+  // Swallowed sink failures stay swallowed (the never-affect-authorization
+  // contract) but must not be INVISIBLE: count them on the telemetry channel
+  // (kerberos.observability.failures) and warn once per instance, so a
+  // permanently-broken audit logger is discoverable before someone needs the
+  // audit trail.
+  #observabilityFailure(sinkError) {
+    this.#telemetry.recordObservabilityFailure('logger');
+    if (this.#warnedObservabilityFailure) return;
+    this.#warnedObservabilityFailure = true;
+    try {
+      console.warn(
+        `Kerberos.js: the audit logger threw and was swallowed (authorization is unaffected; further warnings suppressed): ${sinkError?.message}`,
+      );
+    } catch {
+      // Even the warning is best-effort.
+    }
+  }
+
   #log(input, reqKind, callId) {
     if (!this.#logger.enabled) return;
     try {
       this.#logger.write(input, reqKind, callId);
-    } catch {
+    } catch (sinkError) {
       // Audit logging must never break authorization.
+      this.#observabilityFailure(sinkError);
     }
   }
 
@@ -735,8 +797,9 @@ class Kerberos {
         },
         `Kerberos.js ${reqKind} start!`,
       );
-    } catch {
+    } catch (sinkError) {
       // Audit logging must never break authorization.
+      this.#observabilityFailure(sinkError);
     }
   }
 
@@ -756,17 +819,20 @@ class Kerberos {
         },
         `Kerberos.js ${reqKind} error!`,
       );
-    } catch {
+    } catch (sinkError) {
       // Audit logging must never break authorization.
+      this.#observabilityFailure(sinkError);
     }
   }
 
   // Guarded plan-result audit entry — the decision-level counterpart of the
-  // per-action audit logs.
+  // per-action audit logs, so it goes out at INFO level like them: an
+  // ALWAYS_ALLOWED filter (a fail-open query) must survive a production
+  // `level: 'info'` sink, not vanish with the lifecycle debug events.
   #logPlanResult(callId, reqId, resourceKind, filter, counts, actions) {
     if (!this.#logger.enabled) return;
     try {
-      this.#logger.debug(
+      this.#logger.info(
         {
           callId,
           reqId,
@@ -781,8 +847,9 @@ class Kerberos {
         },
         'Kerberos.js PlanResources result!',
       );
-    } catch {
+    } catch (sinkError) {
       // Audit logging must never break authorization.
+      this.#observabilityFailure(sinkError);
     }
   }
 
@@ -800,8 +867,9 @@ class Kerberos {
         },
         `Kerberos.js ${reqKind} finish!`,
       );
-    } catch {
+    } catch (sinkError) {
       // Audit logging must never break authorization.
+      this.#observabilityFailure(sinkError);
     }
   }
 
@@ -1061,10 +1129,10 @@ class Kerberos {
     return closure;
   }
 
-  async #resolveDerivedRolesSets(policy, lookups) {
+  async #resolveDerivedRolesSets(policy, lookups, trace) {
     const sets = [];
     for (const name of policy.importDerivedRoles) {
-      const set = await this.#resolveDerivedRolesSetByName(name, lookups);
+      const set = await this.#resolveDerivedRolesSetByName(name, lookups, trace);
       if (set) sets.push(set);
     }
     return sets;
@@ -1081,7 +1149,7 @@ class Kerberos {
 
   async #planResourceSources(req, trace, lookups) {
     const resourcePolicy = await this.#getResourcePolicy(req, trace, lookups);
-    const derivedRolesSets = resourcePolicy ? await this.#resolveDerivedRolesSets(resourcePolicy, lookups) : [];
+    const derivedRolesSets = resourcePolicy ? await this.#resolveDerivedRolesSets(resourcePolicy, lookups, trace) : [];
     return { resourcePolicy, derivedRolesSets };
   }
 
@@ -1139,8 +1207,11 @@ class Kerberos {
    * (`'policy-miss'` — no policy produced a decision; policy-level checks add
    * `'rule-miss'` / `'condition-not-met'`).
    */
-  async #evaluatePolicySources(req, relationsMemo, lookups) {
-    const trace = req.includeMeta ? [] : null;
+  async #evaluatePolicySources(req, relationsMemo, lookups, otel) {
+    // Tracing runs for the response (includeMeta) OR for the audit sink
+    // (audit: { includeMeta: true } + an attached logger) — the response
+    // itself stays gated on the per-request flag at the call sites.
+    const trace = req.includeMeta || (this.#auditIncludeMeta && this.#logger.enabled) ? [] : null;
 
     const principalPolicy = await this.#getPrincipalPolicy(req, trace, lookups);
     const principalResult = principalPolicy ? principalPolicy.check(req) : createEmptyPolicyResult();
@@ -1173,6 +1244,7 @@ class Kerberos {
           relationsMemo,
           trace,
           lookups,
+          otel,
         );
         resourceResult = resourcePolicy.check(resourceReq, importedDerivedRoles);
       }
@@ -1245,8 +1317,9 @@ class Kerberos {
   /**
    * Shared request lifecycle for the public methods: telemetry span, start /
    * error / finish audit events, `onError` semantics and duration timing.
-   * `denyFallback(callId)` builds the method-specific fail-closed result used
-   * when `onError: 'deny'` is configured.
+   * `denyFallback(callId, otel, error)` builds the method-specific
+   * fail-closed result used when `onError: 'deny'` is configured (and may
+   * emit its own audit/decision records).
    */
   async #runRequest(reqKind, reqId, handler, denyFallback) {
     const startedAt = getNow();
@@ -1262,7 +1335,7 @@ class Kerberos {
         // Malformed arguments are programming errors and always propagate;
         // evaluation-phase errors follow the configured `onError` semantics.
         if (error instanceof KerberosValidationError) throw error;
-        if (this.#onError === 'deny') return denyFallback(callId);
+        if (this.#onError === 'deny') return denyFallback(callId, otel, error);
         throw error;
       } finally {
         const duration = getNow() - startedAt;
@@ -1280,6 +1353,10 @@ class Kerberos {
    */
   async isAllowed(args) {
     const reqKind = 'IsAllowed';
+    // Captured by the deny fallback so a fail-closed decision still produces
+    // an audit entry + decisions-counter increment (null until parsing
+    // succeeded — a pre-parse failure has nothing decision-shaped to log).
+    let auditContext = null;
 
     return this.#runRequest(
       reqKind,
@@ -1313,10 +1390,11 @@ class Kerberos {
           ),
         );
 
+        auditContext = { req, action: parsedArgs.action };
         const relationsMemo = this.#relations ? new Map() : null;
         // Single-shot call: no lookups memo — #resolvePolicy's fast path skips
         // the memo bookkeeping entirely (batching is checkResources' job).
-        const { effects, outputs, meta } = await this.#evaluatePolicySources(req, relationsMemo, null);
+        const { effects, outputs, meta } = await this.#evaluatePolicySources(req, relationsMemo, null, otel);
         const isAllowed = effects.get(parsedArgs.action) === Effect.Allow || effects.get(ALL_ACTIONS) === Effect.Allow;
 
         const input = [{ req, result: { effects, outputs, meta } }];
@@ -1325,7 +1403,19 @@ class Kerberos {
 
         return isAllowed;
       },
-      () => false,
+      (callId, otel, error) => {
+        if (auditContext) {
+          const { req, action } = auditContext;
+          const meta = {
+            actions: { [action]: { reason: 'evaluation-error', errorName: error?.name } },
+            effectiveDerivedRoles: [],
+          };
+          const input = [{ req, result: { effects: new Map([[action, Effect.Deny]]), outputs: new Map(), meta } }];
+          this.#log(input, reqKind, callId);
+          this.#telemetry.recordDecisions(otel, input, reqKind);
+        }
+        return false;
+      },
     );
   }
 
@@ -1394,7 +1484,7 @@ class Kerberos {
         // take #resolvePolicy's memo-less fast path.
         const lookups = this.#cache.enabled ? new Map() : null;
         const promises = [];
-        for (const req of reqs) promises.push(this.#evaluatePolicySources(req, relationsMemo, lookups));
+        for (const req of reqs) promises.push(this.#evaluatePolicySources(req, relationsMemo, lookups, otel));
         const settled = await Promise.allSettled(promises);
 
         const results = [];
@@ -1408,27 +1498,32 @@ class Kerberos {
             this.#logMethodError(reqKind, callId, parsedArgs.reqId, error);
             this.#telemetry.recordError(otel, error);
 
+            // Error-shaped denials must be distinguishable from policy
+            // denials: every action carries the 'evaluation-error' reason
+            // (mirroring the 'policy-miss' convention) so an outage never
+            // masquerades as a policy DENY. The marker reaches the RESPONSE
+            // only under includeMeta, but ALWAYS reaches the audit log and
+            // the kerberos.decisions counter — fail-closed decisions must not
+            // vanish from the decision stream exactly when the system is
+            // misbehaving. Note `onError` applies at REQUEST level only —
+            // per-resource evaluation errors always fail-close here.
             const deniedActions = {};
-            for (const action of req.actions) deniedActions[action] = effectAsBoolean ? false : Effect.Deny;
+            const deniedEffects = new Map();
+            const actionsMeta = {};
+            for (const action of req.actions) {
+              deniedActions[action] = effectAsBoolean ? false : Effect.Deny;
+              deniedEffects.set(action, Effect.Deny);
+              actionsMeta[action] = { reason: 'evaluation-error', errorName: error?.name };
+            }
+            const errorMeta = { actions: actionsMeta, effectiveDerivedRoles: [] };
             const failedResult = {
               resource: this.#buildResponseResource(resource),
               actions: deniedActions,
               outputs: [],
             };
-            // Error-shaped denials must be distinguishable from policy
-            // denials: with includeMeta, mark every action with the
-            // 'evaluation-error' reason (mirroring the 'policy-miss'
-            // convention) so an outage never masquerades as a policy DENY.
-            // Note `onError` applies at REQUEST level only — per-resource
-            // evaluation errors inside a batch always fail-close here.
-            if (req.includeMeta) {
-              const actionsMeta = {};
-              for (const action of req.actions) {
-                actionsMeta[action] = { reason: 'evaluation-error', errorName: error?.name };
-              }
-              failedResult.meta = { actions: actionsMeta, effectiveDerivedRoles: [] };
-            }
+            if (req.includeMeta) failedResult.meta = errorMeta;
             results.push(failedResult);
+            inputForLog.push({ req, result: { effects: deniedEffects, outputs: new Map(), meta: errorMeta } });
             continue;
           }
 

@@ -387,4 +387,182 @@ describe('Kerberos logger support', () => {
       });
     });
   });
+
+  describe('audit completeness (wave-2)', () => {
+    // Plain structured capture logger: info/debug/error only (no .log/.table),
+    // so createLoggerWriter routes it to the structured writer.
+    function createCaptureLogger() {
+      const info = [];
+      const debug = [];
+      const errors = [];
+      return {
+        info: (entry, msg) => info.push({ ...entry, msg }),
+        debug: (entry, msg) => debug.push({ ...entry, msg }),
+        error: (entry, msg) => errors.push({ ...entry, msg }),
+        captured: { info, debug, errors },
+      };
+    }
+
+    const throwingPolicy = {
+      resourcePolicy: {
+        version: 'default',
+        resource: 'broken',
+        rules: [
+          {
+            actions: ['view'],
+            effect: Effect.Allow,
+            roles: ['USER'],
+            condition: {
+              match: () => {
+                throw new Error('boom');
+              },
+            },
+          },
+        ],
+      },
+    };
+
+    it('records principal roles in every audit entry', async () => {
+      const logger = createCaptureLogger();
+      const kerberos = createKerberosWithLogger(logger);
+
+      await kerberos.isAllowed({
+        principal: principalsPolicy.sally,
+        action: 'view',
+        resource: resourcesPolicy.expense1,
+      });
+
+      const decision = logger.captured.info.find((entry) => entry.action === 'view');
+      assert.deepEqual(decision.principalRoles, ['USER']);
+    });
+
+    it('audit-logs fail-closed batch denials with the evaluation-error reason', async () => {
+      const logger = createCaptureLogger();
+      const kerberos = new Kerberos([expensePolicy, throwingPolicy], [commonRolesPolicy], { logger });
+
+      const response = await kerberos.checkResources({
+        principal: principalsPolicy.sally,
+        resources: [
+          { resource: { id: 'b1', kind: 'broken' }, actions: ['view'] },
+          { resource: resourcesPolicy.expense1, actions: ['view'] },
+        ],
+      });
+
+      // Response fail-closes without meta (no includeMeta requested)...
+      assert.equal(response.results[0].actions.view, Effect.Deny);
+      assert.equal(response.results[0].meta, undefined);
+
+      // ...but the decision reaches the audit stream, marked as error-shaped.
+      const failed = logger.captured.info.find((entry) => entry.resourceId === 'b1');
+      assert.equal(failed.effect, Effect.Deny);
+      assert.equal(failed.meta.actions.view.reason, 'evaluation-error');
+      assert.equal(failed.meta.actions.view.errorName, 'Error');
+      // The healthy resource still logs normally.
+      assert.ok(logger.captured.info.some((entry) => entry.resourceId === resourcesPolicy.expense1.id));
+    });
+
+    it("audit-logs the onError:'deny' fallback decision of isAllowed", async () => {
+      const logger = createCaptureLogger();
+      const deadCache = {
+        async get() {
+          throw new Error('ECONNRESET');
+        },
+      };
+      const kerberos = new Kerberos([], [], {
+        logger,
+        cache: deadCache,
+        cacheRetry: { attempts: 1 },
+        onError: 'deny',
+      });
+
+      const allowed = await kerberos.isAllowed({
+        principal: principalsPolicy.sally,
+        action: 'view',
+        resource: resourcesPolicy.expense1,
+      });
+
+      assert.equal(allowed, false);
+      const decision = logger.captured.info.find((entry) => entry.action === 'view');
+      assert.equal(decision.effect, Effect.Deny);
+      assert.equal(decision.meta.actions.view.reason, 'evaluation-error');
+      assert.equal(decision.meta.actions.view.errorName, 'KerberosCacheError');
+    });
+
+    it('audit: { includeMeta: true } enriches audit entries without changing the response', async () => {
+      const logger = createCaptureLogger();
+      const kerberos = createKerberosWithLogger(logger, { audit: { includeMeta: true } });
+
+      const response = await kerberos.checkResources({
+        principal: principalsPolicy.sally,
+        resources: [{ resource: resourcesPolicy.expense1, actions: ['view'] }],
+      });
+
+      // Response: no meta (the request did not ask for it).
+      assert.equal(response.results[0].meta, undefined);
+      // Audit entry: full resolution trace, forced by the engine-level option.
+      const decision = logger.captured.info.find((entry) => entry.action === 'view');
+      assert.ok(Array.isArray(decision.meta.resolution));
+      assert.ok(decision.meta.resolution.some((entry) => entry.source === 'resource'));
+    });
+
+    it('rejects an invalid audit option at construction', () => {
+      assert.throws(() => new Kerberos([expensePolicy], [commonRolesPolicy], { audit: 'yes' }), TypeError);
+    });
+
+    it('emits the PlanResources result at info level, lifecycle events at debug', async () => {
+      const logger = createCaptureLogger();
+      const kerberos = createKerberosWithLogger(logger);
+
+      await kerberos.planResources({
+        principal: principalsPolicy.sally,
+        resource: { kind: 'expense' },
+        action: 'view',
+      });
+
+      // The plan result is a decision-level entry: it must survive a
+      // production `level: 'info'` sink (README's "never goes unnoticed").
+      const planResult = logger.captured.info.find((entry) => entry.event === 'PlanResources.result');
+      assert.ok(planResult);
+      assert.ok(typeof planResult.filterKind === 'string');
+      // Lifecycle start/finish stay at debug.
+      assert.ok(logger.captured.debug.some((entry) => entry.event === 'PlanResources.start'));
+      assert.ok(logger.captured.debug.some((entry) => entry.event === 'PlanResources.finish'));
+      assert.ok(!logger.captured.debug.some((entry) => entry.event === 'PlanResources.result'));
+    });
+
+    it('warns once (and only once) when the audit logger keeps throwing', async () => {
+      const warnings = [];
+      const throwingLogger = {
+        info() {
+          throw new Error('sink down');
+        },
+        debug() {
+          throw new Error('sink down');
+        },
+        error() {
+          throw new Error('sink down');
+        },
+      };
+
+      await withPatchedConsole({ warn: (message) => warnings.push(message) }, async () => {
+        const kerberos = createKerberosWithLogger(throwingLogger);
+        assert.equal(
+          await kerberos.isAllowed({
+            principal: principalsPolicy.sally,
+            action: 'view',
+            resource: resourcesPolicy.expense1,
+          }),
+          true,
+        );
+        await kerberos.isAllowed({
+          principal: principalsPolicy.sally,
+          action: 'view',
+          resource: resourcesPolicy.expense1,
+        });
+      });
+
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /audit logger threw/);
+    });
+  });
 });

@@ -438,3 +438,104 @@ describe('Telemetry writer-level contract', () => {
     assert.ok(results.has('miss'));
   });
 });
+
+describe('Telemetry wave-2 observability', () => {
+  it('counts swallowed logger failures on kerberos.observability.failures', async () => {
+    const { exporter, reader, meter } = createMetricSetup();
+    const throwingLogger = {
+      info() {
+        throw new Error('sink down');
+      },
+      debug() {
+        throw new Error('sink down');
+      },
+      error() {
+        throw new Error('sink down');
+      },
+    };
+
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const kerberos = new Kerberos(policies, [], { logger: throwingLogger, telemetry: { meter } });
+      assert.equal(await kerberos.isAllowed({ principal, action: 'view', resource }), true);
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    const metrics = await collectMetrics(reader, exporter);
+    const points = metrics['kerberos.observability.failures'].dataPoints;
+    assert.ok(points.length > 0);
+    for (const point of points) {
+      assert.equal(point.attributes['kerberos.observability.sink'], 'logger');
+      assert.ok(point.value >= 1);
+    }
+  });
+
+  it('counts fail-closed batch denials on kerberos.decisions', async () => {
+    const { exporter, reader, meter } = createMetricSetup();
+    const throwingPolicy = {
+      resourcePolicy: {
+        version: 'default',
+        resource: 'broken',
+        rules: [
+          {
+            actions: ['view'],
+            effect: Effect.Allow,
+            roles: ['USER'],
+            condition: {
+              match: () => {
+                throw new Error('boom');
+              },
+            },
+          },
+        ],
+      },
+    };
+    const kerberos = new Kerberos([throwingPolicy], [], { telemetry: { meter } });
+
+    const response = await kerberos.checkResources({
+      principal,
+      resources: [{ resource: { id: 'b1', kind: 'broken' }, actions: ['view'] }],
+    });
+    assert.equal(response.results[0].actions.view, Effect.Deny);
+
+    const metrics = await collectMetrics(reader, exporter);
+    const denyPoint = metrics['kerberos.decisions'].dataPoints.find(
+      (point) => point.attributes['kerberos.effect'] === 'EFFECT_DENY',
+    );
+    // The error-shaped DENY is counted, not silently dropped from the stream.
+    assert.ok(denyPoint);
+    assert.ok(denyPoint.value >= 1);
+  });
+
+  it('annotates the request span with seam-level relation resolution (custom resolver)', async () => {
+    const { exporter, tracer } = createTraceSetup();
+    const relationPolicies = [
+      {
+        resourcePolicy: {
+          version: 'default',
+          resource: 'document',
+          importDerivedRoles: ['doc_roles'],
+          rules: [{ actions: ['view'], effect: Effect.Allow, derivedRoles: ['VIEWER'] }],
+        },
+      },
+    ];
+    const derivedRoles = [{ name: 'doc_roles', definitions: [{ name: 'VIEWER', relation: 'viewer' }] }];
+    // A custom resolver with zero instrumentation of its own.
+    const kerberos = new Kerberos(relationPolicies, derivedRoles, {
+      relations: { check: async () => true },
+      telemetry: { tracer },
+    });
+
+    assert.equal(
+      await kerberos.isAllowed({ principal, action: 'view', resource: { id: 'd1', kind: 'document' } }),
+      true,
+    );
+
+    const spans = exporter.getFinishedSpans();
+    const requestSpan = spans.find((span) => span.name === 'Kerberos.isAllowed');
+    assert.equal(requestSpan.attributes['kerberos.relations.count'], 1);
+    assert.ok(typeof requestSpan.attributes['kerberos.relations.duration_ms'] === 'number');
+  });
+});

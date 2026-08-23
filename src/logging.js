@@ -1,4 +1,5 @@
 const LEGACY_EXCLUDED_FOR_TABLE = new Set([
+  'principalRoles',
   'principalScope',
   'principalPolicyVersion',
   'resourceScope',
@@ -56,6 +57,9 @@ function buildAuditEntries(input, reqKind, callId) {
         timestamp: new Date().toISOString(),
         reqKind,
         principalId: req.P.id,
+        // The role layer decides outcomes, and roles change over time — an
+        // audit entry must record the set the decision was based on.
+        principalRoles: req.P.roles,
         principalScope: req.P.scope,
         principalPolicyVersion: req.P.policyVersion,
         resourceKind: req.R.kind,
@@ -125,6 +129,7 @@ function createDisabledLoggerWriter() {
   return {
     enabled: false,
     write() {},
+    info() {},
     debug() {},
     error() {},
   };
@@ -149,6 +154,15 @@ function createLegacyLoggerWriter(logger) {
       }
 
       logger.groupEnd?.();
+    },
+    // Decision-level entries that must not be filtered out at production log
+    // levels (unlike lifecycle `debug` events) — e.g. PlanResources results.
+    info(entry, message) {
+      if (hasMethod(logger, 'info')) {
+        logger.info(entry, message);
+        return;
+      }
+      logger.log?.(message, entry);
     },
     debug(entry, message) {
       logger.debug?.(entry, message);
@@ -178,6 +192,11 @@ function createStructuredLoggerWriter(logger) {
       for (const auditEntry of auditEntries) {
         writeMethod(auditEntry, buildStructuredMessage(auditEntry));
       }
+    },
+    // Same level as decision audit entries (`write`) — plan results are
+    // decisions, not lifecycle noise, so they survive a `level: 'info'` sink.
+    info(entry, message) {
+      writeMethod(entry, message);
     },
     debug(entry, message) {
       debugMethod(entry, message);

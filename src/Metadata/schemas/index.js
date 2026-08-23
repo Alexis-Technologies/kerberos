@@ -44,6 +44,12 @@ class MetadataZodSchemas extends ZodSchemas {
         matched: z.boolean(),
         reason: z.literal('no-relations-resolver').optional(),
       }),
+      z.object({
+        source: z.literal('derivedRoles'),
+        name: z.string(),
+        matched: z.boolean(),
+        origin: z.literal('cache').optional(),
+      }),
     ]);
   }
 
@@ -103,6 +109,15 @@ class MetadataJsonSchemas extends JsonSchemas {
           },
           ['source', 'name', 'relation', 'matched'],
         ),
+        JsonSchemas.buildObjectShape(
+          {
+            source: { type: 'string', enum: ['derivedRoles'] },
+            name: { type: 'string' },
+            matched: { type: 'boolean' },
+            origin: { type: 'string', enum: ['cache'] },
+          },
+          ['source', 'name', 'matched'],
+        ),
       ],
     };
   }
@@ -159,6 +174,12 @@ class MetadataTypeBoxSchemas extends TypeBoxSchemas {
         relation: t.String(),
         matched: t.Boolean(),
         reason: t.Optional(t.Literal('no-relations-resolver')),
+      }),
+      t.Object({
+        source: t.Literal('derivedRoles'),
+        name: t.String(),
+        matched: t.Boolean(),
+        origin: t.Optional(t.Literal('cache')),
       }),
     ]);
   }

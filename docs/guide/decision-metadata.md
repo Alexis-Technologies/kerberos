@@ -83,4 +83,4 @@ Per action, `meta.actions[action]` includes:
 At the result level:
 
 - **effectiveDerivedRoles**: derived roles that activated for this resource
-- **resolution** (decision trace): every policy lookup that was attempted — `{ source, id, version, scopesSearched, matchedScope, origin? }` entries (with `origin: 'cache'` for cache-resolved policies) plus `{ source: 'relations', name, relation, matched, reason? }` entries for [relation-backed derived roles](/guide/rebac). The same trace appears in [`planResources` meta](/guide/query-plans).
+- **resolution** (decision trace): every policy lookup that was attempted — `{ source, id, version, scopesSearched, matchedScope, origin? }` entries (with `origin: 'cache'` for cache-resolved policies), `{ source: 'derivedRoles', name, matched, origin? }` entries for every imported derived-roles set (`matched: false` = the import resolved nowhere — e.g. an evicted or corrupt cache document silently stopping rules from matching), plus `{ source: 'relations', name, relation, matched, reason? }` entries for [relation-backed derived roles](/guide/rebac). The same trace appears in [`planResources` meta](/guide/query-plans).

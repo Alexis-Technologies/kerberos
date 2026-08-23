@@ -766,6 +766,7 @@ describe('Kerberos', () => {
               { source: 'principal', id: 'sally', version: 'default', scopesSearched: [''], matchedScope: '' },
               { source: 'role', id: 'USER', version: 'default', scopesSearched: [''], matchedScope: null },
               { source: 'resource', id: 'expense', version: 'default', scopesSearched: [''], matchedScope: '' },
+              { source: 'derivedRoles', name: 'common_roles', matched: true },
             ],
           },
         },

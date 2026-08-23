@@ -439,6 +439,17 @@ export type KerberosRelationsTraceEntry = {
   reason?: 'no-relations-resolver';
 };
 
+/** Derived-roles import record in the decision trace (`meta.resolution`). */
+export type KerberosDerivedRolesTraceEntry = {
+  source: 'derivedRoles';
+  /** Imported derived-roles definition set name. */
+  name: string;
+  /** False when the import resolved nowhere (in memory or cache). */
+  matched: boolean;
+  /** Present when the set was resolved from the cache instead of memory. */
+  origin?: 'cache';
+};
+
 /** One policy-lookup record in the decision trace (`meta.resolution`). */
 export type KerberosResolutionTraceEntry =
   | {
@@ -451,7 +462,8 @@ export type KerberosResolutionTraceEntry =
       /** Present when the policy was resolved from the cache instead of memory. */
       origin?: 'cache';
     }
-  | KerberosRelationsTraceEntry;
+  | KerberosRelationsTraceEntry
+  | KerberosDerivedRolesTraceEntry;
 export type KerberosMethodLogEntry = {
   event: string;
   reqKind: string;
@@ -695,6 +707,14 @@ export type KerberosOptions = ValidationOptions & {
   relations?: KerberosRelationsResolver | null;
   /** Optional bound on each `relations.check`/`relations.list` call; a hung resolver fails as `KerberosRelationsError` instead of hanging authorization. Off by default. */
   relationsTimeoutMs?: number;
+  /**
+   * Engine-level audit enrichment. `{ includeMeta: true }` runs decision
+   * tracing for every request when a logger is attached, so audit entries
+   * carry `meta.resolution` and the `policy-miss` reason regardless of the
+   * caller's per-request `includeMeta` flag (the response stays gated on the
+   * request flag).
+   */
+  audit?: { includeMeta?: boolean } | null;
   /**
    * Evaluation-phase error handling. `'throw'` (default) propagates errors to
    * the caller; `'deny'` converts them to fail-closed results (`isAllowed` →

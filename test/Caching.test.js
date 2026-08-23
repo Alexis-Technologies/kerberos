@@ -147,6 +147,10 @@ describe('Caching / Storing policies', () => {
         const resourceEntry = result.meta.resolution.find((entry) => entry.source === 'resource');
         assert.equal(resourceEntry.matchedScope, '');
         assert.equal(resourceEntry.origin, 'cache');
+        // Derived-roles imports are traced too — previously the one
+        // cache-backed resolution step invisible to meta.resolution.
+        const derivedEntry = result.meta.resolution.find((entry) => entry.source === 'derivedRoles');
+        assert.deepEqual(derivedEntry, { source: 'derivedRoles', name: 'doc_roles', matched: true, origin: 'cache' });
       }
     });
   });
