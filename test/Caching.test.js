@@ -120,6 +120,80 @@ describe('Caching / Storing policies', () => {
       assert.deepStrictEqual(output.val, { owner: 'u1', by: 'u1' });
     });
 
+    it('reuses built policy instances across requests while the cached document is unchanged', async () => {
+      // Stable-reference backend (plain Map): the same raw object must be
+      // deserialized + constructed exactly once across requests.
+      let deserializeCalls = 0;
+      const store = new Map([
+        [
+          'resource:report:default:',
+          {
+            resourcePolicy: {
+              version: 'default',
+              resource: 'report',
+              rules: [{ actions: ['view'], effect: Effect.Allow, roles: ['USER'] }],
+            },
+          },
+        ],
+      ]);
+      const countingCodec = {
+        deserialize(value) {
+          deserializeCalls += 1;
+          return value;
+        },
+      };
+      const kerberos = new Kerberos([], [], { cache: store, codec: countingCodec });
+      const request = { principal: owner, action: 'view', resource: { id: 'r1', kind: 'report' } };
+
+      assert.strictEqual(await kerberos.isAllowed(request), true);
+      assert.strictEqual(await kerberos.isAllowed(request), true);
+      assert.strictEqual(await kerberos.isAllowed(request), true);
+      assert.strictEqual(deserializeCalls, 1);
+
+      // Backend invalidation is inherited: a REPLACED document (new object
+      // reference) rebuilds and the new rules apply immediately.
+      store.set('resource:report:default:', {
+        resourcePolicy: {
+          version: 'default',
+          resource: 'report',
+          rules: [{ actions: ['view'], effect: Effect.Deny, roles: ['USER'] }],
+        },
+      });
+      assert.strictEqual(await kerberos.isAllowed(request), false);
+      assert.strictEqual(deserializeCalls, 2);
+    });
+
+    it('memoizes string-valued cache entries by raw-string equality', async () => {
+      let builds = 0;
+      const doc = JSON.stringify({
+        resourcePolicy: {
+          version: 'default',
+          resource: 'report',
+          rules: [{ actions: ['view'], effect: Effect.Allow, roles: ['USER'] }],
+        },
+      });
+      // Returns a fresh string VALUE each get (same content) — the bounded
+      // string memo must still skip the rebuild.
+      const stringCache = {
+        async get(key) {
+          if (key !== 'resource:report:default:') return undefined;
+          return `${doc}`;
+        },
+      };
+      const countingCodec = {
+        deserialize(value) {
+          builds += 1;
+          return JSON.parse(value);
+        },
+      };
+      const kerberos = new Kerberos([], [], { cache: stringCache, codec: countingCodec });
+      const request = { principal: owner, action: 'view', resource: { id: 'r1', kind: 'report' } };
+
+      assert.strictEqual(await kerberos.isAllowed(request), true);
+      assert.strictEqual(await kerberos.isAllowed(request), true);
+      assert.strictEqual(builds, 1);
+    });
+
     it('resolves each distinct policy once per checkResources batch (singleflight memo)', async () => {
       const reads = [];
       const backing = await buildCache();

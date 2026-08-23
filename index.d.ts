@@ -716,6 +716,12 @@ export type KerberosOptions = ValidationOptions & {
    */
   audit?: { includeMeta?: boolean } | null;
   /**
+   * Caps how many resources of a `checkResources` batch evaluate
+   * concurrently (each chain issues its own cache reads). Unbounded by
+   * default — the historical behavior.
+   */
+  maxConcurrency?: number;
+  /**
    * Evaluation-phase error handling. `'throw'` (default) propagates errors to
    * the caller; `'deny'` converts them to fail-closed results (`isAllowed` →
    * false, `checkResources` → empty results). Malformed arguments always throw

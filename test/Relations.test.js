@@ -1059,6 +1059,16 @@ describe('RelationResolver', () => {
       assert.throws(() => buildResolver({ onTruncated: 'maybe' }), KerberosRelationsError);
     });
 
+    it('maxConcurrency bounds candidate verification without changing results', async () => {
+      const unbounded = buildResolver({});
+      const limited = buildResolver({ maxConcurrency: 1 });
+      assert.deepEqual(
+        await limited.lookupResources({ subject: 'user:sara', permission: 'view', resourceType: 'document' }),
+        await unbounded.lookupResources({ subject: 'user:sara', permission: 'view', resourceType: 'document' }),
+      );
+      assert.throws(() => buildResolver({ maxConcurrency: 0 }), KerberosRelationsError);
+    });
+
     it('requires the reverse-index contract when a cache is configured', async () => {
       const cached = buildResolver({ cache: { async get() {} } });
       await assert.rejects(

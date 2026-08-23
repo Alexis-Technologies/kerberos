@@ -8,6 +8,7 @@ const {
 const { RelationsJsonSchemas, RelationsTypeBoxSchemas, RelationsZodSchemas } = require('./schemas/index.js');
 
 const { createCacheReader } = require('../caching/cache.js');
+const { createLimiter, settleAll } = require('../async.js');
 const { createLoggerWriter } = require('../logging.js');
 const { createTelemetryWriter } = require('../telemetry.js');
 const { KerberosCodecError, KerberosRelationsError } = require('../errors.js');
@@ -89,27 +90,6 @@ function parseReverseEntry(raw) {
     return { resource: parseObjectRef(raw.resource, 'resource'), relation: raw.relation, caveat };
   }
   throw new KerberosRelationsError('Invalid reverse entry — expected "type:id#relation" or { resource, relation }');
-}
-
-/**
- * allSettled with the engine's error rule: every sibling settles (no
- * unawaited rejection — memoized promises stay handled), then the FIRST
- * rejection reason is rethrown; otherwise the fulfilled values are returned
- * in input order.
- */
-async function settleAll(promises) {
-  const settled = await Promise.allSettled(promises);
-  const values = new Array(settled.length);
-  let firstError = null;
-  for (let i = 0; i < settled.length; i++) {
-    if (settled[i].status === 'rejected') {
-      if (!firstError) firstError = settled[i].reason;
-      continue;
-    }
-    values[i] = settled[i].value;
-  }
-  if (firstError) throw firstError instanceof Error ? firstError : new Error(String(firstError));
-  return values;
 }
 
 // ---------------------------------------------------------------------------
@@ -340,11 +320,18 @@ class RelationResolver {
       reverseIndex = false,
       maxDepth,
       maxResults,
+      maxConcurrency,
       onTruncated,
       z,
       ajv,
       typebox,
     } = options;
+
+    if (maxConcurrency !== undefined && maxConcurrency !== null) {
+      if (typeof maxConcurrency !== 'number' || Number.isNaN(maxConcurrency) || maxConcurrency < 1) {
+        throw new KerberosRelationsError('Invalid maxConcurrency option — expected a number >= 1');
+      }
+    }
 
     if (onTruncated !== undefined && onTruncated !== null && onTruncated !== 'ignore' && onTruncated !== 'throw') {
       throw new KerberosRelationsError(`Invalid onTruncated option "${onTruncated}" — expected 'ignore' or 'throw'`);
@@ -360,6 +347,10 @@ class RelationResolver {
       // failure beats missing authorized rows. Default 'ignore' preserves the
       // historical cap-and-return behavior.
       onTruncated: onTruncated ?? 'ignore',
+      // Bounds the candidate-verification fan-out of lookupResources (the one
+      // wave that scales with tuple volume, not schema size). Infinity =
+      // historical unbounded behavior.
+      maxConcurrency: Number.isFinite(maxConcurrency) ? maxConcurrency : Infinity,
     };
     this.#reader = createCacheReader(cache, cacheRetry);
     this.#log = createLoggerWriter(logger);
@@ -1445,11 +1436,19 @@ class RelationResolver {
     // the promise memo).
     let ids = candidates;
     if (analysis.needsCheck || closure.caveated) {
+      // Candidate verification is the wave that scales with tuple volume (one
+      // check chain per candidate) — the opt-in maxConcurrency limiter applies
+      // here so a 100k-candidate lookup cannot launch 100k chains at once.
+      const limit = Number.isFinite(this.#limits.maxConcurrency) ? createLimiter(this.#limits.maxConcurrency) : null;
       const candidateList = [];
       const checks = [];
       for (const id of candidates) {
         candidateList.push(id);
-        checks.push(this.#checkInternal({ type, id }, name, subject, session, depth - 1));
+        checks.push(
+          limit
+            ? limit(() => this.#checkInternal({ type, id }, name, subject, session, depth - 1))
+            : this.#checkInternal({ type, id }, name, subject, session, depth - 1),
+        );
       }
       const outcomes = await settleAll(checks);
       ids = new Set();

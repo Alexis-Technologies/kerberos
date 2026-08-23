@@ -8,7 +8,7 @@ const { createLoggerWriter } = require('./logging.js');
 const { createTelemetryWriter } = require('./telemetry.js');
 const { createCacheReader } = require('./caching/cache.js');
 const { KerberosCodecError, KerberosRelationsError, KerberosValidationError } = require('./errors.js');
-const { withTimeout } = require('./async.js');
+const { createLimiter, settleAll, withTimeout } = require('./async.js');
 const { createSafeExprCodec } = require('./caching/codec.js');
 const { PlanKind, countLeaves, toDebugString, toFilter } = require('./planning/nodes.js');
 const { buildResourcePlan } = require('./planning/planner.js');
@@ -229,8 +229,6 @@ class Kerberos {
 
   #derivedRolesValidator = null;
 
-  #requestValidator = null;
-
   #isAllowedArgsValidator = null;
 
   #checkResourcesArgsValidator = null;
@@ -264,6 +262,26 @@ class Kerberos {
   #auditIncludeMeta = false;
 
   #warnedObservabilityFailure = false;
+
+  // Bounds the checkResources batch fan-out (one evaluation chain per
+  // resource otherwise launches simultaneously). Infinity = historical
+  // unbounded behavior.
+  #maxConcurrency = Infinity;
+
+  // Cross-request memo of built policy instances, keyed by the IDENTITY of the
+  // raw cached value: backends with an in-memory layer (plain Map, cacheable's
+  // L1) return a stable object reference until the document is replaced, so an
+  // unchanged document skips deserialize+validate+construct entirely while
+  // TTL/invalidation stays fully backend-owned (a new stored value is a new
+  // reference, which naturally misses). Serializing backends (keyv's JSON
+  // round-trip) return fresh objects per read and simply keep rebuilding.
+  #builtFromCache = new WeakMap();
+
+  // String-valued entries can't go in a WeakMap — bounded per-key memo
+  // comparing the raw string instead.
+  #builtFromCacheStrings = new Map();
+
+  static #MAX_MEMOIZED_STRING_DOCS = 256;
 
   /** @type {{ check: Function, list?: Function } | null} */
   #relations = null;
@@ -305,6 +323,7 @@ class Kerberos {
       onError,
       relations,
       relationsTimeoutMs,
+      maxConcurrency,
       z,
       ajv,
       typebox,
@@ -320,6 +339,7 @@ class Kerberos {
       onError: 'throw',
       relations: null,
       relationsTimeoutMs: 0,
+      maxConcurrency: null,
       z: null,
       ajv: null,
       typebox: null,
@@ -358,6 +378,13 @@ class Kerberos {
       this.#auditIncludeMeta = audit.includeMeta === true;
     }
 
+    if (maxConcurrency !== undefined && maxConcurrency !== null) {
+      if (typeof maxConcurrency !== 'number' || Number.isNaN(maxConcurrency) || maxConcurrency < 1) {
+        throw new TypeError('Invalid maxConcurrency option — expected a number >= 1');
+      }
+      this.#maxConcurrency = maxConcurrency;
+    }
+
     // ReBAC delegation seam: any object with `check` (and optionally `list`)
     // works — a SQL/ORM-backed resolver or the built-in Zanzibar-lite one from
     // `@alexify/kerberos/relations`.
@@ -379,7 +406,6 @@ class Kerberos {
       this.#principalPolicyValidator = KerberosZodSchemas.buildPrincipalPolicyInstance(z);
       this.#rolePolicyValidator = KerberosZodSchemas.buildRolePolicyInstance(z);
       this.#derivedRolesValidator = KerberosZodSchemas.buildDerivedRolesInstance(z);
-      this.#requestValidator = ZodSchemas.buildRequest(z);
       this.#isAllowedArgsValidator = KerberosZodSchemas.buildIsAllowedArgs(z);
       this.#checkResourcesArgsValidator = KerberosZodSchemas.buildCheckResourcesArgs(z);
       this.#planResourcesArgsValidator = KerberosZodSchemas.buildPlanResourcesArgs(z);
@@ -400,7 +426,6 @@ class Kerberos {
         this.#ajv,
         KerberosTypeBoxSchemas.buildDerivedRolesInstance(this.#typebox),
       );
-      this.#requestValidator = createAjvAdapter(this.#ajv, TypeBoxSchemas.buildRequest(this.#typebox));
       this.#isAllowedArgsValidator = createAjvAdapter(
         this.#ajv,
         KerberosTypeBoxSchemas.buildIsAllowedArgs(this.#typebox),
@@ -418,7 +443,6 @@ class Kerberos {
       this.#principalPolicyValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildPrincipalPolicyInstance());
       this.#rolePolicyValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildRolePolicyInstance());
       this.#derivedRolesValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildDerivedRolesInstance());
-      this.#requestValidator = createAjvAdapter(this.#ajv, JsonSchemas.buildRequest());
       this.#isAllowedArgsValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildIsAllowedArgs());
       this.#checkResourcesArgsValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildCheckResourcesArgs());
       this.#planResourcesArgsValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildPlanResourcesArgs());
@@ -505,10 +529,39 @@ class Kerberos {
       this.#recordCacheResult(key, 'miss');
       return null;
     }
+
+    // Identity-keyed rebuild skip: the same (key, raw value) pair yields the
+    // same instance without re-running deserialize/validation/construction.
+    // Keyed per cache key too — the same raw object under a DIFFERENT key
+    // would be built with a different constructor.
+    const isObjectValue = typeof value === 'object';
+    if (isObjectValue) {
+      const memo = this.#builtFromCache.get(value);
+      if (memo && memo.key === key) {
+        this.#recordCacheResult(key, 'hit');
+        return memo.built;
+      }
+    } else if (typeof value === 'string') {
+      const memo = this.#builtFromCacheStrings.get(key);
+      if (memo && memo.raw === value) {
+        this.#recordCacheResult(key, 'hit');
+        return memo.built;
+      }
+    }
+
     try {
       const shape = this.#codecDeserialize ? this.#codecDeserialize(value) : value;
       const built = build(shape);
       this.#recordCacheResult(key, 'hit');
+      if (isObjectValue) {
+        this.#builtFromCache.set(value, { key, built });
+      } else if (typeof value === 'string') {
+        // Bounded: evict the oldest entry (Map insertion order) at capacity.
+        if (this.#builtFromCacheStrings.size >= Kerberos.#MAX_MEMOIZED_STRING_DOCS) {
+          this.#builtFromCacheStrings.delete(this.#builtFromCacheStrings.keys().next().value);
+        }
+        this.#builtFromCacheStrings.set(key, { raw: value, built });
+      }
       return built;
     } catch (error) {
       // A corrupt/malformed entry is deterministic (retrying cannot help), so
@@ -744,9 +797,10 @@ class Kerberos {
   // KerberosValidationError, which ALWAYS propagates to the caller regardless
   // of the `onError` option — a malformed request is a programming error, not
   // an authorization deny.
-  #parseValidated(label, parse) {
+  #parseArgs(validator, label, args) {
+    if (!validator) return args;
     try {
-      return parse();
+      return validator.parse(args);
     } catch (error) {
       if (error instanceof KerberosValidationError) throw error;
       throw new KerberosValidationError(`${label}: ${error.message}`, { cause: error });
@@ -1011,12 +1065,33 @@ class Kerberos {
   }
 
   async #getRolePolicies(req, trace, lookups) {
-    const policies = [];
+    const uniqueRoles = [];
     const seenRoles = new Set();
-
     for (const role of req.P.roles) {
       if (seenRoles.has(role)) continue;
       seenRoles.add(role);
+      uniqueRoles.push(role);
+    }
+
+    // Role lookups have no short-circuit (every role's policy is needed
+    // before evaluation starts), so on the cache path they resolve as one
+    // settled wave instead of sequential round trips — the same rationale as
+    // #planPolicySources' three-chain wave. Per-role trace buffers keep
+    // meta.resolution deterministic regardless of completion order. The
+    // in-memory path stays sequential (each lookup is already a sync Map hit).
+    if (this.#cache.enabled && uniqueRoles.length > 1) {
+      const traces = trace ? uniqueRoles.map(() => []) : null;
+      const resolved = await settleAll(
+        uniqueRoles.map((role, i) => this.#getRolePolicyByName(role, req, traces ? traces[i] : null, lookups)),
+      );
+      if (traces) for (const buffer of traces) for (const entry of buffer) trace.push(entry);
+      const policies = [];
+      for (const policy of resolved) if (policy) policies.push(policy);
+      return policies;
+    }
+
+    const policies = [];
+    for (const role of uniqueRoles) {
       const policy = await this.#getRolePolicyByName(role, req, trace, lookups);
       if (policy) policies.push(policy);
     }
@@ -1045,22 +1120,50 @@ class Kerberos {
       if (!parentPolicy) continue;
 
       const parentResult = await this.#evaluateRolePolicy(parentPolicy, req, memo, stack, actionsKey, lookups);
-      for (const [src, output] of parentResult.outputs.entries()) result.outputs.set(src, output);
-
-      for (const action of req.actions) {
-        if (!result.effects.has(action)) continue;
-        if (result.effects.get(action) === Effect.Deny) continue;
-
-        if (!parentResult.effects.has(action) || parentResult.effects.get(action) !== Effect.Allow) {
-          result.effects.set(action, Effect.Deny);
-          if (parentResult.meta.actions[action]) result.meta.actions[action] = parentResult.meta.actions[action];
-        }
-      }
+      Kerberos.#applyParentRoleResult(result, parentResult, req);
     }
 
     stack.delete(policyKey);
     memo.set(policyKey, result);
     return result;
+  }
+
+  // parentRoles inheritance: a child's allowed action survives only when
+  // every locally-defined parent also allows it. Shared by the async and sync
+  // role evaluators so the semantics live in exactly one place.
+  static #applyParentRoleResult(result, parentResult, req) {
+    for (const [src, output] of parentResult.outputs.entries()) result.outputs.set(src, output);
+
+    for (const action of req.actions) {
+      if (!result.effects.has(action)) continue;
+      if (result.effects.get(action) === Effect.Deny) continue;
+
+      if (!parentResult.effects.has(action) || parentResult.effects.get(action) !== Effect.Allow) {
+        result.effects.set(action, Effect.Deny);
+        if (parentResult.meta.actions[action]) result.meta.actions[action] = parentResult.meta.actions[action];
+      }
+    }
+  }
+
+  // Deny-wins merge of one role policy's result into the accumulated role
+  // layer. Shared by the async and sync role evaluators.
+  static #mergeRoleResultInto(effects, outputs, actionsMeta, result, req) {
+    for (const [src, output] of result.outputs.entries()) outputs.set(src, output);
+
+    for (const action of req.actions) {
+      if (!result.effects.has(action)) continue;
+
+      if (result.effects.get(action) === Effect.Deny) {
+        effects.set(action, Effect.Deny);
+        if (result.meta.actions[action]) actionsMeta[action] = result.meta.actions[action];
+        continue;
+      }
+
+      if (!effects.has(action)) {
+        effects.set(action, Effect.Allow);
+        if (result.meta.actions[action]) actionsMeta[action] = result.meta.actions[action];
+      }
+    }
   }
 
   async #evaluateRolePolicies(req, trace, lookups) {
@@ -1075,22 +1178,7 @@ class Kerberos {
 
     for (const policy of rolePolicies) {
       const result = await this.#evaluateRolePolicy(policy, req, memo, new Set(), actionsKey, lookups);
-      for (const [src, output] of result.outputs.entries()) outputs.set(src, output);
-
-      for (const action of req.actions) {
-        if (!result.effects.has(action)) continue;
-
-        if (result.effects.get(action) === Effect.Deny) {
-          effects.set(action, Effect.Deny);
-          if (result.meta.actions[action]) actionsMeta[action] = result.meta.actions[action];
-          continue;
-        }
-
-        if (!effects.has(action)) {
-          effects.set(action, Effect.Allow);
-          if (result.meta.actions[action]) actionsMeta[action] = result.meta.actions[action];
-        }
-      }
+      Kerberos.#mergeRoleResultInto(effects, outputs, actionsMeta, result, req);
     }
 
     return {
@@ -1112,19 +1200,40 @@ class Kerberos {
    */
   async #resolveRolePolicyClosure(rolePolicies, req, lookups) {
     const closure = new Map();
-    const queue = [];
+    let frontier = [];
+    const queued = new Set();
     for (const policy of rolePolicies) {
       closure.set(policy.role, policy);
-      for (const parentRole of policy.parentRoles) queue.push(parentRole);
+      for (const parentRole of policy.parentRoles) {
+        if (!queued.has(parentRole)) {
+          queued.add(parentRole);
+          frontier.push(parentRole);
+        }
+      }
     }
-    // Cursor-based BFS (no shift); the closure map doubles as the visited set,
-    // so parentRoles cycles terminate here and are reported by the planner.
-    for (let i = 0; i < queue.length; i++) {
-      const role = queue[i];
-      if (closure.has(role)) continue;
-      const policy = await this.#getRolePolicyByName(role, req, null, lookups);
-      closure.set(role, policy ?? null);
-      if (policy) for (const parentRole of policy.parentRoles) queue.push(parentRole);
+    // Level-batched BFS (the RelationResolver #subjectClosure pattern): each
+    // frontier resolves as one settled wave, so a 50-role closure over a
+    // remote cache pays O(depth) round-trip waves instead of O(roles)
+    // sequential ones. The closure map doubles as the visited set, so
+    // parentRoles cycles terminate here and are reported by the planner.
+    while (frontier.length) {
+      const unresolved = frontier.filter((role) => !closure.has(role));
+      if (!unresolved.length) break;
+      const resolved = await settleAll(unresolved.map((role) => this.#getRolePolicyByName(role, req, null, lookups)));
+      const next = [];
+      for (let i = 0; i < unresolved.length; i++) {
+        const policy = resolved[i] ?? null;
+        closure.set(unresolved[i], policy);
+        if (policy) {
+          for (const parentRole of policy.parentRoles) {
+            if (!closure.has(parentRole) && !queued.has(parentRole)) {
+              queued.add(parentRole);
+              next.push(parentRole);
+            }
+          }
+        }
+      }
+      frontier = next;
     }
     return closure;
   }
@@ -1250,6 +1359,13 @@ class Kerberos {
       }
     }
 
+    return Kerberos.#mergeSourceResults(req, trace, principalResult, roleResult, resourceResult);
+  }
+
+  // Per-action precedence merge (principal > roles > resource > default DENY)
+  // plus the response meta/outputs assembly. Shared by the async and sync
+  // evaluation drivers so the layering semantics live in exactly one place.
+  static #mergeSourceResults(req, trace, principalResult, roleResult, resourceResult) {
     const effects = new Map();
     const actionsMeta = {};
     for (const action of req.actions) {
@@ -1292,6 +1408,186 @@ class Kerberos {
       ]),
       meta,
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Synchronous evaluation driver — used when NO cache and NO relations
+  // resolver are configured (the zero-dependency in-memory baseline): every
+  // lookup is a sync Map hit, so the interior skips promise allocation and
+  // microtask hops entirely (~10 awaited frames per request otherwise). The
+  // layering/merge semantics are NOT duplicated: both drivers share
+  // #applyParentRoleResult / #mergeRoleResultInto / #mergeSourceResults, and
+  // test/SyncAsyncParity.test.js pins driver equivalence end-to-end.
+  // -------------------------------------------------------------------------
+
+  #resolvePolicyFromMemory(source, map, id, version, scope, trace) {
+    const scopeSearchChain = this.#getScopeChain(scope);
+
+    for (const searchScope of scopeSearchChain) {
+      const policy = map.get(`${id}.${version}.${searchScope}`);
+      if (policy) {
+        trace?.push({ source, id, version, scopesSearched: scopeSearchChain, matchedScope: searchScope });
+        return policy;
+      }
+    }
+
+    trace?.push({ source, id, version, scopesSearched: scopeSearchChain, matchedScope: null });
+    return null;
+  }
+
+  #getRolePoliciesSync(req, trace) {
+    const version = req.P.policyVersion ?? DEFAULT_VERSION;
+    const policies = [];
+    const seenRoles = new Set();
+    for (const role of req.P.roles) {
+      if (seenRoles.has(role)) continue;
+      seenRoles.add(role);
+      const policy = this.#resolvePolicyFromMemory('role', this.#rolePolicies, role, version, req.P.scope, trace);
+      if (policy) policies.push(policy);
+    }
+    return policies;
+  }
+
+  #evaluateRolePolicySync(policy, req, memo, stack, actionsKey) {
+    const policyKey = `${policy.role}.${policy.version}.${policy.scope ?? ''}|${actionsKey}`;
+    if (memo.has(policyKey)) return memo.get(policyKey);
+    if (stack.has(policyKey)) throw new Error(`Circular role policy inheritance detected for role "${policy.role}"`);
+
+    stack.add(policyKey);
+
+    const result = policy.check(req);
+    const version = req.P.policyVersion ?? DEFAULT_VERSION;
+
+    for (const parentRole of policy.parentRoles) {
+      // Untraced, like the async evaluator's parent lookups.
+      const parentPolicy = this.#resolvePolicyFromMemory(
+        'role',
+        this.#rolePolicies,
+        parentRole,
+        version,
+        req.P.scope,
+        null,
+      );
+      if (!parentPolicy) continue;
+
+      const parentResult = this.#evaluateRolePolicySync(parentPolicy, req, memo, stack, actionsKey);
+      Kerberos.#applyParentRoleResult(result, parentResult, req);
+    }
+
+    stack.delete(policyKey);
+    memo.set(policyKey, result);
+    return result;
+  }
+
+  #evaluateRolePoliciesSync(req, trace) {
+    const rolePolicies = this.#getRolePoliciesSync(req, trace);
+    if (!rolePolicies.length) return { ...createEmptyPolicyResult(), hadPolicies: false };
+
+    const effects = new Map();
+    const outputs = new Map();
+    const actionsMeta = {};
+    const memo = new Map();
+    const actionsKey = req.actions.join(',');
+
+    for (const policy of rolePolicies) {
+      const result = this.#evaluateRolePolicySync(policy, req, memo, new Set(), actionsKey);
+      Kerberos.#mergeRoleResultInto(effects, outputs, actionsMeta, result, req);
+    }
+
+    return {
+      effects,
+      outputs,
+      meta: {
+        actions: actionsMeta,
+        effectiveDerivedRoles: [],
+      },
+      hadPolicies: true,
+    };
+  }
+
+  #getImportedDerivedRolesSync(policy, req, trace) {
+    const importedRoles = new Set();
+    const relationCandidates = [];
+    for (const name of policy.importDerivedRoles) {
+      const role = this.#derivedRoles.get(name);
+      if (!role) {
+        // Mirrors the async driver: an import that resolves nowhere (no cache
+        // configured here) is traced as unmatched.
+        trace?.push({ source: 'derivedRoles', name, matched: false });
+        continue;
+      }
+      trace?.push({ source: 'derivedRoles', name, matched: true });
+      const derivedRoles = role.get(req);
+      if (derivedRoles) for (const derivedRole of derivedRoles) importedRoles.add(derivedRole);
+      for (const candidate of role.getRelationCandidates(req)) relationCandidates.push(candidate);
+    }
+
+    // The sync driver runs only when no `relations` resolver is configured —
+    // relation-backed definitions can never activate; trace mirrors the async
+    // no-resolver branch.
+    if (relationCandidates.length && trace) {
+      for (const candidate of relationCandidates) {
+        trace.push({
+          source: 'relations',
+          name: candidate.name,
+          relation: candidate.relation,
+          matched: false,
+          reason: 'no-relations-resolver',
+        });
+      }
+    }
+
+    return importedRoles;
+  }
+
+  #evaluatePolicySourcesSync(req) {
+    const trace = req.includeMeta || (this.#auditIncludeMeta && this.#logger.enabled) ? [] : null;
+
+    const principalPolicy = this.#resolvePolicyFromMemory(
+      'principal',
+      this.#principalPolicies,
+      req.P.id,
+      req.P.policyVersion ?? DEFAULT_VERSION,
+      req.P.scope,
+      trace,
+    );
+    const principalResult = principalPolicy ? principalPolicy.check(req) : createEmptyPolicyResult();
+
+    const unresolvedActions = [];
+    for (const action of req.actions) {
+      if (!principalResult.effects.has(action)) unresolvedActions.push(action);
+    }
+    let roleResult = createEmptyPolicyResult();
+    let resourceResult = createEmptyPolicyResult();
+
+    const roleUnresolvedActions = [];
+    if (unresolvedActions.length) {
+      const roleReq = unresolvedActions.length === req.actions.length ? req : { ...req, actions: unresolvedActions };
+      roleResult = this.#evaluateRolePoliciesSync(roleReq, trace);
+
+      for (const action of unresolvedActions) {
+        if (!roleResult.effects.has(action)) roleUnresolvedActions.push(action);
+      }
+    }
+
+    if (roleUnresolvedActions.length) {
+      const resourcePolicy = this.#resolvePolicyFromMemory(
+        'resource',
+        this.#resourcePolicies,
+        req.R.kind,
+        req.R.policyVersion ?? DEFAULT_VERSION,
+        req.R.scope,
+        trace,
+      );
+      if (resourcePolicy) {
+        const resourceReq =
+          roleUnresolvedActions.length === req.actions.length ? req : { ...req, actions: roleUnresolvedActions };
+        const importedDerivedRoles = this.#getImportedDerivedRolesSync(resourcePolicy, req, trace);
+        resourceResult = resourcePolicy.check(resourceReq, importedDerivedRoles);
+      }
+    }
+
+    return Kerberos.#mergeSourceResults(req, trace, principalResult, roleResult, resourceResult);
   }
 
   #buildResponseResource(resource) {
@@ -1362,39 +1658,35 @@ class Kerberos {
       reqKind,
       args?.reqId,
       async (callId, otel) => {
-        const parsedArgs = this.#parseValidated('Invalid isAllowed arguments', () =>
-          Kerberos.parseIsAllowedArgs(args, {
-            schema: this.#isAllowedArgsValidator,
-            z: this.#z,
-            ajv: this.#ajv,
-            typebox: this.#typebox,
-          }),
-        );
+        const parsedArgs = this.#parseArgs(this.#isAllowedArgsValidator, 'Invalid isAllowed arguments', args);
 
-        const req = this.#parseValidated('Invalid request', () =>
-          Kerberos.parseRequest(
-            {
-              principal: parsedArgs.principal,
-              resource: parsedArgs.resource,
-              actions: [parsedArgs.action],
-              reqId: parsedArgs.reqId,
-              callId,
-              includeMeta: parsedArgs.includeMeta,
-            },
-            {
-              schema: this.#requestValidator,
-              z: this.#z,
-              ajv: this.#ajv,
-              typebox: this.#typebox,
-            },
-          ),
-        );
+        // The request is assembled from the ALREADY-validated args plus
+        // engine-generated fields — re-validating it (the old buildRequest
+        // pass) deep-parsed the same principal/resource up to two more times
+        // per call and, under Zod, split P/principal into different clones.
+        // The public static Kerberos.parseRequest keeps full validation for
+        // external callers.
+        const req = {
+          principal: parsedArgs.principal,
+          resource: parsedArgs.resource,
+          P: parsedArgs.principal,
+          R: parsedArgs.resource,
+          actions: [parsedArgs.action],
+          reqId: parsedArgs.reqId,
+          callId,
+          includeMeta: parsedArgs.includeMeta,
+        };
 
         auditContext = { req, action: parsedArgs.action };
         const relationsMemo = this.#relations ? new Map() : null;
-        // Single-shot call: no lookups memo — #resolvePolicy's fast path skips
-        // the memo bookkeeping entirely (batching is checkResources' job).
-        const { effects, outputs, meta } = await this.#evaluatePolicySources(req, relationsMemo, null, otel);
+        // Fully-synchronous configuration (no cache, no relations): the sync
+        // driver skips the interior async frames entirely. Otherwise:
+        // single-shot call, no lookups memo — #resolvePolicy's fast path
+        // skips the memo bookkeeping (batching is checkResources' job).
+        const { effects, outputs, meta } =
+          !this.#cache.enabled && !this.#relations
+            ? this.#evaluatePolicySourcesSync(req)
+            : await this.#evaluatePolicySources(req, relationsMemo, null, otel);
         const isAllowed = effects.get(parsedArgs.action) === Effect.Allow || effects.get(ALL_ACTIONS) === Effect.Allow;
 
         const input = [{ req, result: { effects, outputs, meta } }];
@@ -1433,40 +1725,24 @@ class Kerberos {
       reqKind,
       args?.reqId,
       async (callId, otel) => {
-        const parsedArgs = this.#parseValidated('Invalid checkResources arguments', () =>
-          Kerberos.parseCheckResourcesArgs(args, {
-            schema: this.#checkResourcesArgsValidator,
-            z: this.#z,
-            ajv: this.#ajv,
-            typebox: this.#typebox,
-          }),
-        );
+        const parsedArgs = this.#parseArgs(this.#checkResourcesArgsValidator, 'Invalid checkResources arguments', args);
 
-        // Validation stays synchronous and up-front: a malformed resource
-        // entry fails the whole request (programming error), before any
-        // evaluation starts.
+        // Requests are assembled from the ALREADY-validated args (the batch
+        // validator covered the principal once and every resource entry) —
+        // the old per-resource buildRequest pass re-parsed the same principal
+        // 2x per resource on top of that.
         const reqs = [];
         for (const { resource, actions } of parsedArgs.resources) {
-          reqs.push(
-            this.#parseValidated('Invalid request', () =>
-              Kerberos.parseRequest(
-                {
-                  principal: parsedArgs.principal,
-                  resource,
-                  actions,
-                  reqId: parsedArgs.reqId,
-                  callId,
-                  includeMeta: parsedArgs.includeMeta,
-                },
-                {
-                  schema: this.#requestValidator,
-                  z: this.#z,
-                  ajv: this.#ajv,
-                  typebox: this.#typebox,
-                },
-              ),
-            ),
-          );
+          reqs.push({
+            principal: parsedArgs.principal,
+            resource,
+            P: parsedArgs.principal,
+            R: resource,
+            actions,
+            reqId: parsedArgs.reqId,
+            callId,
+            includeMeta: parsedArgs.includeMeta,
+          });
         }
 
         // Resources evaluate concurrently; allSettled keeps result order and
@@ -1483,9 +1759,31 @@ class Kerberos {
         // in-memory lookups are already O(1) Map hits, so static-only configs
         // take #resolvePolicy's memo-less fast path.
         const lookups = this.#cache.enabled ? new Map() : null;
-        const promises = [];
-        for (const req of reqs) promises.push(this.#evaluatePolicySources(req, relationsMemo, lookups, otel));
-        const settled = await Promise.allSettled(promises);
+        let settled;
+        if (!this.#cache.enabled && !this.#relations) {
+          // Fully-synchronous configuration: evaluate in a plain loop while
+          // preserving the per-resource fail-closed isolation contract via
+          // the same settled-shaped outcomes the async wave produces.
+          settled = [];
+          for (const req of reqs) {
+            try {
+              settled.push({ status: 'fulfilled', value: this.#evaluatePolicySourcesSync(req) });
+            } catch (error) {
+              settled.push({ status: 'rejected', reason: error });
+            }
+          }
+        } else {
+          const limit = Number.isFinite(this.#maxConcurrency) ? createLimiter(this.#maxConcurrency) : null;
+          const promises = [];
+          for (const req of reqs) {
+            promises.push(
+              limit
+                ? limit(() => this.#evaluatePolicySources(req, relationsMemo, lookups, otel))
+                : this.#evaluatePolicySources(req, relationsMemo, lookups, otel),
+            );
+          }
+          settled = await Promise.allSettled(promises);
+        }
 
         const results = [];
         const inputForLog = [];
@@ -1582,14 +1880,7 @@ class Kerberos {
       reqKind,
       args?.reqId,
       async (callId, otel) => {
-        const parsedArgs = this.#parseValidated('Invalid planResources arguments', () =>
-          Kerberos.parsePlanResourcesArgs(args, {
-            schema: this.#planResourcesArgsValidator,
-            z: this.#z,
-            ajv: this.#ajv,
-            typebox: this.#typebox,
-          }),
-        );
+        const parsedArgs = this.#parseArgs(this.#planResourcesArgsValidator, 'Invalid planResources arguments', args);
 
         // The schemas keep `action`/`actions` independently optional; the
         // exactly-one-of invariant (and the wildcard rejection) are enforced

@@ -161,6 +161,11 @@ export type RelationResolverOptions = ValidationOptions & {
    * telemetry span as `kerberos.result.truncated`.
    */
   onTruncated?: 'ignore' | 'throw';
+  /**
+   * Caps the concurrent candidate-verification checks of `lookupResources`
+   * (the fan-out that scales with tuple volume). Unbounded by default.
+   */
+  maxConcurrency?: number;
 };
 
 /**

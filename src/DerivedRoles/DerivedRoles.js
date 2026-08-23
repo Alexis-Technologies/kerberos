@@ -80,11 +80,15 @@ class DerivedRoles {
   // Shared evaluation prelude: request enriched with constants/variables plus
   // an O(1) principal-roles set for parent-role gating.
   #buildEvalContext(req) {
+    // Skip the request copies when the definition set declares neither
+    // constants nor variables (the common case) — conditions then read `C`/`V`
+    // as undefined either way.
     const constants = this.#shape.constants?.get();
-    const reqWithConstants = { ...req, constants, C: constants };
+    const reqWithConstants = constants === undefined ? req : { ...req, constants, C: constants };
 
     const variables = this.#shape.variables?.get(reqWithConstants);
-    const reqWithVariables = { ...reqWithConstants, variables, V: variables };
+    const reqWithVariables =
+      variables === undefined ? reqWithConstants : { ...reqWithConstants, variables, V: variables };
 
     return { reqWithVariables, principalRoles: new Set(reqWithVariables.P.roles) };
   }

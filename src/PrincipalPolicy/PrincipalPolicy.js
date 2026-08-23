@@ -99,11 +99,15 @@ class PrincipalPolicy {
 
     if (!req.actions?.length) return { effects, outputs, meta };
 
+    // Skip the request copies when the policy declares neither constants nor
+    // variables (the common case): conditions then read `C`/`V` as undefined
+    // either way, and the hot path saves two object spreads per check.
     const constants = this.#shape.principalPolicy.constants?.get();
-    const reqWithConstants = { ...req, constants, C: constants };
+    const reqWithConstants = constants === undefined ? req : { ...req, constants, C: constants };
 
     const variables = this.#shape.principalPolicy.variables?.get(reqWithConstants);
-    const reqWithVariables = { ...reqWithConstants, variables, V: variables };
+    const reqWithVariables =
+      variables === undefined ? reqWithConstants : { ...reqWithConstants, variables, V: variables };
 
     const rules = this.rules;
 

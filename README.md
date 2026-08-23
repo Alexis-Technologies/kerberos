@@ -544,6 +544,7 @@ const kerberos = new Kerberos(policies, derivedRoles, {
 - **`cacheKeyPrefix`** (`string`, default `''`): Prefix prepended to **every** cache key (policies *and* derived roles). Use it to namespace tenants or environments sharing one store — derived-roles documents are otherwise a single global `derivedRoles:<name>` namespace, so two tenants publishing the same definition name on a shared store would silently overwrite each other.
 - **`relationsTimeoutMs`** (`number`, off by default): Bounds each `relations.check` / `relations.list` call; a resolver that neither resolves nor rejects fails as `KerberosRelationsError` (following `onError`) instead of hanging the request.
 - **`audit`** (`{ includeMeta?: boolean }`): Engine-level audit enrichment. With `{ includeMeta: true }` and a logger attached, decision tracing runs for **every** request, so audit entries always carry `meta.resolution` and the `policy-miss` reason — audit completeness stops depending on each call site remembering the per-request `includeMeta` flag. The response stays gated on the request flag.
+- **`maxConcurrency`** (`number`, unbounded by default): Caps how many resources of a `checkResources` batch evaluate at once. Without it a 10k-resource batch launches 10k concurrent evaluation chains (each issuing its own cache reads) — memory spikes, event-loop saturation and a thundering herd on the cache backend. The built-in `RelationResolver` accepts the same option for its `lookupResources` candidate-verification fan-out.
 - **`codec`** (PolicyCodec): How cached policy documents are transformed before construction: `{ jsep }` enables the built-in safe `$expr` evaluator, `{ deserialize }` plugs in your own logic, and when omitted cached values are passed to policy constructors **as-is** — see [`codec` option — three modes](#codec-option--three-modes).
 - **`relations`** (KerberosRelationsResolver): ReBAC resolver used by relation-backed derived roles — any object with a `check(args, opts)` method (and an optional batched `list`). See [ReBAC (Relations)](#rebac-relations).
 - **`z`**: Enables validation using the built-in Zod schema builders.
@@ -1633,14 +1634,19 @@ Apple Silicon (M-series), Node v24:
 
 | Scenario |  ops/sec |
 | -------- |---------:|
-| `isAllowed` — simple role match | ~320,000 |
-| `isAllowed` — derived roles + variables + condition | ~300,000 |
-| `checkResources` — 10 resources × 3 actions |  ~41,000 |
-| `isAllowed` — cache-backed dynamic policy (`$expr`, in-memory Map) | ~150,000 |
-| `planResources` — `$expr` policy (variables + deny rule) |  ~60,000 |
-| `relations.check` — direct tuple (flat) | ~850,000 |
-| `relations.check` — deep walk (3 arrows + nested groups) | ~120,000 |
-| `isAllowed` — relation-backed derived role (deep walk) |  ~80,000 |
+| `isAllowed` — simple role match | ~800,000 |
+| `isAllowed` — derived roles + variables + condition | ~650,000 |
+| `checkResources` — 10 resources × 3 actions |  ~63,000 |
+| `checkResources` — 10 resources, includeMeta |  ~61,000 |
+| `isAllowed` — role policy + 2-level parentRoles chain | ~480,000 |
+| `isAllowed` — 3-segment scoped request (chain walk) | ~640,000 |
+| `isAllowed` — simple role match + Zod validation | ~470,000 |
+| `isAllowed` — cache-backed dynamic policy (`$expr`, in-memory Map) | ~330,000 |
+| `checkResources` — 50 resources, cache-backed |   ~9,000 |
+| `planResources` — `$expr` policy (variables + deny rule) |  ~72,000 |
+| `relations.check` — direct tuple (flat) | ~760,000 |
+| `relations.check` — deep walk (3 arrows + nested groups) | ~106,000 |
+| `isAllowed` — relation-backed derived role (deep walk) |  ~77,000 |
 
 `checkResources` evaluates resources **concurrently** (`Promise.allSettled`): with a remote policy store, N resources cost one parallel wave of lookups instead of N sequential round-trips (measured ~8x faster with a 2ms-latency cache and 10 resources), and one failing resource never fails the batch — it fail-closes to `EFFECT_DENY` for its actions only.
 

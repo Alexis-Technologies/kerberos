@@ -102,6 +102,73 @@ async function main() {
       rich.checkResources({ principal, resources: manyResources })),
   );
 
+  results.push(
+    await bench('checkResources — 10 resources, includeMeta', () =>
+      rich.checkResources({ principal, resources: manyResources, includeMeta: true })),
+  );
+
+  // Role-policy layer: principal + role policies with a 2-level parentRoles
+  // chain (exercises #evaluateRolePolicy's memo/inheritance machinery).
+  const layeredPolicies = [
+    {
+      principalPolicy: {
+        principal: 'root',
+        version: 'default',
+        rules: [{ resource: 'expense', actions: [{ action: '*', effect: Effect.Allow }] }],
+      },
+    },
+    {
+      rolePolicy: {
+        role: 'JUNIOR',
+        version: 'default',
+        parentRoles: ['SENIOR'],
+        rules: [{ resource: 'expense', allowActions: ['view', 'approve'] }],
+      },
+    },
+    {
+      rolePolicy: {
+        role: 'SENIOR',
+        version: 'default',
+        parentRoles: ['LEAD'],
+        rules: [{ resource: 'expense', allowActions: ['view', 'approve'] }],
+      },
+    },
+    {
+      rolePolicy: {
+        role: 'LEAD',
+        version: 'default',
+        rules: [{ resource: 'expense', allowActions: ['view'] }],
+      },
+    },
+  ];
+  const layered = new Kerberos(layeredPolicies, []);
+  results.push(
+    await bench('isAllowed — role policy + 2-level parentRoles chain', () =>
+      layered.isAllowed({ principal: { id: 'joe', roles: ['JUNIOR'] }, action: 'view', resource })),
+  );
+
+  // Scoped lookup: a 3-segment request scope walks the scope chain (4 lookups
+  // per source) before falling back to the base policy.
+  const scoped = new Kerberos(simplePolicies, []);
+  const scopedResource = { ...resource, scope: 'acme.emea.sales' };
+  results.push(
+    await bench('isAllowed — 3-segment scoped request (chain walk)', () =>
+      scoped.isAllowed({ principal, action: 'view', resource: scopedResource })),
+  );
+
+  // Validation-backend scenario: the same simple check with Zod configured —
+  // measures the args-validation cost on top of evaluation.
+  try {
+    const { z } = require('zod');
+    const validated = new Kerberos(simplePolicies, [], { z });
+    results.push(
+      await bench('isAllowed — simple role match + Zod validation', () =>
+        validated.isAllowed({ principal, action: 'view', resource })),
+    );
+  } catch {
+    console.log('(zod not installed — skipping the validation-backend scenario)');
+  }
+
   // Cache-backed scenario: dynamic $expr policy resolved through a Map cache.
   let jsep;
   try {
@@ -137,6 +204,20 @@ async function main() {
     results.push(
       await bench('isAllowed — cache-backed dynamic policy ($expr)', () =>
         cached.isAllowed({ principal, action: 'view', resource: docResource })),
+    );
+
+    // Cache-backed batch: exercises the per-batch singleflight lookups memo
+    // (each distinct policy resolves once per batch, not once per resource).
+    const cachedBatchResources = [];
+    for (let i = 0; i < 50; i++) {
+      cachedBatchResources.push({
+        resource: { id: `doc${i}`, kind: 'document', attr: { status: 'OPEN' } },
+        actions: ['view'],
+      });
+    }
+    results.push(
+      await bench('checkResources — 50 resources, cache-backed', () =>
+        cached.checkResources({ principal, resources: cachedBatchResources })),
     );
 
     // Query planning: partial evaluation of a rich $expr policy (variables +

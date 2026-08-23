@@ -433,6 +433,58 @@ describe('Resilience', () => {
     });
   });
 
+  describe('maxConcurrency', () => {
+    function buildTrackingCache() {
+      let inFlight = 0;
+      let peak = 0;
+      return {
+        get peak() {
+          return peak;
+        },
+        cache: {
+          async get() {
+            inFlight += 1;
+            peak = Math.max(peak, inFlight);
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            inFlight -= 1;
+            return undefined;
+          },
+        },
+      };
+    }
+
+    // Distinct kinds so the per-batch lookups memo cannot collapse the reads.
+    const batchResources = Array.from({ length: 8 }, (_, i) => ({
+      resource: { id: `r${i}`, kind: `kind${i}` },
+      actions: ['view'],
+    }));
+
+    it('caps concurrent batch evaluation chains', async () => {
+      const unbounded = buildTrackingCache();
+      const kerberosUnbounded = new Kerberos(policies, [], {
+        cache: unbounded.cache,
+        cacheRetry: { attempts: 1 },
+      });
+      await kerberosUnbounded.checkResources({ principal, resources: batchResources });
+      assert.ok(unbounded.peak > 2, `expected unbounded peak > 2, got ${unbounded.peak}`);
+
+      const limited = buildTrackingCache();
+      const kerberosLimited = new Kerberos(policies, [], {
+        cache: limited.cache,
+        cacheRetry: { attempts: 1 },
+        maxConcurrency: 2,
+      });
+      const response = await kerberosLimited.checkResources({ principal, resources: batchResources });
+      assert.equal(response.results.length, 8);
+      assert.ok(limited.peak <= 2, `expected limited peak <= 2, got ${limited.peak}`);
+    });
+
+    it('rejects invalid maxConcurrency values at construction', () => {
+      assert.throws(() => new Kerberos(policies, [], { maxConcurrency: 0 }), TypeError);
+      assert.throws(() => new Kerberos(policies, [], { maxConcurrency: 'many' }), TypeError);
+    });
+  });
+
   describe('duplicate policies', () => {
     it('should throw on duplicate resource policy keys', () => {
       assert.throws(() => new Kerberos([...policies, ...policies], []), /Duplicate resource policy/);
