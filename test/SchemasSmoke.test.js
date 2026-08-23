@@ -107,4 +107,42 @@ describe('schema builders smoke (all three backends)', () => {
     assert.ok(MetadataTypeBoxSchemas.buildActionsMetadata(t));
     assert.ok(MetadataTypeBoxSchemas.buildShape(t));
   });
+
+  it("accepts the engine's real includeMeta output across all three backends (round-trip)", async () => {
+    // The drift guard the pure-existence checks above cannot provide: the
+    // exported Metadata schemas must accept what checkResources actually
+    // returns — including 'policy-miss' entries that carry NO matchedPolicy,
+    // deny reasons, and the resolution trace.
+    const { z } = require('zod');
+    const Ajv = require('ajv');
+    const t = require('@sinclair/typebox').Type;
+
+    const kerberos = new Kerberos(policies, derivedRoles, { getCallId: () => 'call-smoke' });
+    const { results } = await kerberos.checkResources({
+      principal,
+      resources: [
+        // Allowed action with matchedPolicy/matchedRule + denied 'rule-miss'.
+        { resource, actions: ['edit', 'transfer'] },
+        // Unknown kind: every action denies with reason 'policy-miss'.
+        { resource: { id: 'x1', kind: 'unknown-kind' }, actions: ['view'] },
+      ],
+      includeMeta: true,
+    });
+
+    const metas = results.map((result) => result.meta);
+    assert.equal(metas.length, 2);
+    assert.equal(metas[1].actions.view.reason, 'policy-miss');
+    assert.equal('matchedPolicy' in metas[1].actions.view, false);
+    assert.ok(Array.isArray(metas[0].resolution));
+
+    const zodShape = MetadataZodSchemas.buildShape(z);
+    const validateJson = new Ajv({ allowUnionTypes: true }).compile(MetadataJsonSchemas.buildShape());
+    const validateTypeBox = new Ajv({ allowUnionTypes: true }).compile(MetadataTypeBoxSchemas.buildShape(t));
+
+    for (const meta of metas) {
+      assert.doesNotThrow(() => zodShape.parse(meta));
+      assert.equal(validateJson(meta), true, JSON.stringify(validateJson.errors));
+      assert.equal(validateTypeBox(meta), true, JSON.stringify(validateTypeBox.errors));
+    }
+  });
 });

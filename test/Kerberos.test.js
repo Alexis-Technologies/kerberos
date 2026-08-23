@@ -518,6 +518,31 @@ describe('Kerberos', () => {
 
       assert.strictEqual(results.results[0].actions.view, Effect.Deny);
     });
+
+    it('should cap scope depth: 16 dot-segments work, deeper always throws KerberosValidationError', async () => {
+      const { KerberosValidationError } = require('../src/index.js');
+
+      // At the cap: a 16-segment scope builds a full chain (16 scopes + base).
+      const atLimit = Array.from({ length: 16 }, (_, i) => `s${i}`).join('.');
+      assert.strictEqual(Kerberos.getScopeSearchChain(atLimit).length, 17);
+
+      // Beyond the cap: an unbounded caller-influenced scope is a cache-read
+      // amplification / quadratic-CPU vector, so it is a malformed request —
+      // it must throw even with onError: 'deny'.
+      const tooDeep = `${atLimit}.s16`;
+      assert.throws(() => Kerberos.getScopeSearchChain(tooDeep), KerberosValidationError);
+
+      const denyingKerberos = new Kerberos([expensePolicy], [commonRolesPolicy], { onError: 'deny' });
+      await assert.rejects(
+        () =>
+          denyingKerberos.isAllowed({
+            principal: principalsPolicy.sally,
+            resource: { ...resourcesPolicy.expense1, scope: tooDeep },
+            action: 'view',
+          }),
+        KerberosValidationError,
+      );
+    });
   });
 
   describe('checkResources with metadata support', () => {

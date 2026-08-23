@@ -70,6 +70,12 @@ class Conditions {
 
     const results = new Set();
     for (const strategyKey of strategyKeys) {
+      // Own-property lookup only. An inherited key such as `constructor`,
+      // `toString` or `valueOf` would otherwise resolve to an inherited
+      // Object.prototype function (truthy), bypass the `!strategy` skip below,
+      // and — since that function never returns `false` — make a broken
+      // conditional rule evaluate as an unconditional match (fail-open).
+      if (!Object.prototype.hasOwnProperty.call(this.#strategies, strategyKey)) continue;
       const strategy = this.#strategies[strategyKey];
       // Forward-compat: ignore unknown keys (schemas allow additional properties).
       if (!strategy) continue;

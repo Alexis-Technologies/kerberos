@@ -208,4 +208,40 @@ describe('Conditions', () => {
 
     assert.strictEqual(condition.isFulfilled(reqMock), false);
   });
+
+  it('should fail closed when a match uses inherited-property keys as strategies', () => {
+    // `constructor`/`toString`/`valueOf` resolve to inherited Object.prototype
+    // functions; they must be treated as unknown keys (fail closed), never as
+    // strategies that make a broken conditional an unconditional match.
+    for (const inheritedKey of ['constructor', 'toString', 'valueOf', '__proto__']) {
+      const condition = new Conditions({ match: { [inheritedKey]: 0 } });
+      assert.strictEqual(
+        condition.isFulfilled(reqMock),
+        false,
+        `inherited key "${inheritedKey}" must not fulfill a condition`,
+      );
+    }
+  });
+
+  it('should fail closed when a match mixes a real strategy with inherited-property keys', () => {
+    const condition = new Conditions({
+      match: {
+        constructor: 0,
+        all: [({ V }) => V.isPublished],
+      },
+    });
+
+    // The real `all` strategy is satisfied, but the inherited `constructor`
+    // key must not silently pass; it is skipped as an unknown key, so the
+    // decision rests solely on `all` (true here).
+    assert.strictEqual(condition.isFulfilled(reqMock), true);
+
+    const denied = new Conditions({
+      match: {
+        constructor: 0,
+        all: [({ V }) => V.isPublished === false],
+      },
+    });
+    assert.strictEqual(denied.isFulfilled(reqMock), false);
+  });
 });

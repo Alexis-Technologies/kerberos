@@ -1017,26 +1017,40 @@ class RelationResolver {
     }
   }
 
+  // Singleflight memoization for the session's shared read map. Stores the
+  // read PROMISE (not the value) so identical reads that start before the first
+  // settles coalesce. On rejection the entry is EVICTED (if it is still the
+  // stored promise) so a transient backend failure does not poison the subtree
+  // for the memo's lifetime — callers the README invites to reuse one memo
+  // across calls would otherwise keep re-throwing the stale error after the
+  // backend recovered. The eviction `.catch` keeps the rejection handled on its
+  // own branch; the returned promise still rejects for the awaiting caller.
+  #memoizeShared(session, key, factory) {
+    const existing = session.shared.get(key);
+    if (existing) return existing;
+    const promise = factory();
+    session.shared.set(key, promise);
+    promise.catch(() => {
+      if (session.shared.get(key) === promise) session.shared.delete(key);
+    });
+    return promise;
+  }
+
   // Doc-level fallback mirrors policy resolution: a static key wins and the
   // cache is only consulted on a full static miss — sources for the SAME
   // (resource, relation) key are never merged.
   //
-  // The memo stores the read PROMISE, not the resolved value: a batched
-  // checkResources evaluates resources concurrently, so identical document
-  // reads can start before the first one settles — memoizing the promise is
-  // the in-process equivalent of SpiceDB's singleflight coalescing. (Check
+  // Uses the singleflight memo (see #memoizeShared): static/empty reads resolve
+  // and stay memoized; a cache read that rejects evicts itself. (Check
   // subproblems memoize completed values only — an in-flight promise there
   // would deadlock on cyclic data instead of hitting the depth guard.)
   #readRelationEntries(type, id, relation, session) {
     const docKey = `doc|${type}:${id}#${relation}`;
-    let promise = session.shared.get(docKey);
-    if (!promise) {
+    return this.#memoizeShared(session, docKey, () => {
       const staticEntries = this.#forwardIndex.get(`${type}:${id}#${relation}`);
-      if (staticEntries) promise = Promise.resolve(staticEntries);
-      else promise = this.#reader.enabled ? this.#readCachedEntries(type, id, relation) : EMPTY_ENTRIES_PROMISE;
-      session.shared.set(docKey, promise);
-    }
-    return promise;
+      if (staticEntries) return Promise.resolve(staticEntries);
+      return this.#reader.enabled ? this.#readCachedEntries(type, id, relation) : EMPTY_ENTRIES_PROMISE;
+    });
   }
 
   async #loadReverseEntries(subjectKey) {
@@ -1098,13 +1112,7 @@ class RelationResolver {
 
   // Promise-memoized like forward documents (reverse reads never recurse).
   #readReverseEntries(subjectKey, session) {
-    const memoKey = `rev|${subjectKey}`;
-    let promise = session.shared.get(memoKey);
-    if (!promise) {
-      promise = this.#loadReverseEntries(subjectKey);
-      session.shared.set(memoKey, promise);
-    }
-    return promise;
+    return this.#memoizeShared(session, `rev|${subjectKey}`, () => this.#loadReverseEntries(subjectKey));
   }
 
   // -------------------------------------------------------------------------
@@ -1279,10 +1287,7 @@ class RelationResolver {
   // candidates found through it must then be verified with check().
   #subjectClosure(subject, session) {
     const memoKey = `closure|${subjectToString(subject)}`;
-    let promise = session.shared.get(memoKey);
-    if (promise) return promise;
-
-    promise = (async () => {
+    return this.#memoizeShared(session, memoKey, async () => {
       const members = new Set();
       let caveated = false;
       let level = [subjectToString(subject)];
@@ -1313,9 +1318,7 @@ class RelationResolver {
         level = next;
       }
       return { members, caveated };
-    })();
-    session.shared.set(memoKey, promise);
-    return promise;
+    });
   }
 
   async #lookupResourcesInternal(subject, type, name, session, depth) {

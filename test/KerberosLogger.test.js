@@ -265,6 +265,45 @@ describe('Kerberos logger support', () => {
     assert.strictEqual(auditEntries[1].effect, Effect.Deny);
   });
 
+  it('should route winston/consola-shaped loggers (with .log) to the structured writer', async () => {
+    // winston and consola expose `.log` ALONGSIDE `.info`/`.debug`. They must be
+    // classified as structured loggers, not console-like — otherwise the legacy
+    // writer calls `logger.log(summaryString)` (winston reads arg 1 as a level)
+    // and the audit entries are silently lost.
+    const calls = { log: [], info: [], debug: [], error: [] };
+    const winstonShaped = {
+      log: (...args) => calls.log.push(args),
+      info: (...args) => calls.info.push(args),
+      debug: (...args) => calls.debug.push(args),
+      error: (...args) => calls.error.push(args),
+      // winston exposes `.child`; the structured writer must be able to use it.
+      child() {
+        return winstonShaped;
+      },
+    };
+
+    const kerberos = createKerberosWithLogger(winstonShaped);
+    const allowed = await kerberos.isAllowed({
+      principal: principalsPolicy.sally,
+      resource: resourcesPolicy.expense1,
+      action: 'view',
+    });
+
+    assert.strictEqual(allowed, true);
+    // The audit entry lands on `.info` (the structured write method)…
+    assert.strictEqual(calls.info.length, 1);
+    const [auditEntry, auditMessage] = calls.info[0];
+    assert.strictEqual(auditEntry.reqKind, 'IsAllowed');
+    assert.strictEqual(auditEntry.principalId, 'sally');
+    assert.strictEqual(auditEntry.action, 'view');
+    assert.strictEqual(auditEntry.effect, Effect.Allow);
+    assert.strictEqual(auditMessage, 'Kerberos.js authorization decision for sally on expense1');
+    // …and `.log` (which winston would misinterpret) is never used.
+    assert.strictEqual(calls.log.length, 0);
+    // Lifecycle events go to `.debug`.
+    assert.ok(calls.debug.length >= 2);
+  });
+
   it('should use structured summaries for pino isAllowed logs', async () => {
     const collector = createPinoCollector('debug');
     const kerberos = createKerberosWithLogger(collector.logger);

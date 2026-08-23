@@ -804,6 +804,35 @@ describe('RelationResolver', () => {
       );
     });
 
+    it('evicts rejected reads from a shared memo so callers recover after a transient failure', async () => {
+      // A rejected singleflight promise must not stay poisoned in a shared
+      // memo: the README invites callers to reuse one memo across calls, and a
+      // single transient backend blip would otherwise re-throw forever.
+      const { KerberosCacheError } = require('../src/index.js');
+      let failures = 1;
+      const cache = {
+        async get(key) {
+          if (failures > 0) {
+            failures--;
+            throw new Error('ECONNRESET');
+          }
+          return key === 'rel:document:flaky:viewer' ? ['user:carl'] : undefined;
+        },
+      };
+      const relations = buildResolver({ cache, cacheRetry: { attempts: 1 } });
+      const memo = new Map();
+
+      await assert.rejects(
+        () => relations.check({ resource: 'document:flaky', permission: 'view', subject: 'user:carl' }, { memo }),
+        (error) => error instanceof KerberosCacheError,
+      );
+      // Same shared memo after the backend recovered: the read retries and succeeds.
+      assert.equal(
+        await relations.check({ resource: 'document:flaky', permission: 'view', subject: 'user:carl' }, { memo }),
+        true,
+      );
+    });
+
     it('shares document reads through the memo across list names', async () => {
       const cache = buildCache({ 'rel:document:shared:viewer': ['user:carl'] });
       const relations = buildResolver({ cache });

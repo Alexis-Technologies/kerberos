@@ -11,6 +11,14 @@ const ALL_RESOURCES = '*';
 const DEFAULT_VERSION = 'default';
 const BASE_SCOPE = '';
 
+// Upper bound for scope STRINGS across all three validation backends. Scope is
+// the one traversal whose depth multiplies per-request work (scope-chain walk ×
+// policy sources × cache reads), so unlike other free-form strings it gets a
+// hard length cap; the engine additionally caps the SEGMENT count at request
+// time (see Kerberos.getScopeSearchChain), which also covers the default
+// no-validation-backend configuration.
+const MAX_SCOPE_LENGTH = 512;
+
 const Effect = {
   Allow: 'EFFECT_ALLOW',
   Deny: 'EFFECT_DENY',
@@ -23,6 +31,7 @@ class ZodSchemas {
   static buildScopeString(z) {
     return z
       .string()
+      .max(MAX_SCOPE_LENGTH, `Scope must be at most ${MAX_SCOPE_LENGTH} characters`)
       .regex(/^[a-zA-Z0-9._-]*$/, 'Scope must contain only alphanumeric characters, dots, hyphens and underscores');
   }
 
@@ -78,6 +87,7 @@ class JsonSchemas {
   static buildScopeString() {
     return {
       type: 'string',
+      maxLength: MAX_SCOPE_LENGTH,
       pattern: '^[a-zA-Z0-9._-]*$',
     };
   }
@@ -216,7 +226,7 @@ class JsonSchemas {
  */
 class TypeBoxSchemas {
   static buildScopeString(t) {
-    return t.String({ pattern: '^[a-zA-Z0-9._-]*$' });
+    return t.String({ maxLength: MAX_SCOPE_LENGTH, pattern: '^[a-zA-Z0-9._-]*$' });
   }
 
   static buildUnknownRecordShape(t) {

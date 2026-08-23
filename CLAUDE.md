@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Kerberos.js (`@alexify/kerberos`) is a zero-dependency (~8 KB), in-process authorization engine for JavaScript — a lightweight, embeddable alternative to Cerbos. It evaluates `resourcePolicy` / `principalPolicy` / `rolePolicy` documents against `(principal, resource, action)` requests and returns `EFFECT_ALLOW` / `EFFECT_DENY`, with optional derived roles, conditions, variables, constants, outputs, scopes, schema validation, audit logging, cache-backed dynamic policies, ReBAC (relation-backed derived roles + a built-in SpiceDB-inspired Zanzibar-lite resolver on the `/relations` subpath), and Cerbos-compatible resources query plans (`planResources`). Runs in Node.js and the browser.
 
-Package manager is **pnpm** (`packageManager: pnpm@11.5.0`). CommonJS throughout (`require`/`module.exports`), no build/transpile step — `src/` ships as-is.
+Package manager is **pnpm** (the exact pinned version is the `packageManager` field in `package.json`). CommonJS throughout (`require`/`module.exports`), no build/transpile step — `src/` ships as-is.
 
 ## Commands
 
@@ -16,8 +16,8 @@ node --test test/Kerberos.test.js          # run a single test file
 node --test --test-name-pattern="scope"    # filter tests by name
 pnpm test:types        # type-check test/types.test-d.ts against index.d.ts via tsd
 pnpm test:coverage     # c8 coverage over src/
-pnpm lint              # oxlint src test
-pnpm format            # oxfmt src test (format:check for CI)
+pnpm lint              # oxlint src test scripts bench
+pnpm format            # oxfmt src test scripts bench (format:check for CI)
 pnpm bench             # ops/sec benchmark harness (bench/bench.js)
 pnpm docs:dev          # VitePress dev server for docs/ (docs:build / docs:preview too)
 ```
@@ -41,7 +41,7 @@ Every DSL concept (`Conditions`, `Constants`, `DerivedRoles`, `Outputs`, `Princi
 
 ### Platform runtime split (`src/runtime/`)
 
-`src/runtime/node.js` and `src/runtime/browser.js` are the **only** platform-specific files in the package — both export the identical `{ generateCallId, getNow }` interface. The Node variant uses `node:crypto` / `node:perf_hooks` directly (no try/catch feature detection); the browser variant uses `globalThis.crypto?.randomUUID` (pseudo-UUID fallback for insecure contexts) and `globalThis.performance` (falling back to `Date.now`), reading globals at call time so fallback branches stay testable. `src/Kerberos.js` requires `./runtime/node.js`; browser bundlers swap it via the package.json `browser` field object map (`"./index.js" → "./browser.js"`, `"./src/runtime/node.js" → "./src/runtime/browser.js"`) plus the `browser` condition in `exports`. Invariants: everything else in `src/` must stay platform-neutral (no Node builtins); any new Node builtin usage goes into `src/runtime/node.js` with a matching browser counterpart; renaming runtime files requires updating the `browser` map keys in `package.json` (a mismatch fails loudly at bundle time thanks to the `node:` prefix). Root `browser.js` intentionally mirrors `index.js` — do not deduplicate them.
+`src/runtime/node.js` and `src/runtime/browser.js` are the **only** platform-specific files in the package — both export the identical `{ generateCallId, getNow }` interface. The Node variant uses `node:crypto` / `node:perf_hooks` directly (no try/catch feature detection); the browser variant uses `globalThis.crypto?.randomUUID` (pseudo-UUID fallback for insecure contexts) and `globalThis.performance` (falling back to `Date.now`), reading globals at call time so fallback branches stay testable. `src/Kerberos.js` and `src/Relations/RelationResolver.js` require `./runtime/node.js`; browser bundlers swap it via the package.json `browser` field object map (`"./index.js" → "./browser.js"`, `"./src/runtime/node.js" → "./src/runtime/browser.js"`) plus the `browser` condition in `exports`. Invariants: everything else in `src/` must stay platform-neutral (no Node builtins); any new Node builtin usage goes into `src/runtime/node.js` with a matching browser counterpart; renaming runtime files requires updating the `browser` map keys in `package.json` (a mismatch fails loudly at bundle time thanks to the `node:` prefix). Root `browser.js` intentionally mirrors `index.js` — do not deduplicate them.
 
 ### Request evaluation flow (`src/Kerberos.js`)
 
@@ -74,7 +74,7 @@ Because remote-stored policies must be JSON (no live functions), `codec.js` (`cr
 
 ### Logging (`src/logging.js`)
 
-`logger` option accepts `true` (legacy `console.group`/`table`/`debug` output), a custom console-like object, or a structured logger (e.g. Pino, detected via `info`/`debug` methods) which receives one structured audit entry per evaluated action. When logging is enabled, runtime/validation errors are caught and converted to fallback results (`isAllowed` → `false`, `checkResources` → empty results) instead of being thrown; when disabled, errors propagate to the caller.
+`logger` option accepts `true` (legacy `console.group`/`table`/`debug` output), a custom console-like object, or a structured logger (e.g. Pino, detected via `info`/`debug` methods) which receives one structured audit entry per evaluated action. Logging is pure observability: every logger call is internally guarded (a throwing logger can never affect decisions), and it never changes error behavior — whether evaluation errors are rethrown or converted into fail-closed results is decided solely by the `onError` option (`'throw'` | `'deny'`), while `KerberosValidationError` (malformed arguments) always propagates regardless.
 
 ### OpenTelemetry (`src/telemetry.js`)
 

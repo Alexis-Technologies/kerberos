@@ -20,6 +20,15 @@ function createEmptyPolicyResult() {
   return { effects: new Map(), outputs: new Map(), meta: { actions: {}, effectiveDerivedRoles: [] } };
 }
 
+// Hard cap on scope depth. Each scope segment multiplies per-request work
+// (scope-chain walk × policy sources × cache reads on misses), and the chain
+// builder itself is quadratic in segment count — so an unbounded,
+// caller-influenced scope is a request-amplification / CPU-exhaustion vector.
+// Enforced here (not only in the validation schemas) so the default
+// no-validation-backend configuration is covered too; far above any realistic
+// scope hierarchy.
+const MAX_SCOPE_SEGMENTS = 16;
+
 /**
  * Main authorization entry point. Supports plain runtime use, Zod validation,
  * JSON Schema + Ajv validation and TypeBox + Ajv validation.
@@ -48,6 +57,10 @@ class Kerberos {
   /**
    * Builds the scope traversal chain from the most specific to the base scope.
    *
+   * Throws `KerberosValidationError` when the scope exceeds
+   * `MAX_SCOPE_SEGMENTS` dot-segments — a malformed request, so it always
+   * propagates regardless of the `onError` option.
+   *
    * @param {string | undefined} scope
    * @returns {string[]}
    */
@@ -56,6 +69,11 @@ class Kerberos {
     if (!normalizedScope) return [''];
 
     const segments = normalizedScope.split('.');
+    if (segments.length > MAX_SCOPE_SEGMENTS) {
+      throw new KerberosValidationError(
+        `Scope exceeds the maximum depth of ${MAX_SCOPE_SEGMENTS} dot-segments (got ${segments.length})`,
+      );
+    }
     const searchChain = [];
 
     for (let i = segments.length; i > 0; i--) searchChain.push(segments.slice(0, i).join('.'));
@@ -379,6 +397,11 @@ class Kerberos {
   // the kerberos.cache.requests counter with result hit/miss/error.
   #recordCacheResult(key, result) {
     this.#telemetry.recordCacheRequest(result);
+    // Skip the timestamp + entry allocation when the logger is the disabled
+    // no-op writer (the default): a cache-backed batch calls this once per
+    // cache.get, so eager construction is pure waste. The telemetry counter
+    // above stays — it is cheap and may be enabled independently.
+    if (!this.#logger.enabled) return;
     try {
       this.#logger.debug(
         { timestamp: new Date().toISOString(), event: `Cache.${result}`, key },
@@ -601,6 +624,7 @@ class Kerberos {
   }
 
   #log(input, reqKind, callId) {
+    if (!this.#logger.enabled) return;
     try {
       this.#logger.write(input, reqKind, callId);
     } catch {
@@ -609,6 +633,10 @@ class Kerberos {
   }
 
   #logMethodStart(reqKind, callId, reqId) {
+    // Every public call hits this twice (start/finish) via #runRequest; build
+    // the timestamp/entry only when a logger is actually attached. Mirrors
+    // RelationResolver#logDebug's `if (!this.#log.enabled) return`.
+    if (!this.#logger.enabled) return;
     try {
       this.#logger.debug(
         {
@@ -626,6 +654,7 @@ class Kerberos {
   }
 
   #logMethodError(reqKind, callId, reqId, error) {
+    if (!this.#logger.enabled) return;
     try {
       this.#logger.error(
         {
@@ -648,6 +677,7 @@ class Kerberos {
   // Guarded plan-result audit entry — the decision-level counterpart of the
   // per-action audit logs.
   #logPlanResult(callId, reqId, resourceKind, filter, counts, actions) {
+    if (!this.#logger.enabled) return;
     try {
       this.#logger.debug(
         {
@@ -670,6 +700,7 @@ class Kerberos {
   }
 
   #logMethodFinish(reqKind, callId, reqId, duration) {
+    if (!this.#logger.enabled) return;
     try {
       this.#logger.debug(
         {

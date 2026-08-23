@@ -29,13 +29,16 @@ function hasMethod(value, methodName) {
   return typeof value?.[methodName] === 'function';
 }
 
-function isLegacyLogger(logger) {
-  return (
-    hasMethod(logger, 'log') ||
-    hasMethod(logger, 'table') ||
-    hasMethod(logger, 'group') ||
-    hasMethod(logger, 'groupEnd')
-  );
+// A console-like logger is identified by console-SPECIFIC methods (table /
+// group / groupEnd). A bare `.log` is deliberately NOT part of this test:
+// structured loggers such as winston and consola expose `.log` alongside
+// `.info`/`.debug`, and classifying them as console-like routed their audit
+// entries into the legacy writer — where `logger.log(summaryString)` misfires
+// (winston reads the first arg as a level) and the per-entry writes land on
+// `debug`, silently losing the audit trail. Only true console-likes have
+// table/group.
+function isConsoleLikeLogger(logger) {
+  return hasMethod(logger, 'table') || hasMethod(logger, 'group') || hasMethod(logger, 'groupEnd');
 }
 
 function isStructuredLogger(logger) {
@@ -189,8 +192,14 @@ function createLoggerWriter(logger) {
   if (!logger) return createDisabledLoggerWriter();
   if (logger === true) return createLegacyLoggerWriter(console);
   if (typeof logger !== 'object') return createDisabledLoggerWriter();
-  if (isLegacyLogger(logger)) return createLegacyLoggerWriter(logger);
+  // Console-likes (console itself, custom table/group loggers) → legacy writer.
+  if (isConsoleLikeLogger(logger)) return createLegacyLoggerWriter(logger);
+  // Structured loggers (Pino, winston, consola, bunyan) → structured writer,
+  // even though several of them also expose `.log`.
   if (isStructuredLogger(logger)) return createStructuredLoggerWriter(logger);
+  // A bare `console.log`-only shim (no table/group, no info/debug): preserve the
+  // legacy behavior of emitting the summary line rather than silently dropping it.
+  if (hasMethod(logger, 'log')) return createLegacyLoggerWriter(logger);
   return createDisabledLoggerWriter();
 }
 
