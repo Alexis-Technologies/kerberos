@@ -95,6 +95,10 @@ const VALUE_METHODS = new Set([
   'toString',
 ]);
 
+// String-building methods whose output length is caller-controlled — capped
+// by maxBuiltStringLength at evaluation time (see DEFAULT_LIMITS).
+const STRING_GROWTH_METHODS = new Set(['repeat', 'padStart', 'padEnd']);
+
 // Math is exposed as a safe, side-effect-free global root.
 const MATH_METHODS = new Set([
   'abs',
@@ -173,6 +177,12 @@ const DEFAULT_LIMITS = Object.freeze({
   maxCachedExprs: 1000,
   maxExprLength: 4096,
   maxDepth: 32,
+  // Caps strings BUILT by expressions ('x'.repeat(n) / padStart / padEnd):
+  // length/depth limits bound the expression itself, but a single small
+  // expression could otherwise allocate a ~0.5GB string per evaluation —
+  // memory exhaustion from exactly the compromised-store threat these limits
+  // exist for.
+  maxBuiltStringLength: 1_000_000,
 });
 
 // AST cache keyed by jsep instance so different instances (different plugins /
@@ -183,12 +193,7 @@ const astCacheByJsep = new WeakMap();
 // string and exposed to the query planner via EXPR_META — deep-freezing them
 // once at parse time makes cross-consumer mutation (cache poisoning)
 // impossible. The interpreter only ever reads nodes.
-function deepFreeze(node) {
-  if (!node || typeof node !== 'object' || Object.isFrozen(node)) return node;
-  Object.freeze(node);
-  for (const key of Object.keys(node)) deepFreeze(node[key]);
-  return node;
-}
+const { deepFreeze } = require('../freeze.js');
 
 /**
  * Parses an expression once and caches the resulting AST keyed by both the
@@ -212,7 +217,16 @@ function parseExpr(expr, jsepInstance, limits = DEFAULT_LIMITS) {
     astCacheByJsep.set(jsepInstance, cache);
   }
 
-  if (cache.has(expr)) return cache.get(expr);
+  const cached = cache.get(expr);
+  if (cached !== undefined) {
+    // LRU touch (Map insertion order): hot early-registered expressions must
+    // not cycle out of a full cache while used on every request.
+    if (cache.size >= limits.maxCachedExprs) {
+      cache.delete(expr);
+      cache.set(expr, cached);
+    }
+    return cached;
+  }
 
   let ast;
   try {
@@ -421,6 +435,15 @@ function evalCall(node, ctx, config) {
   }
   if (!VALUE_METHODS.has(methodStr)) throw new KerberosExprError(`Method "${methodStr}" is not allowed`);
 
+  if (typeof receiver === 'string' && STRING_GROWTH_METHODS.has(methodStr)) {
+    const limit = config.maxBuiltStringLength ?? DEFAULT_LIMITS.maxBuiltStringLength;
+    const target = Number(args[0]);
+    const projected = methodStr === 'repeat' ? receiver.length * Math.max(target, 0) : Math.max(target, 0);
+    if (projected > limit) {
+      throw new KerberosExprError(`"${methodStr}" would build a string longer than ${limit} characters`);
+    }
+  }
+
   const fn = receiver[methodStr];
   if (typeof fn !== 'function') throw new KerberosExprError(`"${methodStr}" is not a callable method`);
   return fn.apply(receiver, args);
@@ -431,6 +454,13 @@ function evalNew(node, ctx, config) {
     throw new KerberosExprError('Only whitelisted constructors are allowed (Date)');
   }
 
+  // Own-property guard, mirroring evalCall's GLOBAL_FUNCTIONS check: the
+  // parse-time validator already rejects non-whitelisted constructors, but
+  // this evaluator must stay safe even for an AST that skipped it
+  // ('constructor' would otherwise resolve to the inherited Object).
+  if (!Object.prototype.hasOwnProperty.call(ALLOWED_CONSTRUCTORS, node.callee.name)) {
+    throw new KerberosExprError(`Constructor "${node.callee.name}" is not allowed`);
+  }
   const Constructor = ALLOWED_CONSTRUCTORS[node.callee.name];
   if (!Constructor) throw new KerberosExprError(`Constructor "${node.callee.name}" is not allowed`);
 
@@ -542,7 +572,7 @@ function deepTransform(value, handlers) {
  *   deserialize: (jsonSafe: unknown) => unknown,
  * }}
  */
-function createSafeExprCodec({ jsep, roots, maxCachedExprs, maxExprLength, maxDepth } = {}) {
+function createSafeExprCodec({ jsep, roots, maxCachedExprs, maxExprLength, maxDepth, maxBuiltStringLength } = {}) {
   if (!jsep || typeof jsep !== 'function') {
     throw new KerberosExprError(
       'createSafeExprCodec({ jsep }) requires a pre-configured jsep instance. ' +
@@ -553,7 +583,10 @@ function createSafeExprCodec({ jsep, roots, maxCachedExprs, maxExprLength, maxDe
     );
   }
 
-  const config = { roots: new Set(roots || DEFAULT_ROOTS) };
+  const config = {
+    roots: new Set(roots || DEFAULT_ROOTS),
+    maxBuiltStringLength: maxBuiltStringLength ?? DEFAULT_LIMITS.maxBuiltStringLength,
+  };
   const limits = {
     maxCachedExprs: maxCachedExprs ?? DEFAULT_LIMITS.maxCachedExprs,
     maxExprLength: maxExprLength ?? DEFAULT_LIMITS.maxExprLength,
@@ -611,8 +644,11 @@ function createSafeExprCodec({ jsep, roots, maxCachedExprs, maxExprLength, maxDe
  * @param {{ roots?: Iterable<string> | Set<string> }} [options]
  * @returns {unknown}
  */
-function evalExprAst(node, ctx, { roots } = {}) {
-  const config = { roots: roots instanceof Set ? roots : new Set(roots || DEFAULT_ROOTS) };
+function evalExprAst(node, ctx, { roots, maxBuiltStringLength } = {}) {
+  const config = {
+    roots: roots instanceof Set ? roots : new Set(roots || DEFAULT_ROOTS),
+    maxBuiltStringLength: maxBuiltStringLength ?? DEFAULT_LIMITS.maxBuiltStringLength,
+  };
   return evalNode(node, ctx, config);
 }
 

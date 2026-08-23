@@ -1,4 +1,5 @@
 const { parseResourcePolicyShape } = require('./validation');
+const { cloneShapeTree, deepFreeze } = require('../freeze.js');
 
 const { ALL_ACTIONS, ALL_ROLES, Effect } = require('../schemas');
 const { parseConditions, parseConstants, parseOutputs, parseVariables } = require('../policyParsers.js');
@@ -41,7 +42,7 @@ class ResourcePolicy {
    * @param {object} [options]
    */
   constructor(shape, options = {}) {
-    this.#shape = ResourcePolicy.parseShape(shape, options);
+    this.#shape = cloneShapeTree(ResourcePolicy.parseShape(shape, options));
     if (this.#shape.resourcePolicy.constants) {
       this.#shape.resourcePolicy.constants = ResourcePolicy.parseConstants(
         this.#shape.resourcePolicy.constants,
@@ -72,6 +73,12 @@ class ResourcePolicy {
       }
       this.#shape.resourcePolicy.rules = rules;
     }
+    // Post-construction hardening: the parsed shape IS live evaluation state
+    // (stored in the engine's policy Maps), and the constructor-time
+    // duplicate/deny integrity guards would be bypassable by mutating
+    // `policy.shape` afterwards. Frozen here, matching the codec's frozen
+    // shared ASTs and the Relations module's frozen compiled refs.
+    deepFreeze(this.#shape);
   }
 
   get kind() {

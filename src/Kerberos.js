@@ -296,10 +296,20 @@ class Kerberos {
 
   #getScopeChain(scope) {
     const normalized = Kerberos.normalizeScope(scope);
+    const atCapacity = this.#scopeChains.size >= Kerberos.#MAX_CACHED_SCOPE_CHAINS;
     let chain = this.#scopeChains.get(normalized);
     if (!chain) {
       chain = Kerberos.getScopeSearchChain(normalized);
-      if (this.#scopeChains.size < Kerberos.#MAX_CACHED_SCOPE_CHAINS) this.#scopeChains.set(normalized, chain);
+      // Evict the least-recently-used entry instead of refusing to insert —
+      // the memo used to freeze on whichever tenants booted first, serving
+      // every later tenant from the uncached path forever.
+      if (atCapacity) this.#scopeChains.delete(this.#scopeChains.keys().next().value);
+      this.#scopeChains.set(normalized, chain);
+    } else if (atCapacity) {
+      // LRU touch (Map insertion order) — only paid once the memo is full;
+      // below capacity the order is irrelevant and the hot path stays a get.
+      this.#scopeChains.delete(normalized);
+      this.#scopeChains.set(normalized, chain);
     }
     return chain;
   }
@@ -400,52 +410,28 @@ class Kerberos {
 
     if (this.#ajv) registerAjvKeywords(this.#ajv);
 
+    // Backend dispatch happens ONCE (priority mirrors resolveValidationAdapter:
+    // Zod → TypeBox+Ajv → JSON Schema+Ajv), then every validator wires through
+    // the same builder-name list — a new argument schema (like planResources'
+    // in v3.1) is one line here instead of three hand-synced blocks, and
+    // wiring a validator for only one backend is structurally impossible.
+    let buildValidator = null;
     if (z) {
       this.#z = z;
-      this.#resourcePolicyValidator = KerberosZodSchemas.buildResourcePolicyInstance(z);
-      this.#principalPolicyValidator = KerberosZodSchemas.buildPrincipalPolicyInstance(z);
-      this.#rolePolicyValidator = KerberosZodSchemas.buildRolePolicyInstance(z);
-      this.#derivedRolesValidator = KerberosZodSchemas.buildDerivedRolesInstance(z);
-      this.#isAllowedArgsValidator = KerberosZodSchemas.buildIsAllowedArgs(z);
-      this.#checkResourcesArgsValidator = KerberosZodSchemas.buildCheckResourcesArgs(z);
-      this.#planResourcesArgsValidator = KerberosZodSchemas.buildPlanResourcesArgs(z);
+      buildValidator = (builderName) => KerberosZodSchemas[builderName](z);
     } else if (this.#ajv && this.#typebox) {
-      this.#resourcePolicyValidator = createAjvAdapter(
-        this.#ajv,
-        KerberosTypeBoxSchemas.buildResourcePolicyInstance(this.#typebox),
-      );
-      this.#principalPolicyValidator = createAjvAdapter(
-        this.#ajv,
-        KerberosTypeBoxSchemas.buildPrincipalPolicyInstance(this.#typebox),
-      );
-      this.#rolePolicyValidator = createAjvAdapter(
-        this.#ajv,
-        KerberosTypeBoxSchemas.buildRolePolicyInstance(this.#typebox),
-      );
-      this.#derivedRolesValidator = createAjvAdapter(
-        this.#ajv,
-        KerberosTypeBoxSchemas.buildDerivedRolesInstance(this.#typebox),
-      );
-      this.#isAllowedArgsValidator = createAjvAdapter(
-        this.#ajv,
-        KerberosTypeBoxSchemas.buildIsAllowedArgs(this.#typebox),
-      );
-      this.#checkResourcesArgsValidator = createAjvAdapter(
-        this.#ajv,
-        KerberosTypeBoxSchemas.buildCheckResourcesArgs(this.#typebox),
-      );
-      this.#planResourcesArgsValidator = createAjvAdapter(
-        this.#ajv,
-        KerberosTypeBoxSchemas.buildPlanResourcesArgs(this.#typebox),
-      );
+      buildValidator = (builderName) => createAjvAdapter(this.#ajv, KerberosTypeBoxSchemas[builderName](this.#typebox));
     } else if (this.#ajv) {
-      this.#resourcePolicyValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildResourcePolicyInstance());
-      this.#principalPolicyValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildPrincipalPolicyInstance());
-      this.#rolePolicyValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildRolePolicyInstance());
-      this.#derivedRolesValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildDerivedRolesInstance());
-      this.#isAllowedArgsValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildIsAllowedArgs());
-      this.#checkResourcesArgsValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildCheckResourcesArgs());
-      this.#planResourcesArgsValidator = createAjvAdapter(this.#ajv, KerberosJsonSchemas.buildPlanResourcesArgs());
+      buildValidator = (builderName) => createAjvAdapter(this.#ajv, KerberosJsonSchemas[builderName]());
+    }
+    if (buildValidator) {
+      this.#resourcePolicyValidator = buildValidator('buildResourcePolicyInstance');
+      this.#principalPolicyValidator = buildValidator('buildPrincipalPolicyInstance');
+      this.#rolePolicyValidator = buildValidator('buildRolePolicyInstance');
+      this.#derivedRolesValidator = buildValidator('buildDerivedRolesInstance');
+      this.#isAllowedArgsValidator = buildValidator('buildIsAllowedArgs');
+      this.#checkResourcesArgsValidator = buildValidator('buildCheckResourcesArgs');
+      this.#planResourcesArgsValidator = buildValidator('buildPlanResourcesArgs');
     }
 
     const { resourcePolicies, principalPolicies, rolePolicies } = this.#getPoliciesMaps(policies);
@@ -738,7 +724,11 @@ class Kerberos {
     if (typeof this.#relations.list === 'function') {
       const listed = await withTimeout(
         Promise.resolve().then(() =>
-          this.#relations.list({ principal: req.P, resource: req.R, relations: relationNames }, { memo }),
+          // callId joins resolver-side spans/diagnostics to this decision.
+          this.#relations.list(
+            { principal: req.P, resource: req.R, relations: relationNames },
+            { memo, callId: req.callId },
+          ),
         ),
         relationsTimeout,
         () => relationsTimedOut('list'),
@@ -753,7 +743,7 @@ class Kerberos {
         checks.push(
           withTimeout(
             Promise.resolve().then(() =>
-              this.#relations.check({ principal: req.P, resource: req.R, relation }, { memo }),
+              this.#relations.check({ principal: req.P, resource: req.R, relation }, { memo, callId: req.callId }),
             ),
             relationsTimeout,
             () => relationsTimedOut('check'),
@@ -1843,7 +1833,29 @@ class Kerberos {
         if (parsedArgs.reqId) response.reqId = parsedArgs.reqId;
         return response;
       },
-      (callId) => ({ results: [], kerberosCallId: callId, reqId: args?.reqId }),
+      (callId) => {
+        // Fail-closed shape parity: callers index results positionally
+        // (results[i] ↔ resources[i]) like Cerbos's CheckResources, so the
+        // request-level fallback builds one DENY result per requested
+        // resource instead of an empty list — guarded field-by-field, since
+        // validation may not have run when the failure happened.
+        const results = [];
+        const rawResources = Array.isArray(args?.resources) ? args.resources : [];
+        for (const entry of rawResources) {
+          const resource = entry?.resource;
+          if (!resource || typeof resource.id !== 'string' || typeof resource.kind !== 'string') continue;
+          const deniedActions = {};
+          if (Array.isArray(entry.actions)) {
+            for (const action of entry.actions) {
+              if (typeof action === 'string') deniedActions[action] = effectAsBoolean ? false : Effect.Deny;
+            }
+          }
+          results.push({ resource: this.#buildResponseResource(resource), actions: deniedActions, outputs: [] });
+        }
+        const response = { results, kerberosCallId: callId };
+        if (typeof args?.reqId === 'string') response.reqId = args.reqId;
+        return response;
+      },
     );
   }
 

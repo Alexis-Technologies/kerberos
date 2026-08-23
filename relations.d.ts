@@ -176,7 +176,11 @@ export type RelationResolverOptions = ValidationOptions & {
  * object references — reuse the same object references to maximize sharing
  * (the Kerberos engine does exactly that across a checkResources batch).
  */
-export type RelationCallOptions = { memo?: Map<string, unknown> | null };
+export type RelationCallOptions = {
+  memo?: Map<string, unknown> | null;
+  /** Correlation id stamped on the call's telemetry span as `kerberos.call_id` — the engine passes its kerberosCallId through the relations seam automatically. */
+  callId?: string | null;
+};
 
 export type RelationCheckArgs = {
   resource: string | RequestResource;

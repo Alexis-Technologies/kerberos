@@ -11,6 +11,10 @@ Static policies passed to the constructor stay in memory and are always checked 
 3. On a hit, the JSON document is handled according to the `codec` option (see below).
 4. If nothing matches, the action falls back to `EFFECT_DENY` (unchanged behavior).
 
+::: warning
+The whole scope chain is walked **in memory first** — source precedence beats scope specificity. A static base-scope (`''`) policy therefore permanently shadows a *more specific* cached policy for the same `(kind/id/role, version)`: in a hybrid deployment (static org-wide defaults in code + per-tenant overrides in the store) the cached tenant override — including a tightening Deny — silently never loads. Don't combine a static policy and cached policies for the same id/version across scopes; keep each (id, version) fully static or fully cache-backed.
+:::
+
 Cache keys follow this layout:
 
 | Policy type     | Key format                                |

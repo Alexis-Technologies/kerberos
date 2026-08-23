@@ -530,7 +530,7 @@ const kerberos = new Kerberos(policies, derivedRoles, {
   - Logging is pure observability: it never changes decisions or error behavior (that is [`onError`](#options)'s job), and a throwing logger is swallowed — it can never affect authorization.
 - **`onError`** (`'throw' | 'deny'`, default `'throw'`): What happens when policy **evaluation** fails at runtime (a throwing condition function, a failing cache backend, a ReBAC resolver error).
   - `'throw'` propagates the error to the caller;
-  - `'deny'` fails closed: `isAllowed` resolves to `false`, `checkResources` to `{ results: [], kerberosCallId, reqId? }`, `planResources` to a `KIND_ALWAYS_DENIED` filter.
+  - `'deny'` fails closed: `isAllowed` resolves to `false`, `checkResources` to one all-DENY result per requested resource (positional parity with the request, like the per-resource fail-closed path — entries that cannot be echoed back from malformed arguments are skipped), `planResources` to a `KIND_ALWAYS_DENIED` filter.
   - Malformed **arguments** are programming errors and always throw `KerberosValidationError`, regardless of this option.
 
   ```javascript
@@ -821,6 +821,9 @@ Static policies passed to the constructor stay in memory and are always checked 
 3. On a hit, the JSON document is handled according to the `codec` option (see below).
 4. If nothing matches, the action falls back to `EFFECT_DENY` (unchanged behavior).
 
+> [!WARNING]
+> The whole scope chain is walked **in memory first** — source precedence beats scope specificity. A static base-scope (`''`) policy therefore permanently shadows a *more specific* cached policy for the same `(kind/id/role, version)`: in a hybrid deployment (static org-wide defaults in code + per-tenant overrides in the store) the cached tenant override — including a tightening Deny — silently never loads. Don't combine a static policy and cached policies for the same id/version across scopes; keep each (id, version) fully static or fully cache-backed.
+
 Cache keys follow this layout:
 
 | Policy type     | Key format                                |
@@ -1026,7 +1029,7 @@ Kerberos deliberately does **not** serialize raw JavaScript function bodies and 
 - `fn.toString()` produces engine/bundler-specific output (V8 vs SpiderMonkey, Babel/esbuild/SWC, `[native code]`), which silently breaks serialization across environments.
 - Re-`eval`ing on every cache hit pays a JIT-compilation cost exactly when load is highest.
 
-Instead, the built-in codec (`createSafeExprCodec({ jsep })`) uses an **AST allowlist interpreter** built on the tiny, eval-free [`jsep`](https://ericsmekens.github.io/jsep/) parser. Safe-by-default resource limits are configurable per codec: `createSafeExprCodec({ jsep, maxCachedExprs, maxExprLength, maxDepth })` — defaults `1000` cached ASTs (FIFO eviction), `4096` chars per expression, nesting depth `32` (unrelated to the ReBAC resolver's own `maxDepth: 50` walk limit). How it works:
+Instead, the built-in codec (`createSafeExprCodec({ jsep })`) uses an **AST allowlist interpreter** built on the tiny, eval-free [`jsep`](https://ericsmekens.github.io/jsep/) parser. Safe-by-default resource limits are configurable per codec: `createSafeExprCodec({ jsep, maxCachedExprs, maxExprLength, maxDepth, maxBuiltStringLength })` — defaults `1000` cached ASTs (LRU-touched bounded cache), `4096` chars per expression, nesting depth `32` (unrelated to the ReBAC resolver's own `maxDepth: 50` walk limit), and `1_000_000` chars for strings **built** by expressions (`repeat`/`padStart`/`padEnd` — without the cap a tiny expression could allocate a ~0.5GB string per evaluation). How it works:
 
 1. Each `{ $expr }` string is parsed **once** into an AST via your `jsep` instance, which is cached per (jsep instance, expression string) pair (`parse-once`).
 2. Evaluation walks the AST per request with a strict allowlist — no `eval`, no `new Function`, no recompilation.

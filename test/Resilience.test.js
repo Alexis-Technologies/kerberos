@@ -91,6 +91,36 @@ describe('Resilience', () => {
       assert.equal(await kerberos.isAllowed({ principal, action: 'view', resource }), false);
     });
 
+    it("checkResources onError:'deny' fallback returns one DENY result per requested resource", async () => {
+      const kerberos = new Kerberos(policies, [], { onError: 'deny' });
+
+      // Without a validation backend a `null` resource passes the passthrough
+      // parse, fails per-resource evaluation (isolated), and then throws at
+      // REQUEST level when the response loop echoes it back — the one genuine
+      // path into the request-level deny fallback. The fallback must mirror
+      // the per-resource fail-closed shape (one all-DENY result per
+      // echoable resource) instead of the old empty `results: []`, which
+      // crashed positional consumers (results[i] ↔ resources[i]) exactly
+      // during the incident 'deny' was configured to survive.
+      const response = await kerberos.checkResources({
+        reqId: 'req-deny-shape',
+        principal,
+        resources: [
+          { resource: null, actions: ['view'] },
+          { resource: { id: 'r1', kind: 'expense' }, actions: ['view', 'edit'] },
+        ],
+      });
+
+      assert.ok(response.kerberosCallId);
+      assert.equal(response.reqId, 'req-deny-shape');
+      // The malformed entry cannot be echoed back and is skipped; the valid
+      // one fails closed for every requested action.
+      assert.equal(response.results.length, 1);
+      assert.deepEqual(response.results[0].resource, { id: 'r1', kind: 'expense' });
+      assert.deepEqual(response.results[0].actions, { view: Effect.Deny, edit: Effect.Deny });
+      assert.deepEqual(response.results[0].outputs, []);
+    });
+
     it('should isolate per-resource evaluation failures as fail-closed DENY results', async () => {
       // Regardless of onError, a failing resource never takes down the batch:
       // it yields DENY for all its actions while other resources evaluate.
@@ -482,6 +512,67 @@ describe('Resilience', () => {
     it('rejects invalid maxConcurrency values at construction', () => {
       assert.throws(() => new Kerberos(policies, [], { maxConcurrency: 0 }), TypeError);
       assert.throws(() => new Kerberos(policies, [], { maxConcurrency: 'many' }), TypeError);
+    });
+  });
+
+  describe('post-construction hardening (frozen shapes and tokens)', () => {
+    it('freezes parsed shapes so live engine state cannot be rewritten', async () => {
+      const shape = {
+        resourcePolicy: {
+          version: 'default',
+          resource: 'expense',
+          rules: [{ name: 'user-view', actions: ['view'], effect: Effect.Allow, roles: ['USER'] }],
+        },
+      };
+      const kerberos = new Kerberos([shape], []);
+      const parsed = Kerberos.parsePolicy({ ...shape, resourcePolicy: { ...shape.resourcePolicy } });
+
+      assert.ok(Object.isFrozen(parsed.shape));
+      assert.ok(Object.isFrozen(parsed.shape.resourcePolicy));
+      assert.ok(Object.isFrozen(parsed.rules[0]));
+
+      // The mutation that used to flip decisions on an engine-held instance
+      // is now inert (sloppy-mode assignment to a frozen object no-ops).
+      try {
+        parsed.shape.resourcePolicy.rules[0].effect = Effect.Deny;
+      } catch {
+        // Strict-mode callers get a TypeError instead — equally safe.
+      }
+      assert.equal(parsed.rules[0].effect, Effect.Allow);
+      assert.equal(await kerberos.isAllowed({ principal, action: 'view', resource }), true);
+    });
+
+    it('owns a copy: the caller-supplied literal is neither mutated nor frozen', () => {
+      const literal = {
+        resourcePolicy: {
+          version: 'default',
+          resource: 'expense',
+          rules: [{ actions: ['view'], effect: Effect.Allow, roles: ['USER'] }],
+        },
+      };
+      const first = new Kerberos([literal], []);
+      // Constructing AGAIN from the same literal must work — the constructor
+      // clones the plain spine instead of normalizing the caller's object in
+      // place (the pre-freeze behavior mutated it).
+      const second = new Kerberos([literal], []);
+      assert.ok(first !== second);
+      assert.equal(Object.isFrozen(literal), false);
+      assert.equal(Object.isFrozen(literal.resourcePolicy.rules[0]), false);
+      // The literal still looks like the author wrote it (no parsed instances
+      // smuggled back into it).
+      assert.equal(typeof literal.resourcePolicy.rules[0].condition, 'undefined');
+    });
+
+    it('freezes the Effect and PlanKind token objects', () => {
+      const { PlanKind } = require('../src/index.js');
+      assert.ok(Object.isFrozen(Effect));
+      assert.ok(Object.isFrozen(PlanKind));
+      try {
+        Effect.Allow = Effect.Deny;
+      } catch {
+        // Strict-mode TypeError is fine too.
+      }
+      assert.equal(Effect.Allow, 'EFFECT_ALLOW');
     });
   });
 

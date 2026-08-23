@@ -1,4 +1,5 @@
 const { parseDerivedRolesShape } = require('./validation');
+const { cloneShapeTree, deepFreeze } = require('../freeze.js');
 
 const { Conditions } = require('../Conditions');
 const { parseConstants, parseVariables } = require('../policyParsers.js');
@@ -39,7 +40,7 @@ class DerivedRoles {
    * @param {object} [options]
    */
   constructor(shape, options = {}) {
-    this.#shape = DerivedRoles.parseShape(shape, options);
+    this.#shape = cloneShapeTree(DerivedRoles.parseShape(shape, options));
     if (this.#shape.constants) this.#shape.constants = DerivedRoles.parseConstants(this.#shape.constants, options);
     if (this.#shape.variables) this.#shape.variables = DerivedRoles.parseVariables(this.#shape.variables, options);
     if (this.#shape.definitions?.length) {
@@ -61,6 +62,13 @@ class DerivedRoles {
       }
       this.#shape.definitions = defs;
     }
+
+    // Post-construction hardening: the parsed shape IS live evaluation state
+    // (stored in the engine's policy Maps), and the constructor-time
+    // duplicate/deny integrity guards would be bypassable by mutating
+    // `policy.shape` afterwards. Frozen here, matching the codec's frozen
+    // shared ASTs and the Relations module's frozen compiled refs.
+    deepFreeze(this.#shape);
   }
 
   get name() {

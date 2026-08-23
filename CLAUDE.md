@@ -19,6 +19,7 @@ pnpm test:coverage     # c8 coverage over src/
 pnpm lint              # oxlint src test scripts bench
 pnpm format            # oxfmt src test scripts bench (format:check for CI)
 pnpm bench             # ops/sec benchmark harness (bench/bench.js)
+pnpm size              # bundle-size report (scripts/size.js; CI-enforced smoke)
 pnpm docs:dev          # VitePress dev server for docs/ (docs:build / docs:preview too)
 ```
 

@@ -28,7 +28,7 @@ const kerberos = new Kerberos(policies, derivedRoles, {
   - Logging is pure observability: it never changes decisions or error behavior (that is [`onError`](#options)'s job), and a throwing logger is swallowed — it can never affect authorization.
 - **`onError`** (`'throw' | 'deny'`, default `'throw'`): What happens when policy **evaluation** fails at runtime (a throwing condition function, a failing cache backend, a ReBAC resolver error).
   - `'throw'` propagates the error to the caller;
-  - `'deny'` fails closed: `isAllowed` resolves to `false`, `checkResources` to `{ results: [], kerberosCallId, reqId? }`, `planResources` to a `KIND_ALWAYS_DENIED` filter.
+  - `'deny'` fails closed: `isAllowed` resolves to `false`, `checkResources` to one all-DENY result per requested resource (positional parity with the request, like the per-resource fail-closed path — entries that cannot be echoed back from malformed arguments are skipped), `planResources` to a `KIND_ALWAYS_DENIED` filter.
   - Malformed **arguments** are programming errors and always throw `KerberosValidationError`, regardless of this option.
 
   ```javascript

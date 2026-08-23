@@ -462,6 +462,26 @@ describe('Caching / Storing policies', () => {
       assert.throws(() => limited.compileExpr(`${'!'.repeat(20)}P.flag`), KerberosExprError);
     });
 
+    it('caps strings BUILT by expressions (repeat/padStart/padEnd) at maxBuiltStringLength', () => {
+      // The length/depth limits bound the expression itself; without this cap
+      // a tiny expression could allocate a ~0.5GB string per evaluation —
+      // memory exhaustion from exactly the compromised-store threat the
+      // limits exist for.
+      const evalOne = (expr) => codec.compileExpr(expr)({ P: {}, R: {} });
+      assert.throws(() => evalOne("'x'.repeat(2000000)"), KerberosExprError);
+      assert.throws(() => evalOne("'ab'.padStart(1000001)"), KerberosExprError);
+      assert.throws(() => evalOne("'ab'.padEnd(1000001)"), KerberosExprError);
+      // Under the cap the methods behave natively.
+      assert.strictEqual(evalOne("'ab'.repeat(3)"), 'ababab');
+      assert.strictEqual(evalOne("'7'.padStart(3, '0')"), '007');
+
+      // Configurable, like the other limits; Infinity disables the cap.
+      const tight = createSafeExprCodec({ jsep, maxBuiltStringLength: 8 });
+      assert.throws(() => tight.compileExpr("'abc'.repeat(3)")({}), KerberosExprError);
+      const unbounded = createSafeExprCodec({ jsep, maxBuiltStringLength: Infinity });
+      assert.strictEqual(unbounded.compileExpr("'x'.repeat(20)")({}).length, 20);
+    });
+
     it('accepts deeper nesting when maxDepth is raised', () => {
       const relaxed = createSafeExprCodec({ jsep, maxDepth: 128 });
       // 40 negations (even count) of a falsy value evaluate back to false.

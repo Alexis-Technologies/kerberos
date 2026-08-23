@@ -576,6 +576,8 @@ export type PolicyCodec = {
   maxExprLength?: number;
   /** Max AST nesting depth. Default 32. */
   maxDepth?: number;
+  /** Max length of strings BUILT by expressions (repeat/padStart/padEnd). Default 1_000_000; Infinity disables. */
+  maxBuiltStringLength?: number;
 };
 
 export class KerberosExprError extends Error {
@@ -635,6 +637,8 @@ export function createSafeExprCodec(options: {
   maxExprLength?: number;
   /** Max AST nesting depth. Default 32. */
   maxDepth?: number;
+  /** Max length of strings BUILT by expressions (repeat/padStart/padEnd). Default 1_000_000; Infinity disables. */
+  maxBuiltStringLength?: number;
 }): PolicyCodec & {
   isExprDescriptor(value: unknown): boolean;
   compileExpr(expr: string): (ctx: Record<string, unknown>) => unknown;
@@ -666,11 +670,11 @@ export function deserializePolicy(json: unknown, codec: PolicyCodec): unknown;
 export type KerberosRelationsResolver = {
   check(
     args: { principal: RequestPrincipal; resource: RequestResource; relation: string },
-    opts?: { memo?: Map<string, unknown> | null },
+    opts?: { memo?: Map<string, unknown> | null; callId?: string | null },
   ): boolean | Promise<boolean>;
   list?(
     args: { principal: RequestPrincipal; resource: RequestResource; relations: string[] },
-    opts?: { memo?: Map<string, unknown> | null },
+    opts?: { memo?: Map<string, unknown> | null; callId?: string | null },
   ): Set<string> | string[] | Promise<Set<string> | string[]>;
 };
 
@@ -834,6 +838,18 @@ export class Kerberos {
   static generateCallId(): string;
   static normalizeScope(scope?: string): string;
   static getScopeSearchChain(scope?: string): string[];
+  /** Parses/validates one policy shape or instance with the configured backend. */
+  static parsePolicy(policy: unknown, options?: ValidationOptions & { schema?: unknown; resourceSchema?: unknown; principalSchema?: unknown; roleSchema?: unknown }): ResourcePolicy | PrincipalPolicy | RolePolicy;
+  /** Parses/validates one derived-roles shape or instance with the configured backend. */
+  static parseDerivedRoles(roles: unknown, options?: ValidationOptions & { schema?: unknown }): DerivedRoles;
+  /** Builds and validates the internal request envelope (external-caller seam; the engine validates arguments once at the public-method boundary instead). */
+  static parseRequest(request: { principal: RequestPrincipal; resource: RequestResource; actions: string[]; reqId?: string; callId?: string; includeMeta?: boolean }, options?: ValidationOptions & { schema?: unknown }): Record<string, unknown>;
+  /** Validates `isAllowed` arguments with the configured backend. */
+  static parseIsAllowedArgs(args: unknown, options?: ValidationOptions & { schema?: unknown }): Record<string, unknown>;
+  /** Validates `checkResources` arguments with the configured backend. */
+  static parseCheckResourcesArgs(args: unknown, options?: ValidationOptions & { schema?: unknown }): Record<string, unknown>;
+  /** Validates `planResources` arguments with the configured backend. */
+  static parsePlanResourcesArgs(args: unknown, options?: ValidationOptions & { schema?: unknown }): Record<string, unknown>;
   isAllowed(args: {
     reqId?: string;
     principal: RequestPrincipal;

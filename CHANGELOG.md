@@ -5,6 +5,18 @@ All notable changes to **`@alexify/kerberos`** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Code-review hardening waves (0–4): the Conditions inherited-key fail-open fix,
+restored Node-ESM named exports, scope-depth caps, cache-reader
+backoff/timeout/degraded-mode options (`cacheRetry`, `cacheKeyPrefix`,
+`relationsTimeoutMs`, `maxConcurrency`), per-batch policy-resolution memo and
+cross-request instance memo, audit-stream completeness (fail-closed denials,
+`principalRoles`, the `audit` option, info-level plan results,
+`kerberos.observability.failures`), the synchronous evaluation driver
+(~2.5× simple `isAllowed`), reverse-lookup truncation signaling
+(`onTruncated`), frozen policy shapes/tokens, and d.ts/export-parity guards.
+
 ## [3.1.0] - 2026-07-21
 
 ### Added
@@ -174,6 +186,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New exported constants: `ALL_ROLES`, `ALL_RESOURCES`, `DEFAULT_VERSION`,
   `BASE_SCOPE` (plus `ALL_ACTIONS` and `createCacheReader` are now typed).
 
+- **Native OpenTelemetry support (traces + metrics)** via the new `telemetry`
+  constructor option, following the same zero-dependency delegation philosophy
+  as `logger`/`cache`: pass `{ api }` (the `@opentelemetry/api` module — Kerberos
+  derives its own tracer/meter with the `@alexify/kerberos` instrumentation
+  scope) or pre-created `{ tracer, meter }` instances. One span per
+  `isAllowed`/`checkResources` call (started **active**, so auto-instrumented
+  cache spans nest under it), per-decision `kerberos.decision` events, `ERROR`
+  span status + exception events on failures, plus two metrics:
+  `kerberos.decisions` counter and `kerberos.request.duration` histogram.
+  Identity attributes (`kerberos.principal.id`, `kerberos.resource.id`) are on
+  by default and can be stripped with `telemetry.includeIdentity: false`.
+  Telemetry failures never affect authorization results, and the
+  logger-controlled error contract (fallback vs rethrow) is unchanged. New
+  structural types (`KerberosTelemetryOptions`, `KerberosTracer`,
+  `KerberosMeter`, …) are exported from `index.d.ts`.
+
+- **Browser/server entrypoint split** (pino-style). New root `browser.js` entry
+  plus a package.json `browser` field (object map) and a `browser` condition in
+  `exports`: browser bundlers (webpack, Vite, esbuild `platform: browser`,
+  Rollup node-resolve with `browser: true`, Parcel, Bun) now automatically pick
+  a build with **zero Node.js builtins**.
+- New `src/runtime/node.js` / `src/runtime/browser.js` platform modules holding
+  the only platform-specific code (`generateCallId`, `getNow`). The Node
+  runtime uses `node:crypto` / `node:perf_hooks` directly; the browser runtime
+  uses `globalThis.crypto.randomUUID` (with a pseudo-UUID fallback for insecure
+  contexts) and `globalThis.performance` (falling back to `Date.now`).
+- `engines.node >= 18` — documents the already-implicit runtime floor.
+
 ### Performance
 
 - **`checkResources` evaluates resources concurrently** via
@@ -209,37 +249,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now throw at construction** instead of crashing later during evaluation —
   every definition must be either condition-backed or relation-backed.
 - `pnpm-lock.yaml` is no longer published in the npm tarball.
-
-- **Native OpenTelemetry support (traces + metrics)** via the new `telemetry`
-  constructor option, following the same zero-dependency delegation philosophy
-  as `logger`/`cache`: pass `{ api }` (the `@opentelemetry/api` module — Kerberos
-  derives its own tracer/meter with the `@alexify/kerberos` instrumentation
-  scope) or pre-created `{ tracer, meter }` instances. One span per
-  `isAllowed`/`checkResources` call (started **active**, so auto-instrumented
-  cache spans nest under it), per-decision `kerberos.decision` events, `ERROR`
-  span status + exception events on failures, plus two metrics:
-  `kerberos.decisions` counter and `kerberos.request.duration` histogram.
-  Identity attributes (`kerberos.principal.id`, `kerberos.resource.id`) are on
-  by default and can be stripped with `telemetry.includeIdentity: false`.
-  Telemetry failures never affect authorization results, and the
-  logger-controlled error contract (fallback vs rethrow) is unchanged. New
-  structural types (`KerberosTelemetryOptions`, `KerberosTracer`,
-  `KerberosMeter`, …) are exported from `index.d.ts`.
-
-- **Browser/server entrypoint split** (pino-style). New root `browser.js` entry
-  plus a package.json `browser` field (object map) and a `browser` condition in
-  `exports`: browser bundlers (webpack, Vite, esbuild `platform: browser`,
-  Rollup node-resolve with `browser: true`, Parcel, Bun) now automatically pick
-  a build with **zero Node.js builtins**.
-- New `src/runtime/node.js` / `src/runtime/browser.js` platform modules holding
-  the only platform-specific code (`generateCallId`, `getNow`). The Node
-  runtime uses `node:crypto` / `node:perf_hooks` directly; the browser runtime
-  uses `globalThis.crypto.randomUUID` (with a pseudo-UUID fallback for insecure
-  contexts) and `globalThis.performance` (falling back to `Date.now`).
-- `engines.node >= 18` — documents the already-implicit runtime floor.
-
-### Changed
-
 - Removed the try/catch `require('crypto')` / `require('node:perf_hooks')`
   feature detection from `src/Kerberos.js` — each platform entry now targets
   its runtime directly. Node behavior is unchanged; browser bundles get
@@ -387,6 +396,9 @@ Initial release.
 - In-browser / serverless authorization.
 - Built-in test harness (`Tests`).
 
+[unreleased]: https://github.com/Alexis-Technologies/kerberos/compare/v3.1.0...HEAD
+[3.1.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v3.1.0
+[3.0.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v3.0.0
 [2.0.1]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v2.0.1
 [2.0.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v2.0.0
 [1.0.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v1.0.0

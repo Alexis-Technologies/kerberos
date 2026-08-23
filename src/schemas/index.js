@@ -19,10 +19,10 @@ const BASE_SCOPE = '';
 // no-validation-backend configuration.
 const MAX_SCOPE_LENGTH = 512;
 
-const Effect = {
+const Effect = Object.freeze({
   Allow: 'EFFECT_ALLOW',
   Deny: 'EFFECT_DENY',
-};
+});
 
 /**
  * Shared Zod schema builders used across the runtime.

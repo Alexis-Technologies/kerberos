@@ -1,4 +1,5 @@
 const { parsePrincipalPolicyShape } = require('./validation');
+const { cloneShapeTree, deepFreeze } = require('../freeze.js');
 
 const { ALL_ACTIONS, ALL_RESOURCES, Effect } = require('../schemas');
 const { parseConditions, parseConstants, parseOutputs, parseVariables } = require('../policyParsers.js');
@@ -31,7 +32,7 @@ class PrincipalPolicy {
   #shape = null;
 
   constructor(shape, options = {}) {
-    this.#shape = PrincipalPolicy.parseShape(shape, options);
+    this.#shape = cloneShapeTree(PrincipalPolicy.parseShape(shape, options));
     if (this.#shape.principalPolicy.constants) {
       this.#shape.principalPolicy.constants = PrincipalPolicy.parseConstants(
         this.#shape.principalPolicy.constants,
@@ -59,6 +60,13 @@ class PrincipalPolicy {
       }
       this.#shape.principalPolicy.rules = rules;
     }
+
+    // Post-construction hardening: the parsed shape IS live evaluation state
+    // (stored in the engine's policy Maps), and the constructor-time
+    // duplicate/deny integrity guards would be bypassable by mutating
+    // `policy.shape` afterwards. Frozen here, matching the codec's frozen
+    // shared ASTs and the Relations module's frozen compiled refs.
+    deepFreeze(this.#shape);
   }
 
   get principal() {

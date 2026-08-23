@@ -539,3 +539,62 @@ describe('Telemetry wave-2 observability', () => {
     assert.ok(typeof requestSpan.attributes['kerberos.relations.duration_ms'] === 'number');
   });
 });
+
+describe('Relations span correlation (callId through the seam)', () => {
+  it('stamps the engine kerberosCallId on resolver spans via opts.callId', async () => {
+    const { RelationResolver } = require('../src/Relations/index.js');
+    const { exporter, tracer } = createTraceSetup();
+    const resolver = new RelationResolver({
+      schema: {
+        relationSchema: {
+          definitions: {
+            user: {},
+            document: { relations: { viewer: ['user'] }, permissions: { view: { anyOf: ['viewer'] } } },
+          },
+        },
+      },
+      tuples: ['document:doc1#viewer@user:sally'],
+      telemetry: { tracer },
+    });
+
+    // Standalone call with an explicit correlation id.
+    await resolver.check(
+      { resource: 'document:doc1', permission: 'view', subject: 'user:sally', context: null },
+      {
+        callId: 'call-corr-1',
+      },
+    );
+    let spans = exporter.getFinishedSpans();
+    assert.equal(spans[0].attributes['kerberos.call_id'], 'call-corr-1');
+    exporter.reset();
+
+    // Driven through the engine seam: the request's kerberosCallId arrives
+    // in the resolver's span attributes automatically.
+    const relationPolicies = [
+      {
+        resourcePolicy: {
+          version: 'default',
+          resource: 'document',
+          importDerivedRoles: ['doc_roles'],
+          rules: [{ actions: ['view'], effect: Effect.Allow, derivedRoles: ['DOC_VIEWER'] }],
+        },
+      },
+    ];
+    const derivedRoles = [{ name: 'doc_roles', definitions: [{ name: 'DOC_VIEWER', relation: 'view' }] }];
+    const kerberos = new Kerberos(relationPolicies, derivedRoles, {
+      relations: resolver,
+      getCallId: () => 'call-corr-2',
+    });
+    assert.equal(
+      await kerberos.isAllowed({
+        principal: { id: 'sally', roles: ['USER'] },
+        action: 'view',
+        resource: { id: 'doc1', kind: 'document' },
+      }),
+      true,
+    );
+    spans = exporter.getFinishedSpans();
+    const resolverSpan = spans.find((span) => span.name.startsWith('Kerberos.relations.'));
+    assert.equal(resolverSpan.attributes['kerberos.call_id'], 'call-corr-2');
+  });
+});
