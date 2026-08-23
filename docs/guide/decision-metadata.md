@@ -78,7 +78,7 @@ Per action, `meta.actions[action]` includes:
 - **matchedPolicy**: The policy source that produced the decision — a resource source such as `resource.expense.vdefault/acme.corp`, a principal source such as `principal.sally.vdefault/acme.corp`, or a role source such as `role.USER.vdefault`
 - **matchedRule**: The exact rule that produced the decision
 - **matchedScope**: The scope of the matched policy (present for scoped policies)
-- **reason** (denied actions only): why nothing allowed the action — `'rule-miss'` (no rule targeted the action / matched the principal's roles), `'condition-not-met'` (a rule targeted it but its condition failed) or `'policy-miss'` (no applicable policy existed at all)
+- **reason** (denied actions only): why nothing allowed the action — `'rule-miss'` (no rule targeted the action / matched the principal's roles), `'condition-not-met'` (a rule targeted it but its condition failed), `'policy-miss'` (no applicable policy existed at all) or `'evaluation-error'` (the resource's evaluation rejected inside a `checkResources` batch and failed closed — paired with `errorName` so an outage is distinguishable from a policy DENY)
 
 At the result level:
 

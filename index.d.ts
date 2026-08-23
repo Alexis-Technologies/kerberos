@@ -410,6 +410,8 @@ export type KerberosAuditLogEntry = {
       matchedRule?: string;
       matchedScope?: string;
       reason?: KerberosDecisionReason;
+      /** Error class name for `'evaluation-error'` fail-closed denials. */
+      errorName?: string;
     }>;
     effectiveDerivedRoles: string[];
     resolution?: KerberosResolutionTraceEntry[];
@@ -420,9 +422,11 @@ export type KerberosAuditLogEntry = {
  * Decision-trace reason recorded for denied actions when `includeMeta` is set:
  * - `'policy-miss'` — no policy source produced a decision at all;
  * - `'rule-miss'` — a policy matched but no rule targeted the action/roles;
- * - `'condition-not-met'` — a rule targeted the action but its condition failed.
+ * - `'condition-not-met'` — a rule targeted the action but its condition failed;
+ * - `'evaluation-error'` — the resource's evaluation rejected inside a
+ *   `checkResources` batch and failed closed (paired with `errorName`).
  */
-export type KerberosDecisionReason = 'policy-miss' | 'rule-miss' | 'condition-not-met';
+export type KerberosDecisionReason = 'policy-miss' | 'rule-miss' | 'condition-not-met' | 'evaluation-error';
 
 /** Relation-resolution record in the decision trace (`meta.resolution`). */
 export type KerberosRelationsTraceEntry = {
@@ -658,15 +662,39 @@ export type KerberosRelationsResolver = {
   ): Set<string> | string[] | Promise<Set<string> | string[]>;
 };
 
+export type KerberosCacheRetry = {
+  /** Read attempts per key. Default 3; `attempts: 1` disables retrying. */
+  attempts?: number;
+  /** Base backoff delay between attempts (exponential, default 25ms); `delayMs: 0` restores immediate retries. */
+  delayMs?: number;
+  /** Full-jitter randomization of the backoff delay (default true). */
+  jitter?: boolean;
+  /** Optional bound on each read attempt; a hung `get` counts as a failed attempt. Off by default. */
+  timeoutMs?: number;
+  /**
+   * What to do after the retry budget is exhausted: `'throw'` (default)
+   * surfaces `KerberosCacheError` per the `onError` semantics; `'miss'` counts
+   * the read as a cache miss so evaluation falls through to the remaining
+   * static sources (opt-in degraded mode — a cache outage no longer disables
+   * statically-resolvable decisions). Applies to the engine's policy reads
+   * only.
+   */
+  onExhausted?: 'throw' | 'miss';
+};
+
 export type KerberosOptions = ValidationOptions & {
   logger?: KerberosLogger | boolean;
   telemetry?: KerberosTelemetryOptions;
   cache?: CacheLike;
-  /** Retry policy for transient cache.get failures. Default { attempts: 3 }; attempts: 1 disables retrying. */
-  cacheRetry?: { attempts?: number } | null;
+  /** Retry/backoff/timeout policy for cache.get failures. Default { attempts: 3, delayMs: 25, jitter: true }. */
+  cacheRetry?: KerberosCacheRetry | null;
+  /** Prefix prepended to every cache key (policies + derived roles) for per-tenant/per-environment namespacing on shared stores. */
+  cacheKeyPrefix?: string;
   codec?: PolicyCodec;
   /** ReBAC resolver used for relation-backed derived roles. */
   relations?: KerberosRelationsResolver | null;
+  /** Optional bound on each `relations.check`/`relations.list` call; a hung resolver fails as `KerberosRelationsError` instead of hanging authorization. Off by default. */
+  relationsTimeoutMs?: number;
   /**
    * Evaluation-phase error handling. `'throw'` (default) propagates errors to
    * the caller; `'deny'` converts them to fail-closed results (`isAllowed` →
@@ -694,7 +722,7 @@ export const BASE_SCOPE: '';
  */
 export function createCacheReader(
   cache: CacheLike | false | null | undefined,
-  retry?: { attempts?: number } | null,
+  retry?: KerberosCacheRetry | null,
 ): { enabled: boolean; get(key: string): Promise<unknown> };
 
 /** planResources filter outcome (Cerbos-compatible). */

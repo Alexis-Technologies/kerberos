@@ -122,7 +122,8 @@ export type RelationResolverOptions = ValidationOptions & {
   tuples?: RelationTuple[];
   /** Dynamic tuples: read-only fallback keyed `rel:<type>:<id>:<relation>`. */
   cache?: CacheLike;
-  cacheRetry?: { attempts?: number } | null;
+  /** Retry/backoff/timeout policy (same shape as the engine's `cacheRetry`, minus `onExhausted` — relation reads never degrade to a miss, since "not found" would widen access in exclusion positions). */
+  cacheRetry?: { attempts?: number; delayMs?: number; jitter?: boolean; timeoutMs?: number } | null;
   /** Compiles `{ $expr }` caveat conditions (eval-free). */
   codec?: PolicyCodec;
   logger?: KerberosLogger | boolean;
@@ -145,8 +146,21 @@ export type RelationResolverOptions = ValidationOptions & {
   reverseIndex?: boolean;
   /** Recursion guard (SpiceDB semantics — no visited-set). Default 50. */
   maxDepth?: number;
-  /** Lookup result cap. Default 1000. */
+  /**
+   * Lookup result cap for `lookupSubjects`/`lookupResources`. Default 1000.
+   * The cap bounds the RESPONSE only — see `onTruncated` for what happens
+   * when it is exceeded.
+   */
   maxResults?: number;
+  /**
+   * What to do when a lookup result exceeds `maxResults`: `'ignore'` (default)
+   * returns the first `maxResults` entries silently (historical behavior);
+   * `'throw'` raises `KerberosRelationsError` instead — recommended whenever
+   * lookup results feed a query-plan filter, where a silently narrowed list
+   * would drop authorized rows. Truncation is always recorded on the call's
+   * telemetry span as `kerberos.result.truncated`.
+   */
+  onTruncated?: 'ignore' | 'throw';
 };
 
 /**

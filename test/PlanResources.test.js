@@ -555,6 +555,18 @@ describe('planResources', () => {
       const denied = await planOf(new Kerberos([], []), {});
       assert.strictEqual(await expandRelationOperands(denied, async () => []), denied);
       await assert.rejects(expandRelationOperands(plan, null), TypeError);
+
+      // A truncated lookup degrades to `opaque` instead of baking an
+      // incomplete id list into the plan (which would silently drop
+      // authorized rows from the translated query).
+      const truncated = await expandRelationOperands(plan, async () => ({ ids: ['d1'], truncated: true }));
+      assert.strictEqual(truncated.filter.condition.expression.operator, 'opaque');
+
+      // The `{ ids, truncated: false }` envelope behaves like a plain list.
+      const enveloped = await expandRelationOperands(plan, async () => ({ ids: ['d1'], truncated: false }));
+      assert.deepStrictEqual(enveloped.filter.condition, {
+        expression: { operator: 'in', operands: [{ variable: 'request.resource.id' }, { value: ['d1'] }] },
+      });
     });
   });
 

@@ -340,15 +340,26 @@ class RelationResolver {
       reverseIndex = false,
       maxDepth,
       maxResults,
+      onTruncated,
       z,
       ajv,
       typebox,
     } = options;
 
+    if (onTruncated !== undefined && onTruncated !== null && onTruncated !== 'ignore' && onTruncated !== 'throw') {
+      throw new KerberosRelationsError(`Invalid onTruncated option "${onTruncated}" — expected 'ignore' or 'throw'`);
+    }
+
     this.#schema = schema instanceof RelationSchema ? schema : new RelationSchema(schema, { z, ajv, typebox, codec });
     this.#limits = {
       maxDepth: maxDepth ?? DEFAULT_MAX_DEPTH,
       maxResults: maxResults ?? DEFAULT_MAX_RESULTS,
+      // 'throw' turns a maxResults truncation of lookupSubjects /
+      // lookupResources into a typed error instead of a silently narrowed
+      // result — for authorization filtering (query-plan expansion), a loud
+      // failure beats missing authorized rows. Default 'ignore' preserves the
+      // historical cap-and-return behavior.
+      onTruncated: onTruncated ?? 'ignore',
     };
     this.#reader = createCacheReader(cache, cacheRetry);
     this.#log = createLoggerWriter(logger);
@@ -674,11 +685,14 @@ class RelationResolver {
         }
       }
       results.sort(compareSubjectResults);
-      const limited = results.length > this.#limits.maxResults ? results.slice(0, this.#limits.maxResults) : results;
+      const truncated = results.length > this.#limits.maxResults;
+      const limited = truncated ? results.slice(0, this.#limits.maxResults) : results;
       this.#setSpanAttributes(otel, resource.type, name, {
         'kerberos.result.count': limited.length,
+        'kerberos.result.truncated': truncated,
         resourceId: resource.id,
       });
+      if (truncated) this.#assertNotTruncated('lookupSubjects', results.length);
       return limited;
     });
   }
@@ -715,14 +729,16 @@ class RelationResolver {
       const session = this.#createSession(parsed, opts);
       const ids = await this.#lookupResourcesInternal(subject, resourceType, name, session, this.#limits.maxDepth);
       const sortedIds = [...ids].sort();
-      const limitedIds =
-        sortedIds.length > this.#limits.maxResults ? sortedIds.slice(0, this.#limits.maxResults) : sortedIds;
+      const truncated = sortedIds.length > this.#limits.maxResults;
+      const limitedIds = truncated ? sortedIds.slice(0, this.#limits.maxResults) : sortedIds;
       const results = [];
       for (const id of limitedIds) results.push(`${resourceType}:${id}`);
       this.#setSpanAttributes(otel, resourceType, name, {
         'kerberos.result.count': results.length,
+        'kerberos.result.truncated': truncated,
         subjectKey: subjectToString(subject),
       });
+      if (truncated) this.#assertNotTruncated('lookupResources', sortedIds.length);
       return results;
     });
   }
@@ -840,6 +856,19 @@ class RelationResolver {
     if (!this.#schema.isCheckable(resourceType, name)) {
       throw new KerberosRelationsError(`${label}: "${name}" is not a relation or permission of "${resourceType}"`);
     }
+  }
+
+  // With onTruncated: 'throw', a capped reverse lookup fails loudly instead of
+  // returning a silently narrowed result (which downstream query-plan
+  // expansion would bake into an incomplete id filter, dropping authorized
+  // rows). Called after the span attributes are set so traces still record the
+  // truncation either way.
+  #assertNotTruncated(label, totalCount) {
+    if (this.#limits.onTruncated !== 'throw') return;
+    throw new KerberosRelationsError(
+      `${label}: result truncated to maxResults=${this.#limits.maxResults} (found ${totalCount}); ` +
+        'raise maxResults or handle truncation explicitly',
+    );
   }
 
   #identityToken(value) {

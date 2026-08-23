@@ -2,8 +2,10 @@ const { JsonSchemas, TypeBoxSchemas, ZodSchemas } = require('../../schemas');
 
 // Deny reasons recorded in meta.actions entries (see KerberosDecisionReason in
 // index.d.ts): 'policy-miss' entries carry NO matchedPolicy at all, which is
-// why every action-metadata field below is optional.
-const DECISION_REASONS = ['policy-miss', 'rule-miss', 'condition-not-met'];
+// why every action-metadata field below is optional. 'evaluation-error' marks
+// fail-closed denials from a rejected per-resource evaluation in
+// checkResources (paired with an optional errorName).
+const DECISION_REASONS = ['policy-miss', 'rule-miss', 'condition-not-met', 'evaluation-error'];
 
 const POLICY_TRACE_SOURCES = ['principal', 'role', 'resource'];
 
@@ -17,6 +19,7 @@ class MetadataZodSchemas extends ZodSchemas {
       matchedRule: z.string().optional(),
       matchedScope: z.string().optional(),
       reason: z.enum(DECISION_REASONS).optional(),
+      errorName: z.string().optional(),
     });
   }
 
@@ -64,6 +67,7 @@ class MetadataJsonSchemas extends JsonSchemas {
         matchedRule: { type: 'string' },
         matchedScope: { type: 'string' },
         reason: { type: 'string', enum: DECISION_REASONS },
+        errorName: { type: 'string' },
       },
       [],
     );
@@ -131,6 +135,7 @@ class MetadataTypeBoxSchemas extends TypeBoxSchemas {
       matchedRule: t.Optional(t.String()),
       matchedScope: t.Optional(t.String()),
       reason: t.Optional(t.Union(DECISION_REASONS.map((reason) => t.Literal(reason)))),
+      errorName: t.Optional(t.String()),
     });
   }
 

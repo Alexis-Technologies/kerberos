@@ -1036,6 +1036,29 @@ describe('RelationResolver', () => {
       );
     });
 
+    it("onTruncated: 'throw' fails loudly instead of silently narrowing the result", async () => {
+      const strict = buildResolver({ maxResults: 1, onTruncated: 'throw' });
+      await assert.rejects(
+        () => strict.lookupResources({ subject: 'user:sara', permission: 'view', resourceType: 'document' }),
+        (error) => error instanceof KerberosRelationsError && /truncated to maxResults=1/.test(error.message),
+      );
+      await assert.rejects(
+        () => strict.lookupSubjects({ resource: 'document:readme', permission: 'view' }),
+        (error) => error instanceof KerberosRelationsError && /lookupSubjects: result truncated/.test(error.message),
+      );
+      // Under the cap the strict mode returns results normally.
+      assert.deepEqual(
+        await buildResolver({ onTruncated: 'throw' }).lookupResources({
+          subject: 'user:olga',
+          relation: 'owner',
+          resourceType: 'document',
+        }),
+        ['document:orphan', 'document:readme'],
+      );
+      // Invalid option values are rejected at construction.
+      assert.throws(() => buildResolver({ onTruncated: 'maybe' }), KerberosRelationsError);
+    });
+
     it('requires the reverse-index contract when a cache is configured', async () => {
       const cached = buildResolver({ cache: { async get() {} } });
       await assert.rejects(

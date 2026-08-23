@@ -119,6 +119,36 @@ describe('Caching / Storing policies', () => {
       assert.ok(output);
       assert.deepStrictEqual(output.val, { owner: 'u1', by: 'u1' });
     });
+
+    it('resolves each distinct policy once per checkResources batch (singleflight memo)', async () => {
+      const reads = [];
+      const backing = await buildCache();
+      const countingCache = {
+        async get(key) {
+          reads.push(key);
+          return backing.get(key);
+        },
+      };
+      const counted = new Kerberos([], [], { cache: countingCache, codec: { jsep } });
+
+      const resources = Array.from({ length: 20 }, (_, i) => ({
+        resource: { ...openDoc, id: `doc${i}` },
+        actions: ['view'],
+      }));
+      const response = await counted.checkResources({ principal: owner, resources, includeMeta: true });
+
+      // 20 same-kind resources share one principal / role / resource /
+      // derived-roles resolution each — no per-resource re-reads.
+      assert.equal(reads.length, new Set(reads).size, `duplicate cache reads: ${reads.join(', ')}`);
+
+      // The memoized trace entry is replayed into EVERY resource's resolution.
+      for (const result of response.results) {
+        assert.equal(result.actions.view, Effect.Allow);
+        const resourceEntry = result.meta.resolution.find((entry) => entry.source === 'resource');
+        assert.equal(resourceEntry.matchedScope, '');
+        assert.equal(resourceEntry.origin, 'cache');
+      }
+    });
   });
 
   describe('codec round-trip', () => {

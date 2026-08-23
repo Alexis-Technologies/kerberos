@@ -7,7 +7,8 @@ const { KerberosJsonSchemas, KerberosTypeBoxSchemas, KerberosZodSchemas } = requ
 const { createLoggerWriter } = require('./logging.js');
 const { createTelemetryWriter } = require('./telemetry.js');
 const { createCacheReader } = require('./caching/cache.js');
-const { KerberosCodecError, KerberosValidationError } = require('./errors.js');
+const { KerberosCodecError, KerberosRelationsError, KerberosValidationError } = require('./errors.js');
+const { withTimeout } = require('./async.js');
 const { createSafeExprCodec } = require('./caching/codec.js');
 const { PlanKind, countLeaves, toDebugString, toFilter } = require('./planning/nodes.js');
 const { buildResourcePlan } = require('./planning/planner.js');
@@ -240,6 +241,21 @@ class Kerberos {
 
   #onError = 'throw';
 
+  // `cacheRetry.onExhausted`: 'throw' (default, fail-closed) or 'miss' — after
+  // the reader exhausts its retries, count the read as a cache miss so the
+  // scope-chain walk continues to lower-precedence static sources instead of
+  // turning a cache outage into a total authorization outage.
+  #cacheOnExhausted = 'throw';
+
+  // Prepended to every cache key (policies + derived roles) so multiple
+  // tenants/environments can share one store without colliding — derived-roles
+  // names are otherwise a single global namespace.
+  #cacheKeyPrefix = '';
+
+  // Optional bound on each `relations.check`/`relations.list` call; 0 = off
+  // (hang protection is the resolver's responsibility then).
+  #relationsTimeoutMs = 0;
+
   /** @type {{ check: Function, list?: Function } | null} */
   #relations = null;
 
@@ -269,14 +285,30 @@ class Kerberos {
   constructor(
     policies,
     derivedRoles,
-    { logger, telemetry, cache, cacheRetry, codec, onError, relations, z, ajv, typebox, getCallId } = {
+    {
+      logger,
+      telemetry,
+      cache,
+      cacheRetry,
+      cacheKeyPrefix,
+      codec,
+      onError,
+      relations,
+      relationsTimeoutMs,
+      z,
+      ajv,
+      typebox,
+      getCallId,
+    } = {
       logger: false,
       telemetry: null,
       cache: null,
       cacheRetry: null,
+      cacheKeyPrefix: '',
       codec: null,
       onError: 'throw',
       relations: null,
+      relationsTimeoutMs: 0,
       z: null,
       ajv: null,
       typebox: null,
@@ -289,6 +321,24 @@ class Kerberos {
       throw new TypeError(`Invalid onError option "${onError}" — expected 'throw' or 'deny'`);
     }
     this.#onError = onError ?? 'throw';
+
+    const onExhausted = cacheRetry?.onExhausted;
+    if (onExhausted !== undefined && onExhausted !== null && onExhausted !== 'throw' && onExhausted !== 'miss') {
+      throw new TypeError(`Invalid cacheRetry.onExhausted option "${onExhausted}" — expected 'throw' or 'miss'`);
+    }
+    this.#cacheOnExhausted = onExhausted ?? 'throw';
+
+    if (cacheKeyPrefix !== undefined && cacheKeyPrefix !== null && typeof cacheKeyPrefix !== 'string') {
+      throw new TypeError('Invalid cacheKeyPrefix option — expected a string');
+    }
+    this.#cacheKeyPrefix = cacheKeyPrefix ?? '';
+
+    if (relationsTimeoutMs !== undefined && relationsTimeoutMs !== null) {
+      if (typeof relationsTimeoutMs !== 'number' || !Number.isFinite(relationsTimeoutMs) || relationsTimeoutMs < 0) {
+        throw new TypeError('Invalid relationsTimeoutMs option — expected a non-negative finite number');
+      }
+      this.#relationsTimeoutMs = relationsTimeoutMs;
+    }
 
     // ReBAC delegation seam: any object with `check` (and optionally `list`)
     // works — a SQL/ORM-backed resolver or the built-in Zanzibar-lite one from
@@ -417,10 +467,19 @@ class Kerberos {
     let value;
     try {
       // A transient backend failure surfaces here as KerberosCacheError (after
-      // the reader's retry loop) and propagates per the `onError` semantics.
+      // the reader's retry loop) and propagates per the `onError` semantics —
+      // unless `cacheRetry.onExhausted: 'miss'` opts into degraded mode below.
       value = await this.#cache.get(key);
     } catch (error) {
       this.#recordCacheResult(key, 'error');
+      if (this.#cacheOnExhausted === 'miss') {
+        // Opt-in degraded mode: the exhausted read counts as a miss so
+        // evaluation falls through to the remaining (static) sources. The
+        // degradation stays visible via the 'error' cache metric above plus a
+        // guarded error log entry.
+        this.#logMethodError('CacheDegradedToMiss', null, null, error);
+        return null;
+      }
       throw error;
     }
     if (value === undefined || value === null) {
@@ -511,17 +570,28 @@ class Kerberos {
    * Resolves one derived-roles definition set by name: in-memory first, then
    * the cache fallback. Shared by runtime evaluation and query planning.
    */
-  async #resolveDerivedRolesSetByName(name) {
+  async #resolveDerivedRolesSetByName(name, lookups) {
     const role = this.#derivedRoles.get(name);
     if (role) return role;
-    return this.#resolveFromCache(`derivedRoles:${name}`, (shape) => new DerivedRoles(shape, this.#policyOptions()));
+    // Same per-call singleflight memo as policy lookups ('derivedRoles:' can
+    // never collide with the 'principal'/'role'/'resource' source prefixes).
+    const memoKey = `derivedRoles:${name}`;
+    let promise = lookups?.get(memoKey);
+    if (!promise) {
+      promise = this.#resolveFromCache(
+        `${this.#cacheKeyPrefix}derivedRoles:${name}`,
+        (shape) => new DerivedRoles(shape, this.#policyOptions()),
+      );
+      lookups?.set(memoKey, promise);
+    }
+    return promise;
   }
 
-  async #getImportedDerivedRoles(policy, req, relationsMemo, trace) {
+  async #getImportedDerivedRoles(policy, req, relationsMemo, trace, lookups) {
     const importedRoles = new Set();
     const relationCandidates = [];
     for (const name of policy.importDerivedRoles) {
-      const role = await this.#resolveDerivedRolesSetByName(name);
+      const role = await this.#resolveDerivedRolesSetByName(name, lookups);
       if (!role) continue;
       const derivedRoles = role.get(req);
       if (derivedRoles) for (const derivedRole of derivedRoles) importedRoles.add(derivedRole);
@@ -569,11 +639,20 @@ class Kerberos {
       relationNames.push(candidate.relation);
     }
 
+    // With `relationsTimeoutMs` set, a resolver call that neither resolves nor
+    // rejects fails as KerberosRelationsError instead of hanging authorization.
+    const relationsTimeout = this.#relationsTimeoutMs;
+    const relationsTimedOut = (op) =>
+      new KerberosRelationsError(`relations.${op} timed out after ${relationsTimeout}ms`);
+
     let granted;
     if (typeof this.#relations.list === 'function') {
-      const listed = await this.#relations.list(
-        { principal: req.P, resource: req.R, relations: relationNames },
-        { memo },
+      const listed = await withTimeout(
+        Promise.resolve().then(() =>
+          this.#relations.list({ principal: req.P, resource: req.R, relations: relationNames }, { memo }),
+        ),
+        relationsTimeout,
+        () => relationsTimedOut('list'),
       );
       granted = listed instanceof Set ? listed : new Set(listed ?? []);
     } else {
@@ -582,7 +661,15 @@ class Kerberos {
       // semantics) — a resolver error must not silently read as "not granted".
       const checks = [];
       for (const relation of relationNames) {
-        checks.push(this.#relations.check({ principal: req.P, resource: req.R, relation }, { memo }));
+        checks.push(
+          withTimeout(
+            Promise.resolve().then(() =>
+              this.#relations.check({ principal: req.P, resource: req.R, relation }, { memo }),
+            ),
+            relationsTimeout,
+            () => relationsTimedOut('check'),
+          ),
+        );
       }
       const settled = await Promise.allSettled(checks);
       granted = new Set();
@@ -726,43 +813,103 @@ class Kerberos {
    * When a `trace` array is provided (decision tracing, gated on
    * `includeMeta`), every resolution attempt is recorded with the scopes that
    * were searched and where the policy was found (or that it wasn't).
+   *
+   * When a `lookups` memo is provided (one per `checkResources` batch /
+   * `planResources` call), the resolution PROMISE is memoized by
+   * `source:id:version:scope` — the same singleflight pattern as the relations
+   * memo — so a batch resolves each distinct policy once instead of once per
+   * resource (with a remote cache that is the difference between O(resources ×
+   * sources × scopes) and O(sources × scopes) backend reads). The trace entry
+   * is stored with the result and replayed into every caller's trace buffer.
+   * Single-shot `isAllowed` passes no memo and takes the allocation-free fast
+   * path below — memo bookkeeping would be pure overhead there.
    */
-  async #resolvePolicy(source, map, id, version, scope, Constructor, trace) {
+  async #resolvePolicy(source, map, id, version, scope, Constructor, trace, lookups) {
+    if (!lookups) {
+      // Fast path: no memo bookkeeping, and — because `?.` short-circuits
+      // argument evaluation — no entry objects at all unless tracing is on.
+      const scopeSearchChain = this.#getScopeChain(scope);
+
+      for (const searchScope of scopeSearchChain) {
+        const policy = map.get(`${id}.${version}.${searchScope}`);
+        if (policy) {
+          trace?.push({ source, id, version, scopesSearched: scopeSearchChain, matchedScope: searchScope });
+          return policy;
+        }
+      }
+
+      if (this.#cache.enabled) {
+        for (const searchScope of scopeSearchChain) {
+          const policy = await this.#resolveFromCache(
+            `${this.#cacheKeyPrefix}${source}:${id}:${version}:${searchScope}`,
+            (shape) => new Constructor(shape, this.#policyOptions()),
+          );
+          if (policy) {
+            trace?.push({
+              source,
+              id,
+              version,
+              scopesSearched: scopeSearchChain,
+              matchedScope: searchScope,
+              origin: 'cache',
+            });
+            return policy;
+          }
+        }
+      }
+
+      trace?.push({ source, id, version, scopesSearched: scopeSearchChain, matchedScope: null });
+      return null;
+    }
+
+    const normalizedScope = Kerberos.normalizeScope(scope);
+    const memoKey = `${source}:${id}:${version}:${normalizedScope}`;
+    let promise = lookups.get(memoKey);
+    if (!promise) {
+      promise = this.#resolvePolicyUncached(source, map, id, version, normalizedScope, Constructor);
+      lookups.set(memoKey, promise);
+    }
+    const { policy, entry } = await promise;
+    trace?.push(entry);
+    return policy;
+  }
+
+  async #resolvePolicyUncached(source, map, id, version, scope, Constructor) {
     const scopeSearchChain = this.#getScopeChain(scope);
 
     for (const searchScope of scopeSearchChain) {
       const policy = map.get(`${id}.${version}.${searchScope}`);
       if (policy) {
-        trace?.push({ source, id, version, scopesSearched: scopeSearchChain, matchedScope: searchScope });
-        return policy;
+        return { policy, entry: { source, id, version, scopesSearched: scopeSearchChain, matchedScope: searchScope } };
       }
     }
 
     if (this.#cache.enabled) {
       for (const searchScope of scopeSearchChain) {
         const policy = await this.#resolveFromCache(
-          `${source}:${id}:${version}:${searchScope}`,
+          `${this.#cacheKeyPrefix}${source}:${id}:${version}:${searchScope}`,
           (shape) => new Constructor(shape, this.#policyOptions()),
         );
         if (policy) {
-          trace?.push({
-            source,
-            id,
-            version,
-            scopesSearched: scopeSearchChain,
-            matchedScope: searchScope,
-            origin: 'cache',
-          });
-          return policy;
+          return {
+            policy,
+            entry: {
+              source,
+              id,
+              version,
+              scopesSearched: scopeSearchChain,
+              matchedScope: searchScope,
+              origin: 'cache',
+            },
+          };
         }
       }
     }
 
-    trace?.push({ source, id, version, scopesSearched: scopeSearchChain, matchedScope: null });
-    return null;
+    return { policy: null, entry: { source, id, version, scopesSearched: scopeSearchChain, matchedScope: null } };
   }
 
-  #getResourcePolicy(req, trace) {
+  #getResourcePolicy(req, trace, lookups) {
     const version = req.R.policyVersion ?? DEFAULT_VERSION;
     return this.#resolvePolicy(
       'resource',
@@ -772,10 +919,11 @@ class Kerberos {
       req.R.scope,
       ResourcePolicy,
       trace,
+      lookups,
     );
   }
 
-  #getPrincipalPolicy(req, trace) {
+  #getPrincipalPolicy(req, trace, lookups) {
     const version = req.P.policyVersion ?? DEFAULT_VERSION;
     return this.#resolvePolicy(
       'principal',
@@ -785,29 +933,37 @@ class Kerberos {
       req.P.scope,
       PrincipalPolicy,
       trace,
+      lookups,
     );
   }
 
-  #getRolePolicyByName(role, req, trace) {
+  #getRolePolicyByName(role, req, trace, lookups) {
     const version = req.P.policyVersion ?? DEFAULT_VERSION;
-    return this.#resolvePolicy('role', this.#rolePolicies, role, version, req.P.scope, RolePolicy, trace);
+    return this.#resolvePolicy('role', this.#rolePolicies, role, version, req.P.scope, RolePolicy, trace, lookups);
   }
 
-  async #getRolePolicies(req, trace) {
+  async #getRolePolicies(req, trace, lookups) {
     const policies = [];
     const seenRoles = new Set();
 
     for (const role of req.P.roles) {
       if (seenRoles.has(role)) continue;
       seenRoles.add(role);
-      const policy = await this.#getRolePolicyByName(role, req, trace);
+      const policy = await this.#getRolePolicyByName(role, req, trace, lookups);
       if (policy) policies.push(policy);
     }
 
     return policies;
   }
 
-  async #evaluateRolePolicy(policy, req, memo = new Map(), stack = new Set(), actionsKey = req.actions.join(',')) {
+  async #evaluateRolePolicy(
+    policy,
+    req,
+    memo = new Map(),
+    stack = new Set(),
+    actionsKey = req.actions.join(','),
+    lookups = null,
+  ) {
     const policyKey = `${policy.role}.${policy.version}.${policy.scope ?? ''}|${actionsKey}`;
     if (memo.has(policyKey)) return memo.get(policyKey);
     if (stack.has(policyKey)) throw new Error(`Circular role policy inheritance detected for role "${policy.role}"`);
@@ -817,10 +973,10 @@ class Kerberos {
     const result = policy.check(req);
 
     for (const parentRole of policy.parentRoles) {
-      const parentPolicy = await this.#getRolePolicyByName(parentRole, req);
+      const parentPolicy = await this.#getRolePolicyByName(parentRole, req, null, lookups);
       if (!parentPolicy) continue;
 
-      const parentResult = await this.#evaluateRolePolicy(parentPolicy, req, memo, stack, actionsKey);
+      const parentResult = await this.#evaluateRolePolicy(parentPolicy, req, memo, stack, actionsKey, lookups);
       for (const [src, output] of parentResult.outputs.entries()) result.outputs.set(src, output);
 
       for (const action of req.actions) {
@@ -839,8 +995,8 @@ class Kerberos {
     return result;
   }
 
-  async #evaluateRolePolicies(req, trace) {
-    const rolePolicies = await this.#getRolePolicies(req, trace);
+  async #evaluateRolePolicies(req, trace, lookups) {
+    const rolePolicies = await this.#getRolePolicies(req, trace, lookups);
     if (!rolePolicies.length) return { ...createEmptyPolicyResult(), hadPolicies: false };
 
     const effects = new Map();
@@ -850,7 +1006,7 @@ class Kerberos {
     const actionsKey = req.actions.join(',');
 
     for (const policy of rolePolicies) {
-      const result = await this.#evaluateRolePolicy(policy, req, memo, new Set(), actionsKey);
+      const result = await this.#evaluateRolePolicy(policy, req, memo, new Set(), actionsKey, lookups);
       for (const [src, output] of result.outputs.entries()) outputs.set(src, output);
 
       for (const action of req.actions) {
@@ -886,7 +1042,7 @@ class Kerberos {
    * policy (or null). Parent lookups are untraced — runtime parity with
    * `#evaluateRolePolicy`, which resolves parents without a trace.
    */
-  async #resolveRolePolicyClosure(rolePolicies, req) {
+  async #resolveRolePolicyClosure(rolePolicies, req, lookups) {
     const closure = new Map();
     const queue = [];
     for (const policy of rolePolicies) {
@@ -898,17 +1054,17 @@ class Kerberos {
     for (let i = 0; i < queue.length; i++) {
       const role = queue[i];
       if (closure.has(role)) continue;
-      const policy = await this.#getRolePolicyByName(role, req);
+      const policy = await this.#getRolePolicyByName(role, req, null, lookups);
       closure.set(role, policy ?? null);
       if (policy) for (const parentRole of policy.parentRoles) queue.push(parentRole);
     }
     return closure;
   }
 
-  async #resolveDerivedRolesSets(policy) {
+  async #resolveDerivedRolesSets(policy, lookups) {
     const sets = [];
     for (const name of policy.importDerivedRoles) {
-      const set = await this.#resolveDerivedRolesSetByName(name);
+      const set = await this.#resolveDerivedRolesSetByName(name, lookups);
       if (set) sets.push(set);
     }
     return sets;
@@ -917,15 +1073,15 @@ class Kerberos {
   // The two dependent planning chains (roles → parent closure; resource →
   // derived-roles sets) — split out so #planPolicySources can run all three
   // sources as one concurrent allSettled wave.
-  async #planRoleSources(req, trace) {
-    const rolePolicies = await this.#getRolePolicies(req, trace);
-    const rolePolicyClosure = await this.#resolveRolePolicyClosure(rolePolicies, req);
+  async #planRoleSources(req, trace, lookups) {
+    const rolePolicies = await this.#getRolePolicies(req, trace, lookups);
+    const rolePolicyClosure = await this.#resolveRolePolicyClosure(rolePolicies, req, lookups);
     return { rolePolicies, rolePolicyClosure };
   }
 
-  async #planResourceSources(req, trace) {
-    const resourcePolicy = await this.#getResourcePolicy(req, trace);
-    const derivedRolesSets = resourcePolicy ? await this.#resolveDerivedRolesSets(resourcePolicy) : [];
+  async #planResourceSources(req, trace, lookups) {
+    const resourcePolicy = await this.#getResourcePolicy(req, trace, lookups);
+    const derivedRolesSets = resourcePolicy ? await this.#resolveDerivedRolesSets(resourcePolicy, lookups) : [];
     return { resourcePolicy, derivedRolesSets };
   }
 
@@ -942,16 +1098,16 @@ class Kerberos {
    * principal → roles → resource order, so `meta.resolution` stays
    * deterministic regardless of cache-read completion order.
    */
-  async #planPolicySources(principal, resource, actions, trace) {
+  async #planPolicySources(principal, resource, actions, trace, lookups) {
     const req = { principal, resource, P: principal, R: resource, actions };
     const principalTrace = trace ? [] : null;
     const roleTrace = trace ? [] : null;
     const resourceTrace = trace ? [] : null;
 
     const settled = await Promise.allSettled([
-      this.#getPrincipalPolicy(req, principalTrace),
-      this.#planRoleSources(req, roleTrace),
-      this.#planResourceSources(req, resourceTrace),
+      this.#getPrincipalPolicy(req, principalTrace, lookups),
+      this.#planRoleSources(req, roleTrace, lookups),
+      this.#planResourceSources(req, resourceTrace, lookups),
     ]);
 
     if (trace) {
@@ -983,10 +1139,10 @@ class Kerberos {
    * (`'policy-miss'` — no policy produced a decision; policy-level checks add
    * `'rule-miss'` / `'condition-not-met'`).
    */
-  async #evaluatePolicySources(req, relationsMemo) {
+  async #evaluatePolicySources(req, relationsMemo, lookups) {
     const trace = req.includeMeta ? [] : null;
 
-    const principalPolicy = await this.#getPrincipalPolicy(req, trace);
+    const principalPolicy = await this.#getPrincipalPolicy(req, trace, lookups);
     const principalResult = principalPolicy ? principalPolicy.check(req) : createEmptyPolicyResult();
 
     const unresolvedActions = [];
@@ -999,7 +1155,7 @@ class Kerberos {
     const roleUnresolvedActions = [];
     if (unresolvedActions.length) {
       const roleReq = unresolvedActions.length === req.actions.length ? req : { ...req, actions: unresolvedActions };
-      roleResult = await this.#evaluateRolePolicies(roleReq, trace);
+      roleResult = await this.#evaluateRolePolicies(roleReq, trace, lookups);
 
       for (const action of unresolvedActions) {
         if (!roleResult.effects.has(action)) roleUnresolvedActions.push(action);
@@ -1007,11 +1163,17 @@ class Kerberos {
     }
 
     if (roleUnresolvedActions.length) {
-      const resourcePolicy = await this.#getResourcePolicy(req, trace);
+      const resourcePolicy = await this.#getResourcePolicy(req, trace, lookups);
       if (resourcePolicy) {
         const resourceReq =
           roleUnresolvedActions.length === req.actions.length ? req : { ...req, actions: roleUnresolvedActions };
-        const importedDerivedRoles = await this.#getImportedDerivedRoles(resourcePolicy, req, relationsMemo, trace);
+        const importedDerivedRoles = await this.#getImportedDerivedRoles(
+          resourcePolicy,
+          req,
+          relationsMemo,
+          trace,
+          lookups,
+        );
         resourceResult = resourcePolicy.check(resourceReq, importedDerivedRoles);
       }
     }
@@ -1152,7 +1314,9 @@ class Kerberos {
         );
 
         const relationsMemo = this.#relations ? new Map() : null;
-        const { effects, outputs, meta } = await this.#evaluatePolicySources(req, relationsMemo);
+        // Single-shot call: no lookups memo — #resolvePolicy's fast path skips
+        // the memo bookkeeping entirely (batching is checkResources' job).
+        const { effects, outputs, meta } = await this.#evaluatePolicySources(req, relationsMemo, null);
         const isAllowed = effects.get(parsedArgs.action) === Effect.Allow || effects.get(ALL_ACTIONS) === Effect.Allow;
 
         const input = [{ req, result: { effects, outputs, meta } }];
@@ -1223,8 +1387,14 @@ class Kerberos {
         // so relation subproblems (e.g. group membership chains) resolved for
         // one resource are reused by the others.
         const relationsMemo = this.#relations ? new Map() : null;
+        // One lookups memo for the whole batch, like relationsMemo: each
+        // distinct policy resolves once per batch instead of once per
+        // resource. Only worth its bookkeeping when a cache is configured —
+        // in-memory lookups are already O(1) Map hits, so static-only configs
+        // take #resolvePolicy's memo-less fast path.
+        const lookups = this.#cache.enabled ? new Map() : null;
         const promises = [];
-        for (const req of reqs) promises.push(this.#evaluatePolicySources(req, relationsMemo));
+        for (const req of reqs) promises.push(this.#evaluatePolicySources(req, relationsMemo, lookups));
         const settled = await Promise.allSettled(promises);
 
         const results = [];
@@ -1240,11 +1410,25 @@ class Kerberos {
 
             const deniedActions = {};
             for (const action of req.actions) deniedActions[action] = effectAsBoolean ? false : Effect.Deny;
-            results.push({
+            const failedResult = {
               resource: this.#buildResponseResource(resource),
               actions: deniedActions,
               outputs: [],
-            });
+            };
+            // Error-shaped denials must be distinguishable from policy
+            // denials: with includeMeta, mark every action with the
+            // 'evaluation-error' reason (mirroring the 'policy-miss'
+            // convention) so an outage never masquerades as a policy DENY.
+            // Note `onError` applies at REQUEST level only — per-resource
+            // evaluation errors inside a batch always fail-close here.
+            if (req.includeMeta) {
+              const actionsMeta = {};
+              for (const action of req.actions) {
+                actionsMeta[action] = { reason: 'evaluation-error', errorName: error?.name };
+              }
+              failedResult.meta = { actions: actionsMeta, effectiveDerivedRoles: [] };
+            }
+            results.push(failedResult);
             continue;
           }
 
@@ -1341,7 +1525,14 @@ class Kerberos {
         }
 
         const trace = parsedArgs.includeMeta ? [] : null;
-        const sources = await this.#planPolicySources(parsedArgs.principal, parsedArgs.resource, actions, trace);
+        const sources = await this.#planPolicySources(
+          parsedArgs.principal,
+          parsedArgs.resource,
+          actions,
+          trace,
+          // Dedupes role-closure lookups; only worth it on the cache path.
+          this.#cache.enabled ? new Map() : null,
+        );
         const { node } = buildResourcePlan({
           principal: parsedArgs.principal,
           resource: parsedArgs.resource,

@@ -112,6 +112,26 @@ describe('Resilience', () => {
       assert.ok(response.kerberosCallId);
     });
 
+    it('should mark error-shaped batch denials with the evaluation-error reason under includeMeta', async () => {
+      const kerberos = new Kerberos(throwingConditionPolicies, []);
+
+      const response = await kerberos.checkResources({
+        principal,
+        resources: [
+          { resource, actions: ['view'] },
+          { resource: { id: 'other1', kind: 'other' }, actions: ['view'] },
+        ],
+        includeMeta: true,
+      });
+
+      // The failed resource's DENY is distinguishable from a policy DENY.
+      const failedMeta = response.results[0].meta.actions.view;
+      assert.equal(failedMeta.reason, 'evaluation-error');
+      assert.equal(typeof failedMeta.errorName, 'string');
+      // The normally-evaluated resource carries the usual policy-miss reason.
+      assert.equal(response.results[1].meta.actions.view.reason, 'policy-miss');
+    });
+
     it("should always throw KerberosValidationError for malformed arguments, even with onError: 'deny'", async () => {
       const { z } = require('zod');
       const kerberos = new Kerberos(policies, [], { onError: 'deny', z });
@@ -218,6 +238,198 @@ describe('Resilience', () => {
 
       const noGet = createCacheReader({});
       assert.equal(noGet.enabled, false);
+    });
+  });
+
+  describe('cache retry backoff and deterministic errors', () => {
+    it('should not retry deterministic adapter errors (TypeError/SyntaxError)', async () => {
+      let calls = 0;
+      const buggyCache = {
+        async get() {
+          calls += 1;
+          throw new TypeError('cache.get is not a function on adapter');
+        },
+      };
+      const reader = createCacheReader(buggyCache, { attempts: 3, delayMs: 0 });
+
+      await assert.rejects(
+        () => reader.get('resource:x:default:'),
+        (error) => error instanceof KerberosCacheError && error.cause instanceof TypeError,
+      );
+      // A programming error cannot be transient — exactly one attempt is made.
+      assert.equal(calls, 1);
+    });
+
+    it('should space retries with backoff by default and allow delayMs: 0 for immediate retries', async () => {
+      const failTwice = () => {
+        let calls = 0;
+        return {
+          async get() {
+            calls += 1;
+            if (calls < 3) throw new Error('ECONNRESET');
+            return undefined;
+          },
+        };
+      };
+
+      // delayMs: 0 → immediate retries (the pre-backoff behavior).
+      const immediate = createCacheReader(failTwice(), { attempts: 3, delayMs: 0 });
+      const startImmediate = Date.now();
+      assert.equal(await immediate.get('k'), undefined);
+      assert.ok(Date.now() - startImmediate < 20);
+
+      // Default: full-jitter exponential backoff — attempts are spaced, and
+      // with jitter: false the delays are exact (25 + 50 = 75ms here).
+      const spaced = createCacheReader(failTwice(), { attempts: 3, jitter: false });
+      const startSpaced = Date.now();
+      assert.equal(await spaced.get('k'), undefined);
+      assert.ok(Date.now() - startSpaced >= 70);
+    });
+
+    it('should bound a hung cache.get with timeoutMs and surface KerberosCacheError', async () => {
+      const hungCache = {
+        get() {
+          return new Promise(() => {});
+        },
+      };
+      const reader = createCacheReader(hungCache, { attempts: 1, timeoutMs: 40 });
+
+      const start = Date.now();
+      await assert.rejects(
+        () => reader.get('resource:x:default:'),
+        (error) => error instanceof KerberosCacheError && /timed out after 40ms/.test(error.message),
+      );
+      assert.ok(Date.now() - start < 500);
+    });
+  });
+
+  describe("cacheRetry.onExhausted: 'miss' (degraded mode)", () => {
+    const deadCache = {
+      async get() {
+        throw new Error('ECONNRESET');
+      },
+    };
+
+    it('should keep evaluating static policies when the cache backend is down', async () => {
+      const kerberos = new Kerberos(policies, [], {
+        cache: deadCache,
+        cacheRetry: { attempts: 1, onExhausted: 'miss' },
+      });
+
+      // Static resource policy decides although every cache read fails.
+      assert.equal(await kerberos.isAllowed({ principal, action: 'view', resource }), true);
+      assert.equal(await kerberos.isAllowed({ principal, action: 'delete', resource }), false);
+    });
+
+    it("should keep the default fail-closed 'throw' semantics without the option", async () => {
+      const kerberos = new Kerberos(policies, [], { cache: deadCache, cacheRetry: { attempts: 1 } });
+      await assert.rejects(() => kerberos.isAllowed({ principal, action: 'view', resource }), {
+        name: 'KerberosCacheError',
+      });
+    });
+
+    it('should reject invalid onExhausted values at construction', () => {
+      assert.throws(
+        () => new Kerberos(policies, [], { cache: deadCache, cacheRetry: { onExhausted: 'ignore' } }),
+        TypeError,
+      );
+    });
+  });
+
+  describe('cacheKeyPrefix', () => {
+    it('should prepend the prefix to every policy and derived-roles cache key', async () => {
+      const reads = [];
+      const cache = {
+        async get(key) {
+          reads.push(key);
+          return undefined;
+        },
+      };
+      const withDerived = [
+        {
+          resourcePolicy: {
+            version: 'default',
+            resource: 'expense',
+            importDerivedRoles: ['dr_missing'],
+            rules: [{ actions: ['view'], effect: Effect.Allow, roles: ['USER'] }],
+          },
+        },
+      ];
+      const kerberos = new Kerberos(withDerived, [], {
+        cache,
+        cacheRetry: { attempts: 1 },
+        cacheKeyPrefix: 'tenantA:',
+      });
+
+      await kerberos.isAllowed({ principal, action: 'view', resource });
+      assert.ok(reads.length > 0);
+      for (const key of reads) assert.match(key, /^tenantA:/);
+      assert.ok(reads.includes('tenantA:derivedRoles:dr_missing'));
+    });
+
+    it('should reject a non-string cacheKeyPrefix at construction', () => {
+      assert.throws(() => new Kerberos(policies, [], { cacheKeyPrefix: 42 }), TypeError);
+    });
+  });
+
+  describe('relationsTimeoutMs', () => {
+    const relationPolicies = [
+      {
+        resourcePolicy: {
+          version: 'default',
+          resource: 'expense',
+          importDerivedRoles: ['rel_roles'],
+          rules: [{ actions: ['view'], effect: Effect.Allow, derivedRoles: ['REL'] }],
+        },
+      },
+    ];
+    const relationDerivedRoles = [{ name: 'rel_roles', definitions: [{ name: 'REL', relation: 'viewer' }] }];
+    const hungResolver = {
+      check() {
+        return new Promise(() => {});
+      },
+    };
+
+    it('should bound a hung relations.check and follow onError semantics', async () => {
+      const { KerberosRelationsError } = require('../src/index.js');
+      const throwing = new Kerberos(relationPolicies, relationDerivedRoles, {
+        relations: hungResolver,
+        relationsTimeoutMs: 40,
+      });
+      await assert.rejects(
+        () => throwing.isAllowed({ principal, action: 'view', resource }),
+        (error) => error instanceof KerberosRelationsError && /timed out after 40ms/.test(error.message),
+      );
+
+      const denying = new Kerberos(relationPolicies, relationDerivedRoles, {
+        relations: hungResolver,
+        relationsTimeoutMs: 40,
+        onError: 'deny',
+      });
+      assert.equal(await denying.isAllowed({ principal, action: 'view', resource }), false);
+    });
+
+    it('should bound a hung relations.list too', async () => {
+      const { KerberosRelationsError } = require('../src/index.js');
+      const hungListResolver = {
+        check: async () => false,
+        list() {
+          return new Promise(() => {});
+        },
+      };
+      const kerberos = new Kerberos(relationPolicies, relationDerivedRoles, {
+        relations: hungListResolver,
+        relationsTimeoutMs: 40,
+      });
+      await assert.rejects(
+        () => kerberos.isAllowed({ principal, action: 'view', resource }),
+        (error) => error instanceof KerberosRelationsError && /relations\.list timed out/.test(error.message),
+      );
+    });
+
+    it('should reject invalid relationsTimeoutMs values at construction', () => {
+      assert.throws(() => new Kerberos(policies, [], { relationsTimeoutMs: -1 }), TypeError);
+      assert.throws(() => new Kerberos(policies, [], { relationsTimeoutMs: 'fast' }), TypeError);
     });
   });
 

@@ -19,20 +19,34 @@ const {
   exprNode,
   fromOperand,
   notNode,
+  opaqueNode,
   orNode,
   toDebugString,
   toFilter,
 } = require('./nodes.js');
 
 async function resolveRelationIds(lookup, node) {
-  const ids = await lookup({ name: node.name, relation: node.relation });
+  const resolved = await lookup({ name: node.name, relation: node.relation });
+  // A lookup may return an `{ ids, truncated }` envelope to signal an
+  // INCOMPLETE id list (e.g. a resolver that capped at maxResults). Baking a
+  // truncated list into an `in(...)` operand would silently drop authorized
+  // rows from the translated query, so a truncated lookup degrades to
+  // `opaque` — the plan's documented "statically unplannable, post-filter"
+  // contract. Plain iterables (array, Set, generator) keep working unchanged.
+  const isEnvelope =
+    resolved !== null &&
+    typeof resolved === 'object' &&
+    typeof resolved[Symbol.iterator] !== 'function' &&
+    ('ids' in resolved || 'truncated' in resolved);
+  const truncated = isEnvelope && Boolean(resolved.truncated);
+  const ids = isEnvelope ? resolved.ids : resolved;
   const list = [];
   // Any iterable of ids works (array, Set, generator); strings are scalars,
   // not id lists.
   if (ids !== null && ids !== undefined && typeof ids !== 'string' && typeof ids[Symbol.iterator] === 'function') {
     for (const id of ids) list.push(id);
   }
-  return list;
+  return { list, truncated };
 }
 
 async function expandLogical(node, expandOne) {
@@ -80,12 +94,17 @@ async function expandRelationOperands(planResponse, lookup) {
   const expandOne = async (node) => {
     const key = `${node.name}|${node.relation}`;
     if (!memo.has(key)) {
-      const ids = await resolveRelationIds(lookup, node);
-      const expanded = ids.length
-        ? exprNode({
-            expression: { operator: 'in', operands: [{ variable: 'request.resource.id' }, { value: ids }] },
-          })
-        : constNode(false);
+      const { list, truncated } = await resolveRelationIds(lookup, node);
+      let expanded;
+      if (truncated) {
+        expanded = opaqueNode(`relation(${node.name}|${node.relation})`, 'relation-lookup-truncated');
+      } else if (list.length) {
+        expanded = exprNode({
+          expression: { operator: 'in', operands: [{ variable: 'request.resource.id' }, { value: list }] },
+        });
+      } else {
+        expanded = constNode(false);
+      }
       memo.set(key, expanded);
     }
     return memo.get(key);
