@@ -1,0 +1,81 @@
+---
+name: ConflictResolutionConformance
+description: >-
+  Pins how an ALLOW and a DENY that both match one action are combined. The
+  multi-role case (`support_auditor`) is the one to watch on the first run
+  against a live Cerbos PDP — see DIVERGENCES.md.
+
+principals:
+  support:
+    id: s1
+    roles: ['SUPPORT']
+  auditor:
+    id: a1
+    roles: ['AUDITOR']
+  support_auditor:
+    id: sa1
+    roles: ['SUPPORT', 'AUDITOR']
+
+resources:
+  open_ticket:
+    id: t1
+    kind: ticket
+    attr:
+      locked: false
+  locked_ticket:
+    id: t2
+    kind: ticket
+    attr:
+      locked: true
+
+tests:
+  - name: a single role with only an ALLOW gets the allow
+    input:
+      principals: [support]
+      resources: [open_ticket]
+      actions: [close, comment]
+    expected:
+      - principal: support
+        resource: open_ticket
+        actions: { close: EFFECT_ALLOW, comment: EFFECT_ALLOW }
+
+  - name: a single role with only a DENY gets the deny
+    input:
+      principals: [auditor]
+      resources: [open_ticket]
+      actions: [close]
+    expected:
+      - principal: auditor
+        resource: open_ticket
+        actions: { close: EFFECT_DENY }
+
+  - name: within one role a conditional DENY overrides an earlier ALLOW
+    description: >-
+      Both `support-may-comment` and `nobody-comments-on-locked` match for a
+      SUPPORT principal on a locked ticket, and the ALLOW is listed first. Deny
+      wins, so rule order does not decide the outcome.
+    input:
+      principals: [support]
+      resources: [locked_ticket]
+      actions: [comment]
+    expected:
+      - principal: support
+        resource: locked_ticket
+        actions: { comment: EFFECT_DENY }
+
+  - name: a DENY from one role overrides an ALLOW from another
+    description: >-
+      OPEN QUESTION until this runs against a live PDP. Kerberos is
+      deny-overrides across roles (verified). Cerbos is documented as
+      deny-overrides for resource-policy rules, but is also described in places
+      as having anti-lockout behaviour where an ALLOW from one role wins. If the
+      live leg fails here, that is a real finding, not a regression — record it
+      in DIVERGENCES.md rather than editing this expectation to match.
+    input:
+      principals: [support_auditor]
+      resources: [open_ticket]
+      actions: [close]
+    expected:
+      - principal: support_auditor
+        resource: open_ticket
+        actions: { close: EFFECT_DENY }

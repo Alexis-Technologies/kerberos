@@ -16,14 +16,15 @@ node --test test/Kerberos.test.js          # run a single test file
 node --test --test-name-pattern="scope"    # filter tests by name
 pnpm test:types        # type-check test/types.test-d.ts against index.d.ts via tsd
 pnpm test:coverage     # c8 coverage over src/
-pnpm lint              # oxlint src test scripts bench
-pnpm format            # oxfmt src test scripts bench (format:check for CI)
+pnpm test:conformance  # Cerbos conformance corpus (node --test conformance/*.test.js)
+pnpm lint              # oxlint src test scripts bench conformance
+pnpm format            # oxfmt src test scripts bench conformance (format:check for CI)
 pnpm bench             # ops/sec benchmark harness (bench/bench.js)
 pnpm size              # bundle-size report (scripts/size.js; CI-enforced smoke)
 pnpm docs:dev          # VitePress dev server for docs/ (docs:build / docs:preview too)
 ```
 
-Linting/formatting is **oxlint/oxfmt** (`.oxlintrc.json`, `.oxfmtrc.json`; the `correctness` category is intentionally off) — their native bindings require Node ≥20.19, so CI (`.github/workflows/ci.yml`) runs `lint`/`format:check` in a single job pinned to Node 22, separate from the `test` job, which runs `test:coverage` + `test:types` across the Node 18/20/22 matrix, and a `docs` job (Node 22) that runs `docs:build`. Lint/format deliberately target `src test scripts bench` only, so `docs/` is not covered by them.
+Linting/formatting is **oxlint/oxfmt** (`.oxlintrc.json`, `.oxfmtrc.json`; the `correctness` category is intentionally off) — their native bindings require Node ≥20.19, so CI (`.github/workflows/ci.yml`) runs `lint`/`format:check` in a single job pinned to Node 22, separate from the `test` job, which runs `test:coverage` + `test:types` across the Node 18/20/22 matrix, a `docs` job (Node 22) that runs `docs:build`, and a `conformance` job (Node 22) that stands up a real Cerbos PDP in Docker and runs `test:conformance` against it. Lint/format deliberately target `src test scripts bench conformance` only, so `docs/` is not covered by them.
 
 Style: 2-space indent, single quotes, semicolons, 120-char lines (see `.editorconfig`, `.oxfmtrc.json`).
 
@@ -95,6 +96,10 @@ Two layers, both SpiceDB-inspired (see the "borrow vs skip" notes in `README.md`
 ### Public exports
 
 The full package surface is assembled in `src/index.js` (main entry), `tests.js` (dev-only `/tests` subpath) and `relations.js` (`/relations` subpath) — check all three when adding a new export, and update `index.d.ts` / `tests.d.ts` / `relations.d.ts` in the repo root accordingly, since types are hand-maintained (not generated). Also update `docs/api/exports.md`, which mirrors those three tables for the docs site.
+
+### Cerbos conformance suite (`conformance/`)
+
+Not part of the published package (`files` in `package.json` is an explicit allowlist). One corpus written in **Cerbos's own formats** — policy documents under `policies/`, `TestSuite`-schema decision expectations and `QueryPlannerTestSuite`-shaped plan expectations under `suites/` — is executed against Kerberos always, and additionally against a real Cerbos PDP when `CERBOS_URL` is set (the CI `conformance` job does this via Docker). `lib/load.js` is a **structural** mapper, not a Cerbos importer: there is no CEL parser, and the corpus is restricted to expressions that are simultaneously valid CEL and valid Kerberos `$expr` so one string feeds both engines. Its governing invariant is that it **refuses to guess** — any construct outside the supported subset throws `ConformanceUnsupportedError` rather than being dropped, because a silently-skipped rule turns a real conformance failure into a false pass. Plan filters are compared after canonicalization (`lib/canonical.js`) since neither engine promises an operand order; plans containing Kerberos-only operators (`opaque`, `relation`) fail the scope check instead of being compared. Known semantic gaps live in `conformance/DIVERGENCES.md` — when the live leg disagrees, record it there rather than editing the expectation green.
 
 ### Documentation site (`docs/`)
 

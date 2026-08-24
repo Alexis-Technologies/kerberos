@@ -52,3 +52,48 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # A broken docs build (including dead links) should fail the PR, not the deploy.
       - run: pnpm run docs:build
+
+  # Runs the shared corpus against BOTH engines. The suite is meaningful without
+  # Docker (it asserts Kerberos against the recorded expectations), but this job
+  # also stands up a real Cerbos PDP over the same policy directory so that a
+  # wrong expectation cannot make the two engines look compatible.
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # Fails fast with a readable compile error if the corpus is malformed,
+      # rather than surfacing as an opaque 400 from the running PDP.
+      - name: Compile the corpus with Cerbos
+        run: |
+          docker run --rm -v "${{ github.workspace }}/conformance/policies:/policies:ro" \
+            ghcr.io/cerbos/cerbos:0.55.0 compile --skip-tests /policies
+
+      - name: Start the Cerbos PDP
+        run: |
+          docker run --rm -d --name cerbos \
+            -v "${{ github.workspace }}/conformance/policies:/policies:ro" \
+            -p 3592:3592 \
+            ghcr.io/cerbos/cerbos:0.55.0 server \
+            --set=storage.disk.directory=/policies \
+            --set=storage.disk.watchForChanges=false \
+            --set=engine.lenientScopeSearch=true
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:3592/_cerbos/health | grep -q SERVING; then exit 0; fi
+            sleep 1
+          done
+          echo "Cerbos never became ready"; docker logs cerbos; exit 1
+
+      - run: pnpm test:conformance
+        env:
+          CERBOS_URL: http://localhost:3592
+
+      - if: always()
+        run: docker logs cerbos || true

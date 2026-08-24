@@ -1,0 +1,39 @@
+---
+# Conflict-resolution probe.
+#
+# This policy exists to pin *rule combination* semantics, which is the area
+# where a reimplementation is most likely to drift from Cerbos without anyone
+# noticing: the individual rules are trivial, and the only thing under test is
+# what happens when an ALLOW and a DENY both match one action.
+#
+# See DIVERGENCES.md — the multi-role case is the primary open question for the
+# first run against a live PDP.
+apiVersion: 'api.cerbos.dev/v1'
+resourcePolicy:
+  version: default
+  resource: ticket
+  rules:
+    # Same action, same principal, different roles: SUPPORT allows, AUDITOR denies.
+    - name: support-may-close
+      actions: ['close']
+      effect: EFFECT_ALLOW
+      roles: ['SUPPORT']
+
+    - name: auditors-may-never-close
+      actions: ['close']
+      effect: EFFECT_DENY
+      roles: ['AUDITOR']
+
+    # Same action, same single role: ALLOW listed before DENY.
+    - name: support-may-comment
+      actions: ['comment']
+      effect: EFFECT_ALLOW
+      roles: ['SUPPORT']
+
+    - name: nobody-comments-on-locked
+      actions: ['comment']
+      effect: EFFECT_DENY
+      roles: ['SUPPORT']
+      condition:
+        match:
+          expr: R.attr.locked == true

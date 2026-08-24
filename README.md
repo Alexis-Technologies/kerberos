@@ -61,7 +61,8 @@ await kerberos.isAllowed({
 | **Dynamic policies** | [Cache-agnostic storage](#caching--storing-policies) with a safe, eval-free `$expr` codec (jsep AST allowlist) |
 | **ReBAC** | [Relation-backed derived roles](#rebac-relations) + a built-in Zanzibar-lite resolver (`@alexify/kerberos/relations`) |
 | **Observability** | [Audit logs](#options) (console / structured / Pino), [OpenTelemetry](#opentelemetry) traces + metrics, [decision metadata](#decision-metadata-includemeta) |
-| **DX** | [Pluggable validation](#schema-validation) (Zod / JSON Schema + Ajv / TypeBox), [testing DSL](#testing) (`/tests`), hand-maintained TypeScript types, [browser build](#browser-usage) |
+| **DX** | [Pluggable validation](#schema-validation) (Zod / JSON Schema + Ajv / TypeBox), [testing DSL](#testing) (`/tests`), [typed authoring](#typescript) via an optional app schema, [browser build](#browser-usage), [live playground](https://kerberosjs.vercel.app/playground) |
+| **Compatibility** | A [conformance suite](./conformance/) runs one corpus — written in Cerbos's own policy and test formats — against both Kerberos and a real Cerbos PDP in CI; known gaps are listed in [DIVERGENCES.md](./conformance/DIVERGENCES.md) |
 
 > **Version 3.x** — see the [CHANGELOG](./CHANGELOG.md) for everything that changed since `2.0.0`: ReBAC with the built-in Zanzibar-lite resolver (`3.0.0`), OpenTelemetry, the Node/browser runtime split, and Cerbos-compatible query plans via `planResources` (`3.1.0`).
 

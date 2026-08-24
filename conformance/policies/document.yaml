@@ -1,0 +1,45 @@
+---
+# Shared corpus policy. Written in Cerbos's own document format so a real
+# Cerbos PDP can serve it verbatim; the Kerberos loader (conformance/lib/load.js)
+# reads the same file. Conditions use the CEL ∩ jsep subset — see
+# conformance/README.md — so one `expr` string feeds both engines.
+apiVersion: 'api.cerbos.dev/v1'
+resourcePolicy:
+  version: default
+  resource: document
+  importDerivedRoles:
+    - document_roles
+  rules:
+    - name: admin-all
+      actions: ['*']
+      effect: EFFECT_ALLOW
+      roles: ['ADMIN']
+
+    - name: owner-view
+      actions: ['view']
+      effect: EFFECT_ALLOW
+      derivedRoles: ['OWNER']
+
+    - name: owner-edit-while-open
+      actions: ['edit']
+      effect: EFFECT_ALLOW
+      derivedRoles: ['OWNER']
+      condition:
+        match:
+          expr: R.attr.status == 'OPEN'
+
+    - name: anyone-view-public
+      actions: ['view']
+      effect: EFFECT_ALLOW
+      roles: ['USER']
+      condition:
+        match:
+          expr: R.attr.public == true
+
+    - name: archived-is-read-only
+      actions: ['edit', 'delete']
+      effect: EFFECT_DENY
+      roles: ['*']
+      condition:
+        match:
+          expr: R.attr.archived == true
