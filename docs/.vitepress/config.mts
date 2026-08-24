@@ -1,5 +1,49 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitepress';
 import { withMermaid } from 'vitepress-plugin-mermaid';
+
+const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
+
+/**
+ * Supplies the playground with the engine as a browser bundle.
+ *
+ * The package is CommonJS and lives outside node_modules (there is no workspace
+ * self-link), so Vite pre-bundles neither in dev nor via the default rollup
+ * commonjs `include`. Rather than guess at interop settings, this builds the
+ * bundle with esbuild using exactly the options `scripts/size.js` uses — the
+ * `browser` condition applies the package.json runtime swap
+ * (`src/runtime/node.js` → `src/runtime/browser.js`), so the page ships the same
+ * artifact `pnpm size` reports, and a broken swap fails the docs build loudly
+ * because `node:crypto` cannot resolve for the browser platform.
+ */
+function kerberosBrowserBundle() {
+  const virtualId = 'virtual:kerberos-browser';
+  const resolvedId = `\0${virtualId}`;
+  let cached: string | null = null;
+
+  return {
+    name: 'kerberos-browser-bundle',
+    resolveId(id: string) {
+      return id === virtualId ? resolvedId : null;
+    },
+    async load(id: string) {
+      if (id !== resolvedId) return null;
+      if (cached) return cached;
+      const esbuild = await import('esbuild');
+      const result = await esbuild.build({
+        entryPoints: [`${packageRoot}browser.js`],
+        bundle: true,
+        format: 'esm',
+        platform: 'browser',
+        conditions: ['browser'],
+        write: false,
+        logLevel: 'silent',
+      });
+      cached = result.outputFiles[0].text;
+      return cached;
+    },
+  };
+}
 
 const ogTitle = 'Kerberos.js — embedded authorization engine for Node.js & the browser';
 const ogDescription =
@@ -104,6 +148,7 @@ export default withMermaid(
       // ─── Top navigation ──────────────────────────────────────────────
       nav: [
         { text: 'Guide', link: '/guide/why', activeMatch: '/guide/' },
+        { text: 'Playground', link: '/playground', activeMatch: '/playground' },
         { text: 'API', link: '/api/kerberos', activeMatch: '/api/' },
         { text: 'Reference', link: '/reference/plan-operators', activeMatch: '/reference/' },
         {
@@ -194,6 +239,13 @@ export default withMermaid(
       docFooter: {
         prev: 'Previous page',
         next: 'Next page',
+      },
+    },
+
+    vite: {
+      plugins: [kerberosBrowserBundle()],
+      optimizeDeps: {
+        include: ['jsep', '@jsep-plugin/object', '@jsep-plugin/ternary', '@jsep-plugin/new'],
       },
     },
   }),
