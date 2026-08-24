@@ -17,6 +17,41 @@ cross-request instance memo, audit-stream completeness (fail-closed denials,
 (~2.5× simple `isAllowed`), reverse-lookup truncation signaling
 (`onTruncated`), frozen policy shapes/tokens, and d.ts/export-parity guards.
 
+### Added
+
+- **Typed authoring.** `Kerberos` and every policy/request/response type are
+  now generic over an optional application schema naming resource kinds, their
+  actions and attribute bags, and the principal's roles and attributes. The
+  resource kind narrows the action, the attribute shapes and the `{ P, R, V, C }`
+  envelope handed to conditions; policy documents become discriminated unions
+  over `resource:`, so a rule naming another kind's action or an undeclared role
+  is a compile error. Purely type-level — every parameter defaults to the new
+  `AnySchema`, which reproduces the previous untyped surface exactly. New
+  helper types: `KerberosSchema`, `AnySchema`, `ResourceKindOf`, `ActionOf`,
+  `ResourceAttrOf`, `PrincipalRoleOf`, `PrincipalAttrOf`, `PolicyEvalRequest`,
+  `CheckResourcesArgs`/`Entry`/`Result`/`Response`. See the new "TypeScript"
+  guide.
+- **Cerbos conformance suite** (`conformance/`, not published to npm). One
+  corpus in Cerbos's own policy and `TestSuite` formats runs against Kerberos
+  always, and against a real Cerbos PDP in CI. Known semantic gaps are recorded
+  in `conformance/DIVERGENCES.md`. New `pnpm test:conformance`.
+- **In-browser playground** on the docs site — the real engine running
+  client-side, with no backend.
+
+### Changed
+
+- **BREAKING (types): `Effect` and `PlanKind` are const objects, not `enum`s.**
+  The runtime has always been a frozen plain object, so the `enum` declaration
+  mis-described it and made `effect: 'EFFECT_ALLOW'` in a plain JSON policy
+  literal a type error — exactly the form stored policies carry. `Effect.Allow`
+  and `PlanKind.Conditional` are unchanged; only `enum`-specific type usage
+  (e.g. `PlanKind.Conditional` as a *type*) needs updating.
+- **`checkResources` is now overloaded on `effectAsBoolean`**: the response's
+  effects are typed `Effect`, or `boolean` when the flag is passed, instead of
+  the `Effect | boolean` union in both cases.
+- `{ $expr }` descriptors are accepted by the types in `condition.match` and
+  `output` — stored policies always used them, but the types rejected them.
+
 ## [3.1.0] - 2026-07-21
 
 ### Added
