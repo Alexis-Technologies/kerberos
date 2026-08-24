@@ -258,12 +258,20 @@ describe('resource policy conflict resolution', () => {
       });
     });
 
-    it('ignores a role policy that targets a different resource kind', async () => {
+    it('permits nothing for a kind the role policy never targets', async () => {
+      // Holding a role that HAS a role policy restricts that role everywhere,
+      // not only for the kinds its rules happen to mention.
       const elsewhere = {
         rolePolicy: { role: 'READER', version: 'default', rules: [{ resource: 'invoice', allowActions: ['view'] }] },
       };
       const kerberos = new Kerberos([openReport, elsewhere], []);
       assert.deepEqual(await decideReport(kerberos, ['READER']), {
+        view: Effect.Deny,
+        edit: Effect.Deny,
+        delete: Effect.Deny,
+      });
+      // ...but pairing it with a role that has no role policy lifts the filter.
+      assert.deepEqual(await decideReport(kerberos, ['READER', 'PLAIN']), {
         view: Effect.Allow,
         edit: Effect.Allow,
         delete: Effect.Allow,

@@ -18,6 +18,12 @@ principals:
   reader_plus_unpolicied:
     id: rp1
     roles: ['READER', 'PLAIN']
+  archivist:
+    id: a1
+    roles: ['ARCHIVIST']
+  archivist_plus_unpolicied:
+    id: ap1
+    roles: ['ARCHIVIST', 'PLAIN']
 
 resources:
   report:
@@ -79,3 +85,21 @@ tests:
       - principals: [reader, reader_writer]
         resource: report
         actions: { archive: EFFECT_DENY }
+
+  - name: a role policy that never targets this kind permits nothing here
+    description: >-
+      ARCHIVIST's role policy only mentions `document`. Holding the role still
+      constrains it on `report`, where it allowlists nothing — a role policy
+      restricts its role everywhere, not only for the kinds it names. Pairing it
+      with an unconstrained role lifts the filter again.
+    input:
+      principals: [archivist, archivist_plus_unpolicied]
+      resources: [report]
+      actions: [view, edit, delete]
+    expected:
+      - principal: archivist
+        resource: report
+        actions: { view: EFFECT_DENY, edit: EFFECT_DENY, delete: EFFECT_DENY }
+      - principal: archivist_plus_unpolicied
+        resource: report
+        actions: { view: EFFECT_ALLOW, edit: EFFECT_ALLOW, delete: EFFECT_ALLOW }

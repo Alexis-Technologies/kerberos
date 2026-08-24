@@ -68,8 +68,10 @@ cross-request instance memo, audit-stream completeness (fail-closed denials,
   - multiple role policies **union** instead of intersecting: a principal may do
     what *any* of its roles allowlists, so holding an extra role can widen
     access but never narrow it;
-  - a role with **no applicable role policy is unrestricted**, which disables the
-    filter for the whole request;
+  - a role with **no role policy at all is unrestricted**, which disables the
+    filter for the whole request — but holding a role that *has* a role policy
+    constrains it everywhere, including resource kinds its rules never mention
+    (where it permits nothing);
   - a `PrincipalPolicy` override is never narrowed by the role layer.
 
   `parentRoles` are unchanged — the child still keeps only what each locally

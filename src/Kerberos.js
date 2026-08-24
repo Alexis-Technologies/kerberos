@@ -1178,21 +1178,20 @@ class Kerberos {
     const actionsMeta = {};
     const memo = new Map();
     const actionsKey = req.actions.join(',');
-    let applicable = 0;
 
     for (const policy of rolePolicies) {
       const result = await this.#evaluateRolePolicy(policy, req, memo, new Set(), actionsKey, lookups);
-      // A role policy that targets no rule for this resource kind produces no
-      // effects at all and constrains nothing.
-      if (result.effects.size === 0) continue;
-      applicable += 1;
+      // A policy whose rules never target this resource kind yields no effects
+      // and so contributes nothing to the union — the role permits NOTHING
+      // here. Having a role policy restricts the role everywhere, not only for
+      // the kinds the policy happens to mention.
       Kerberos.#mergeRoleResultInto(effects, outputs, actionsMeta, result, req);
     }
 
-    // A role WITHOUT an applicable role policy is unrestricted, so the union
-    // across the principal's roles permits everything and the filter must not
-    // narrow at all. Only when every role is constrained does the layer apply.
-    if (applicable < Kerberos.#uniqueRoleCount(req)) {
+    // A role with NO role policy at all is unrestricted, so the union across
+    // the principal's roles permits everything and the filter must not narrow.
+    // Only when every role is constrained does the layer apply.
+    if (rolePolicies.length < Kerberos.#uniqueRoleCount(req)) {
       return { ...createEmptyPolicyResult(), hadPolicies: false };
     }
 
@@ -1513,16 +1512,13 @@ class Kerberos {
     const actionsMeta = {};
     const memo = new Map();
     const actionsKey = req.actions.join(',');
-    let applicable = 0;
 
     for (const policy of rolePolicies) {
       const result = this.#evaluateRolePolicySync(policy, req, memo, new Set(), actionsKey);
-      if (result.effects.size === 0) continue;
-      applicable += 1;
       Kerberos.#mergeRoleResultInto(effects, outputs, actionsMeta, result, req);
     }
 
-    if (applicable < Kerberos.#uniqueRoleCount(req)) {
+    if (rolePolicies.length < Kerberos.#uniqueRoleCount(req)) {
       return { ...createEmptyPolicyResult(), hadPolicies: false };
     }
 

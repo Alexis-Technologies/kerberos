@@ -1,0 +1,9 @@
+---
+# Targets a DIFFERENT kind on purpose: holding a role that has a role policy
+# restricts that role everywhere, not only for the kinds its rules mention.
+apiVersion: 'api.cerbos.dev/v1'
+rolePolicy:
+  role: ARCHIVIST
+  rules:
+    - resource: document
+      allowActions: ['view']
