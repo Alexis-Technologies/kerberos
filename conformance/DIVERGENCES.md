@@ -54,30 +54,17 @@ This is a difference in _representation_, not in meaning, but it means a byte-fo
 
 _Enforcement: corpus._
 
-## ⚠️ Conflict resolution across roles — a real incompatibility
+### Conflict resolution across roles — aligned in v4
 
-This is the one place where the two engines return **different decisions for the same policy and the same request**. It is verified against a real Cerbos PDP, not inferred from documentation.
+Recorded here because it is the reason this suite exists, and because it changes decisions for anyone upgrading.
 
-|     | Rule combination                                                             | Kerberos | Cerbos ≥ 0.41 |
-| --- | ---------------------------------------------------------------------------- | -------: | ------------: |
-| 1   | ALLOW `roles: [SUPPORT]` + DENY `roles: [AUDITOR]`, principal holds **both** |   `DENY` |   **`ALLOW`** |
-| 2   | ALLOW `roles: [SUPPORT]` + DENY `roles: ['*']`                               |   `DENY` |        `DENY` |
-| 3   | ALLOW `roles: [SUPPORT]` + DENY `roles: [SUPPORT, AUDITOR]`                  |   `DENY` |        `DENY` |
-| 4   | ALLOW + conditional DENY, both on the **same** role                          |   `DENY` |        `DENY` |
+Kerberos used to be **deny-overrides unconditionally**: any matching DENY won, whatever role it targeted. Cerbos >= 0.41 is **deny-overrides _within_ a principal role, allow-overrides _across_ roles** — its evaluation loop runs once per role and returns the first role that independently allows, which is deliberate anti-lockout behaviour so that holding an extra, less privileged role cannot take away access another role grants.
 
-**Kerberos is deny-overrides, unconditionally.** Any matching DENY wins, regardless of which role it targets or where it sits in the rule list.
+Kerberos now implements the Cerbos rule. A DENY only bites when it covers the role carrying the ALLOW — which a wildcard (`roles: ['*']`) always does, and an enumerated role does explicitly. Derived roles are not a dimension of their own: they collapse into the principal roles listed in their `parentRoles`.
 
-**Cerbos is deny-overrides _within_ a role, allow-overrides _across_ roles.** Its evaluation loop runs once per principal role and returns the first role that independently produces an ALLOW; a DENY recorded by an earlier role is overwritten. This is intentional anti-lockout behaviour — the documented rationale is stopping an admin from locking themselves out because they also hold a less privileged role.
+Two traps found while establishing this, worth knowing if you ever re-verify:
 
-Only row 1 diverges. A DENY still wins whenever it **covers the role that carries the ALLOW** — as a wildcard (row 2) or by enumeration (row 3) — which is why the practical blast radius is narrower than it first looks. All four rows are pinned in `suites/ticket_test.yaml`; row 1 carries a `cerbosActions` override recording the other engine's answer, and the runner asserts the two engines still disagree, so this entry cannot go stale unnoticed.
+- **The behaviour changed in Cerbos 0.41.0** (0.40.0 returns DENY), coinciding with the rule-table engine rewrite. Cerbos's own docs lagged the code until 0.52.0 and the change was not listed as breaking.
+- **`ghcr.io/cerbos/cerbos:latest` is stale and serves 0.40.0.** A parity check against `latest` validates the _old_ semantics and hides this entirely, which is why CI pins an explicit version.
 
-### Direction of risk
-
-Porting Cerbos policies **to** Kerberos fails closed: Kerberos denies some things Cerbos would allow. Nothing leaks; access is lost. Porting the other way is the dangerous direction — a policy set relied upon to deny in Kerberos may allow under Cerbos.
-
-### Two traps worth knowing
-
-- **The behaviour changed in Cerbos 0.41.0**, bisected empirically (0.40.0 returns `DENY`, 0.41.0 returns `ALLOW`), coinciding with the rule-table engine rewrite. Kerberos matches Cerbos ≤ 0.40.
-- **`ghcr.io/cerbos/cerbos:latest` is stale and serves 0.40.0.** Benchmarking parity against `latest` validates the _old_ semantics and hides this entirely — which is why CI pins an explicit version. Cerbos's own docs also lagged the code here until 0.52.0, and the change was not listed as breaking.
-
-_Enforcement: corpus, both engines verified against Cerbos 0.55.0._
+_Enforcement: corpus (`suites/ticket_test.yaml`, all four combinations), plus `test/ConflictResolution.test.js` and the multi-role principals in `test/PlanParity.test.js`._

@@ -657,21 +657,29 @@ class Kerberos {
     return resolved;
   }
 
+  // Returns active derived-role name → `parentRoles` (null when ungated), which
+  // resource-policy conflict resolution needs to attribute a rule to the
+  // principal roles it was written for.
   async #getImportedDerivedRoles(policy, req, relationsMemo, trace, lookups, otel) {
-    const importedRoles = new Set();
+    const importedRoles = new Map();
     const relationCandidates = [];
     for (const name of policy.importDerivedRoles) {
       const role = await this.#resolveDerivedRolesSetByName(name, lookups, trace);
       if (!role) continue;
-      const derivedRoles = role.get(req);
-      if (derivedRoles) for (const derivedRole of derivedRoles) importedRoles.add(derivedRole);
+      const derivedRoles = role.getActivated(req);
+      if (derivedRoles) {
+        for (const [derivedRole, parentRoles] of derivedRoles) importedRoles.set(derivedRole, parentRoles);
+      }
       for (const candidate of role.getRelationCandidates(req)) relationCandidates.push(candidate);
     }
 
     if (relationCandidates.length) {
       if (this.#relations) {
         const granted = await this.#resolveRelationCandidates(relationCandidates, req, relationsMemo, trace, otel);
-        for (const name of granted) importedRoles.add(name);
+        if (granted.length) {
+          const parentRolesByName = new Map(relationCandidates.map((c) => [c.name, c.parentRoles]));
+          for (const name of granted) importedRoles.set(name, parentRolesByName.get(name) ?? null);
+        }
       } else if (trace) {
         // Relation-backed definitions without a configured `relations`
         // resolver can never activate — surface that in the decision trace
@@ -1496,7 +1504,7 @@ class Kerberos {
   }
 
   #getImportedDerivedRolesSync(policy, req, trace) {
-    const importedRoles = new Set();
+    const importedRoles = new Map();
     const relationCandidates = [];
     for (const name of policy.importDerivedRoles) {
       const role = this.#derivedRoles.get(name);
@@ -1507,8 +1515,10 @@ class Kerberos {
         continue;
       }
       trace?.push({ source: 'derivedRoles', name, matched: true });
-      const derivedRoles = role.get(req);
-      if (derivedRoles) for (const derivedRole of derivedRoles) importedRoles.add(derivedRole);
+      const derivedRoles = role.getActivated(req);
+      if (derivedRoles) {
+        for (const [derivedRole, parentRoles] of derivedRoles) importedRoles.set(derivedRole, parentRoles);
+      }
       for (const candidate of role.getRelationCandidates(req)) relationCandidates.push(candidate);
     }
 

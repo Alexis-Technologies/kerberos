@@ -46,10 +46,8 @@ await kerberos.isAllowed({
 | Consistency | in-process state + your cache ([honest limitations](#consistency-honest-limitations)) | per-PDP policy sync                | Zanzibar consistency (zookies) |
 | Best when | JS/TS stack, zero-infra, browser/edge                                                 | polyglot stack, central governance | relationship graphs at scale, strict consistency |
 
-> [!IMPORTANT]
-> Compatibility with Cerbos is checked in CI by a [conformance suite](./conformance/) that runs one corpus against both engines. It is close but not total, and the differences are catalogued in [DIVERGENCES.md](./conformance/DIVERGENCES.md).
->
-> The one that changes decisions: **Kerberos is deny-overrides unconditionally, while Cerbos ≥ 0.41 is deny-overrides within a role but allow-overrides across roles** (anti-lockout). A DENY scoped only to role `B` does not veto an ALLOW on role `A` in Cerbos; in Kerberos it does. Denies that cover the allowing role — via `roles: ['*']` or by naming it — behave identically in both. Porting Cerbos policies here therefore fails closed, never open.
+> [!NOTE]
+> Compatibility with Cerbos is checked in CI by a [conformance suite](./conformance/) that runs one corpus against both engines — every decision and every query plan is compared to a real Cerbos PDP. Features Kerberos deliberately does not implement (CEL, attribute schemas, `scopePermissions`, `auxData`) are catalogued in [DIVERGENCES.md](./conformance/DIVERGENCES.md).
 
 ### When NOT to use Kerberos.js
 
@@ -215,6 +213,29 @@ const kerberos = new Kerberos(
 ### ResourcePolicy
 
 `ResourcePolicy` is the workhorse policy type, selected by `resource.kind`. Rules are matched by action, then by `roles` or `derivedRoles`, and may also use `conditions`, `variables`, `constants`, `outputs`, versions, and scopes — see the [Quick Start](#quick-start) for a complete example.
+
+#### Conflict resolution
+
+Conflicts are resolved **per principal role**, matching Cerbos: `EFFECT_DENY` overrides `EFFECT_ALLOW` **within** a role, and an `EFFECT_ALLOW` from **any** role wins across roles. Rule order never decides the outcome.
+
+This is deliberate anti-lockout behaviour — picking up an extra, less privileged role can never take away access another role grants:
+
+```javascript
+rules: [
+  { actions: ['close'], effect: Effect.Allow, roles: ['SUPPORT'] },
+  { actions: ['close'], effect: Effect.Deny, roles: ['AUDITOR'] },
+];
+// principal roles ['SUPPORT', 'AUDITOR'] -> EFFECT_ALLOW
+```
+
+A deny that is meant to hold regardless has to cover the role carrying the allow — either with the `'*'` wildcard or by naming it:
+
+```javascript
+{ actions: ['close'], effect: Effect.Deny, roles: ['*'] }                 // always denies
+{ actions: ['close'], effect: Effect.Deny, roles: ['SUPPORT', 'AUDITOR'] } // denies both roles
+```
+
+Derived roles do not form a dimension of their own: a rule reached through `derivedRoles` counts for the principal roles listed in that definition's `parentRoles`.
 
 ### PrincipalPolicy
 
@@ -1402,7 +1423,7 @@ flowchart TD
     NORM -->|residual tree| COND(["KIND_CONDITIONAL + condition<br/>(operators and/or/not/eq/…/in + opaque/relation)"])
 ```
 
-Every layer keeps its runtime semantics: principal rules override (Deny wins), the role layer is an allowlist with implicit deny and `parentRoles` intersection, the resource layer is Deny-over-Allow with default deny — the parity is enforced by a property-style test suite ([`test/PlanParity.test.js`](./test/PlanParity.test.js)) that grid-samples unknown attributes and compares the filter against real `isAllowed` results.
+Every layer keeps its runtime semantics: principal rules override (Deny wins), the role layer is an allowlist with implicit deny and `parentRoles` intersection, the resource layer resolves conflicts per principal role (deny over allow within a role, allow over deny across roles) with default deny — the parity is enforced by a property-style test suite ([`test/PlanParity.test.js`](./test/PlanParity.test.js)) that grid-samples unknown attributes and compares the filter against real `isAllowed` results.
 
 ### Operators
 

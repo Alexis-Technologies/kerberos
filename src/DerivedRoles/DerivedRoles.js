@@ -117,7 +117,23 @@ class DerivedRoles {
    * @returns {Set<string>}
    */
   get(req) {
-    const roles = new Set();
+    return new Set(this.getActivated(req).keys());
+  }
+
+  /**
+   * Same resolution as {@link get}, but keyed by role name with the
+   * definition's `parentRoles` as the value.
+   *
+   * Conflict resolution in a resource policy runs per principal role, and a
+   * derived role does not form a dimension of its own — it collapses into the
+   * principal roles that activated it. The engine therefore needs to know which
+   * roles each active derived role stands for, which a bare name cannot say.
+   *
+   * @param {Record<string, unknown>} req
+   * @returns {Map<string, string[]>}
+   */
+  getActivated(req) {
+    const roles = new Map();
 
     if (!this.#shape.definitions.length) return roles;
 
@@ -127,7 +143,7 @@ class DerivedRoles {
       if (def.relation) continue;
       if (!DerivedRoles.#parentRolesMatch(def, principalRoles)) continue;
 
-      if (def.condition.isFulfilled(reqWithVariables)) roles.add(def.name);
+      if (def.condition.isFulfilled(reqWithVariables)) roles.set(def.name, def.parentRoles);
     }
 
     return roles;
@@ -157,7 +173,10 @@ class DerivedRoles {
       }
       if (def.condition && !def.condition.isFulfilled(context.reqWithVariables)) continue;
 
-      candidates.push({ name: def.name, relation: def.relation });
+      // `parentRoles` is optional for relation-backed definitions; when absent
+      // the role is not gated on a principal role at all, and the engine treats
+      // it as standing for every role.
+      candidates.push({ name: def.name, relation: def.relation, parentRoles: def.parentRoles ?? null });
     }
 
     return candidates;

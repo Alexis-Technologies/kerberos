@@ -60,13 +60,6 @@ function buildResourcePlan({
 }) {
   const principalRoleSet = new Set(principal.roles);
 
-  function matchesPrincipalRoles(roles) {
-    for (const role of roles) {
-      if (role === ALL_ROLES || principalRoleSet.has(role)) return true;
-    }
-    return false;
-  }
-
   // One expression planner per policy: each policy evaluates conditions
   // against its own constants/variables context, exactly like check().
   const planners = new Map();
@@ -195,12 +188,27 @@ function buildResourcePlan({
     return definitions;
   }
 
-  function derivedRoleNode(name) {
-    if (derivedRoleNodes.has(name)) return derivedRoleNodes.get(name);
+  /**
+   * Plans a derived role, restricted to the principal role `forRole`.
+   *
+   * Conflict resolution runs per principal role, so a derived role only counts
+   * for the roles it was derived FROM — the definitions whose `parentRoles`
+   * contain `forRole`. Passing `null` keeps the un-restricted reading (any
+   * principal role), which is what the role-policy layer wants.
+   */
+  function derivedRoleNode(name, forRole = null) {
+    const cacheKey = forRole === null ? name : `${name} ${forRole}`;
+    if (derivedRoleNodes.has(cacheKey)) return derivedRoleNodes.get(cacheKey);
     const parts = [];
     for (const set of derivedRolesSets) {
       const def = definitionsOf(set).get(name);
       if (!def) continue;
+      // Mirrors ResourcePolicy's `ruleCoversRole`: literal membership, no
+      // wildcard, and a relation-backed definition without `parentRoles` is
+      // ungated and stands for every role.
+      if (forRole !== null && Array.isArray(def.parentRoles) && def.parentRoles.length > 0) {
+        if (!def.parentRoles.includes(forRole)) continue;
+      }
       const planner = plannerFor(set, set.shape);
       if (def.relation) {
         const gateParts = [];
@@ -231,37 +239,66 @@ function buildResourcePlan({
       }
     }
     const node = orNode(parts);
-    derivedRoleNodes.set(name, node);
+    derivedRoleNodes.set(cacheKey, node);
     return node;
   }
 
   // ---- resource layer ------------------------------------------------------
 
+  // A principal with no roles is rejected by every validation backend but the
+  // engine runs without one by default; ResourcePolicy.check gives that case a
+  // single anonymous bucket so wildcard rules still apply, and so does this.
+  const resourceRoleBuckets = principalRoleSet.size > 0 ? [...principalRoleSet] : [null];
+
   function resourceLayerNode(action) {
     if (!resourcePolicy) return FALSE; // 'policy-miss' default deny
     const planner = plannerFor(resourcePolicy, resourcePolicy.shape.resourcePolicy);
-    const allowParts = [];
-    const denyParts = [];
-    for (const rule of resourcePolicy.rules ?? []) {
-      if (!rule.actionsSet.has(ALL_ACTIONS) && !rule.actionsSet.has(action)) continue;
 
-      let rolesGate = FALSE;
-      if (Array.isArray(rule.roles)) {
-        rolesGate = constNode(matchesPrincipalRoles(rule.roles));
+    // Conflict resolution is per principal role (Cerbos >= 0.41): deny
+    // overrides allow WITHIN a role, allow overrides deny ACROSS roles. So the
+    // layer is a disjunction over roles of the old allow-and-not-deny form,
+    // with each rule attributed to the roles it was written for — mirroring
+    // ResourcePolicy.check exactly (PlanParity.test.js enforces this).
+    const perRole = [];
+    for (const role of resourceRoleBuckets) {
+      const allowParts = [];
+      const denyParts = [];
+
+      for (const rule of resourcePolicy.rules ?? []) {
+        if (!rule.actionsSet.has(ALL_ACTIONS) && !rule.actionsSet.has(action)) continue;
+
+        let rolesGate = FALSE;
+        if (Array.isArray(rule.roles)) {
+          let covers = false;
+          for (const ruleRole of rule.roles) {
+            if (ruleRole === ALL_ROLES || ruleRole === role) {
+              covers = true;
+              break;
+            }
+          }
+          rolesGate = constNode(covers);
+        }
+        let derivedGate = FALSE;
+        if (Array.isArray(rule.derivedRoles)) {
+          const derivedParts = new Array(rule.derivedRoles.length);
+          for (let i = 0; i < rule.derivedRoles.length; i++) {
+            derivedParts[i] = derivedRoleNode(rule.derivedRoles[i], role);
+          }
+          derivedGate = orNode(derivedParts);
+        }
+        const gate = orNode([rolesGate, derivedGate]);
+        if (gate === FALSE) continue; // rule does not reach this role at all
+
+        const node = andNode([gate, planner.planCondition(rule.condition)]);
+        if (rule.effect === Effect.Deny) denyParts.push(node);
+        else allowParts.push(node);
       }
-      let derivedGate = FALSE;
-      if (Array.isArray(rule.derivedRoles)) {
-        const derivedParts = new Array(rule.derivedRoles.length);
-        for (let i = 0; i < rule.derivedRoles.length; i++) derivedParts[i] = derivedRoleNode(rule.derivedRoles[i]);
-        derivedGate = orNode(derivedParts);
-      }
-      const gate = orNode([rolesGate, derivedGate]);
-      const node = andNode([gate, planner.planCondition(rule.condition)]);
-      if (rule.effect === Effect.Deny) denyParts.push(node);
-      else allowParts.push(node);
+
+      // Within this role: allowed ⇔ some allow ∧ no deny.
+      perRole.push(andNode([orNode(allowParts), notNode(orNode(denyParts))]));
     }
-    // Deny-over-Allow with default deny: allowed ⇔ some allow ∧ no deny.
-    return andNode([orNode(allowParts), notNode(orNode(denyParts))]);
+
+    return orNode(perRole);
   }
 
   // ---- composition ---------------------------------------------------------

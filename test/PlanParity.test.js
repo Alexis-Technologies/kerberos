@@ -104,6 +104,22 @@ const policies = [
             roles: ['*'],
             condition: { match: { $expr: 'R.attr.banned === true' } },
           },
+          // Role-SCOPED deny. Conflict resolution is per principal role, so
+          // this must not veto an allow carried by a different role the
+          // principal also holds — unlike the wildcard deny above.
+          {
+            actions: ['view'],
+            effect: Effect.Deny,
+            roles: ['AUDITOR'],
+            condition: { match: { $expr: 'R.attr.classified === true' } },
+          },
+          // Deny reached through a derived role, which collapses into the
+          // principal role that activated it (AUDITOR here, via parentRoles).
+          {
+            actions: ['edit'],
+            effect: Effect.Deny,
+            derivedRoles: ['REVIEWER'],
+          },
         ],
       },
     },
@@ -162,6 +178,7 @@ const derivedRoles = [
       name: 'doc_roles',
       definitions: [
         { name: 'OWNER', parentRoles: ['USER'], condition: { match: { $expr: 'R.attr.ownerId === P.id' } } },
+        { name: 'REVIEWER', parentRoles: ['AUDITOR'], condition: { match: { $expr: 'R.attr.status === "OPEN"' } } },
       ],
     },
     codec,
@@ -174,6 +191,12 @@ const principals = [
   { id: 'u2', roles: ['USER'] },
   { id: 'boss', roles: ['USER'] },
   { id: 'c1', roles: ['CONTRACTOR'] },
+  // Multi-role principals: the shape that exercises cross-role conflict
+  // resolution. Without these the grid only ever fills one role bucket, and a
+  // planner that still used plain deny-overrides would pass unnoticed.
+  { id: 'u1', roles: ['USER', 'AUDITOR'] },
+  { id: 'm2', roles: ['AUDITOR'] },
+  { id: 'm3', roles: ['USER', 'ADMIN'] },
 ];
 
 const actions = ['view', 'edit', 'count'];

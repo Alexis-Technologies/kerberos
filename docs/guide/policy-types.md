@@ -23,6 +23,29 @@ const kerberos = new Kerberos(
 
 `ResourcePolicy` is the workhorse policy type, selected by `resource.kind`. Rules are matched by action, then by `roles` or `derivedRoles`, and may also use `conditions`, `variables`, `constants`, `outputs`, versions, and scopes — see the [Quick Start](/guide/getting-started) for a complete example.
 
+### Conflict resolution
+
+Conflicts are resolved **per principal role**, matching Cerbos: `EFFECT_DENY` overrides `EFFECT_ALLOW` **within** a role, and an `EFFECT_ALLOW` from **any** role wins across roles. Rule order never decides the outcome.
+
+This is deliberate anti-lockout behaviour — picking up an extra, less privileged role can never take away access another role grants:
+
+```javascript
+rules: [
+  { actions: ['close'], effect: Effect.Allow, roles: ['SUPPORT'] },
+  { actions: ['close'], effect: Effect.Deny, roles: ['AUDITOR'] },
+];
+// principal roles ['SUPPORT', 'AUDITOR'] -> EFFECT_ALLOW
+```
+
+A deny that is meant to hold regardless has to cover the role carrying the allow — either with the `'*'` wildcard or by naming it:
+
+```javascript
+{ actions: ['close'], effect: Effect.Deny, roles: ['*'] }                 // always denies
+{ actions: ['close'], effect: Effect.Deny, roles: ['SUPPORT', 'AUDITOR'] } // denies both roles
+```
+
+Derived roles do not form a dimension of their own: a rule reached through `derivedRoles` counts for the principal roles listed in that definition's `parentRoles`.
+
 ## PrincipalPolicy
 
 `PrincipalPolicy` follows the Cerbos-style model for principal-specific overrides. It is bound to a single principal and targets `resource + action` directly instead of `roles` / `derivedRoles`.

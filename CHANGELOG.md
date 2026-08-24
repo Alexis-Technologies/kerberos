@@ -40,6 +40,25 @@ cross-request instance memo, audit-stream completeness (fail-closed denials,
 
 ### Changed
 
+- **BREAKING (semantics): resource-policy conflicts now resolve per principal
+  role, matching Cerbos.** `EFFECT_DENY` overrides `EFFECT_ALLOW` *within* a
+  role, but an `EFFECT_ALLOW` from *any* role wins *across* roles. Kerberos was
+  previously deny-overrides unconditionally, which returned `EFFECT_DENY` where
+  Cerbos ≥ 0.41 returns `EFFECT_ALLOW` — verified against a live Cerbos PDP and
+  now covered by the conformance suite.
+
+  **This is more permissive than before.** A `DENY` scoped to one role no longer
+  vetoes an `ALLOW` carried by a different role the principal also holds. Audit
+  any policy that relies on a role-scoped deny to revoke access: to keep the old
+  outcome the deny must cover the allowing role, either with `roles: ['*']` or
+  by naming it explicitly. Denies that already do are unaffected, as are
+  single-role principals and same-role conflicts.
+
+  Rules reached through `derivedRoles` count for the principal roles listed in
+  that definition's `parentRoles` — derived roles collapse into the role
+  dimension rather than forming one of their own. `planResources` follows the
+  same rule; `test/PlanParity.test.js` gained multi-role principals, which is
+  the shape that made the old behaviour invisible.
 - **BREAKING (types): `Effect` and `PlanKind` are const objects, not `enum`s.**
   The runtime has always been a frozen plain object, so the `enum` declaration
   mis-described it and made `effect: 'EFFECT_ALLOW'` in a plain JSON policy
