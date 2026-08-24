@@ -1,0 +1,17 @@
+---
+# Role-policy semantics probe.
+#
+# Role policies are a NARROWING FILTER over the resource policy: they never
+# grant on their own, they union across the principal's roles, and a role with
+# no applicable role policy is unrestricted. Each of those is invisible with a
+# single-role principal, so the suite pairs this permissive resource policy with
+# two disjoint role policies.
+apiVersion: 'api.cerbos.dev/v1'
+resourcePolicy:
+  version: default
+  resource: report
+  rules:
+    - name: everyone-may-do-everything
+      actions: ['view', 'edit', 'delete']
+      effect: EFFECT_ALLOW
+      roles: ['*']

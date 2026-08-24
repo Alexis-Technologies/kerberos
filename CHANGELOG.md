@@ -59,6 +59,24 @@ cross-request instance memo, audit-stream completeness (fail-closed denials,
   dimension rather than forming one of their own. `planResources` follows the
   same rule; `test/PlanParity.test.js` gained multi-role principals, which is
   the shape that made the old behaviour invisible.
+- **BREAKING (semantics): role policies are now a narrowing filter over the
+  resource policy, not a ranked layer that can grant.** Matching Cerbos, and
+  verified against a live PDP:
+
+  - a role policy **cannot allow what the resource policy withholds** — with no
+    matching `ResourcePolicy`, a `RolePolicy` alone now grants nothing;
+  - multiple role policies **union** instead of intersecting: a principal may do
+    what *any* of its roles allowlists, so holding an extra role can widen
+    access but never narrow it;
+  - a role with **no applicable role policy is unrestricted**, which disables the
+    filter for the whole request;
+  - a `PrincipalPolicy` override is never narrowed by the role layer.
+
+  `parentRoles` are unchanged — the child still keeps only what each locally
+  defined parent role policy allows (intersection *along the chain*, union
+  *across* roles). Deployments that relied on a `RolePolicy` to grant access on
+  its own must add the corresponding `ResourcePolicy` rules.
+
 - **BREAKING (types): `Effect` and `PlanKind` are const objects, not `enum`s.**
   The runtime has always been a frozen plain object, so the `enum` declaration
   mis-described it and made `effect: 'EFFECT_ALLOW'` in a plain JSON policy

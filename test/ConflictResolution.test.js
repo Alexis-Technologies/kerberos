@@ -202,6 +202,133 @@ describe('resource policy conflict resolution', () => {
     });
   });
 
+  describe('role policies narrow the resource layer', () => {
+    // Role policies are a filter, not a granting layer: they union across the
+    // principal's roles, never grant what the resource policy withholds, and a
+    // role with no applicable role policy imposes no restriction at all.
+    const openReport = {
+      resourcePolicy: {
+        version: 'default',
+        resource: 'report',
+        rules: [{ actions: ['view', 'edit', 'delete'], effect: Effect.Allow, roles: ['*'] }],
+      },
+    };
+    const reader = {
+      rolePolicy: { role: 'READER', version: 'default', rules: [{ resource: 'report', allowActions: ['view'] }] },
+    };
+    const writer = {
+      rolePolicy: { role: 'WRITER', version: 'default', rules: [{ resource: 'report', allowActions: ['edit'] }] },
+    };
+
+    async function decideReport(kerberos, roles, actions = ['view', 'edit', 'delete']) {
+      const { results } = await kerberos.checkResources({
+        principal: { id: 'p1', roles },
+        resources: [{ resource: { kind: 'report', id: 'r1' }, actions }],
+      });
+      return results[0].actions;
+    }
+
+    it('narrows the resource policy to the allowlist', async () => {
+      const kerberos = new Kerberos([openReport, reader, writer], []);
+      assert.deepEqual(await decideReport(kerberos, ['READER']), {
+        view: Effect.Allow,
+        edit: Effect.Deny,
+        delete: Effect.Deny,
+      });
+    });
+
+    it('unions across roles instead of intersecting them', async () => {
+      const kerberos = new Kerberos([openReport, reader, writer], []);
+      // READER alone permits only view, WRITER alone only edit — holding both
+      // must permit both, and must not permit `delete`, which neither lists.
+      assert.deepEqual(await decideReport(kerberos, ['READER', 'WRITER']), {
+        view: Effect.Allow,
+        edit: Effect.Allow,
+        delete: Effect.Deny,
+      });
+    });
+
+    it('imposes no restriction when a role has no applicable role policy', async () => {
+      const kerberos = new Kerberos([openReport, reader, writer], []);
+      // PLAIN is unconstrained, so the union permits everything.
+      assert.deepEqual(await decideReport(kerberos, ['READER', 'PLAIN']), {
+        view: Effect.Allow,
+        edit: Effect.Allow,
+        delete: Effect.Allow,
+      });
+    });
+
+    it('ignores a role policy that targets a different resource kind', async () => {
+      const elsewhere = {
+        rolePolicy: { role: 'READER', version: 'default', rules: [{ resource: 'invoice', allowActions: ['view'] }] },
+      };
+      const kerberos = new Kerberos([openReport, elsewhere], []);
+      assert.deepEqual(await decideReport(kerberos, ['READER']), {
+        view: Effect.Allow,
+        edit: Effect.Allow,
+        delete: Effect.Allow,
+      });
+    });
+
+    it('cannot grant what the resource policy does not allow', async () => {
+      const archiver = {
+        rolePolicy: {
+          role: 'READER',
+          version: 'default',
+          rules: [{ resource: 'report', allowActions: ['view', 'archive'] }],
+        },
+      };
+      const kerberos = new Kerberos([openReport, archiver], []);
+      assert.deepEqual(await decideReport(kerberos, ['READER'], ['archive']), { archive: Effect.Deny });
+    });
+
+    it('grants nothing at all without a resource policy', async () => {
+      const kerberos = new Kerberos([reader], []);
+      assert.deepEqual(await decideReport(kerberos, ['READER'], ['view']), { view: Effect.Deny });
+    });
+
+    it('does not narrow an explicit principal-policy allow', async () => {
+      const principalPolicy = {
+        principalPolicy: {
+          principal: 'p1',
+          version: 'default',
+          rules: [{ resource: 'report', actions: [{ action: 'delete', effect: Effect.Allow }] }],
+        },
+      };
+      const kerberos = new Kerberos([openReport, reader, principalPolicy], []);
+      // READER's allowlist excludes `delete`, but the principal policy overrides.
+      assert.deepEqual(await decideReport(kerberos, ['READER'], ['delete']), { delete: Effect.Allow });
+    });
+
+    it('keeps the parentRoles intersection inside a single role', async () => {
+      const child = {
+        rolePolicy: {
+          role: 'EDITOR',
+          version: 'default',
+          parentRoles: ['READER'],
+          rules: [{ resource: 'report', allowActions: ['view', 'edit'] }],
+        },
+      };
+      const kerberos = new Kerberos([openReport, child, reader], []);
+      // EDITOR allowlists edit, but its parent READER does not.
+      assert.deepEqual(await decideReport(kerberos, ['EDITOR']), {
+        view: Effect.Allow,
+        edit: Effect.Deny,
+        delete: Effect.Deny,
+      });
+    });
+
+    it('agrees between the sync and async drivers', async () => {
+      const sync = new Kerberos([openReport, reader, writer], []);
+      const async_ = new Kerberos([openReport, reader, writer], [], { cache: { get: async () => undefined } });
+      assert.deepEqual(
+        await decideReport(sync, ['READER', 'WRITER']),
+        await decideReport(async_, ['READER', 'WRITER']),
+      );
+      assert.deepEqual(await decideReport(sync, ['READER', 'PLAIN']), await decideReport(async_, ['READER', 'PLAIN']));
+    });
+  });
+
   describe('query plans follow the same rule', () => {
     it('plans ALLOWED for a role combination the runtime allows', async () => {
       const kerberos = engine(RULES);

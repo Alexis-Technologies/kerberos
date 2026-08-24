@@ -817,7 +817,7 @@ describe('Kerberos', () => {
   describe('mixed role and resource policies', () => {
     const kerberos = new Kerberos([expensePolicy, userRolePolicy], [commonRolesPolicy]);
 
-    it('should let role policies override resource allows', async () => {
+    it('should let role policies filter out a resource allow', async () => {
       const results = await kerberos.checkResources({
         principal: principalsPolicy.sally,
         resources: [{ resource: resourcesPolicy.expense1, actions: ['view', 'create'] }],
@@ -846,15 +846,19 @@ describe('Kerberos', () => {
                 // condition failed — previously this deny was unexplained.
                 reason: 'condition-not-met',
               },
+              // The resource policy is what GRANTS the action; the role
+              // policy only filters, so it is no longer credited here.
               create: {
-                matchedPolicy: 'role.USER.vdefault',
-                matchedRule: 'role.USER.vdefault#allow_create',
+                matchedPolicy: 'resource.expense.vdefault',
+                matchedRule: 'resource.expense.vdefault#UNNAMED_RULE_5',
               },
             },
-            effectiveDerivedRoles: [],
+            effectiveDerivedRoles: ['OWNER'],
             resolution: [
               { source: 'principal', id: 'sally', version: 'default', scopesSearched: [''], matchedScope: null },
               { source: 'role', id: 'USER', version: 'default', scopesSearched: [''], matchedScope: '' },
+              { source: 'resource', id: 'expense', version: 'default', scopesSearched: [''], matchedScope: '' },
+              { source: 'derivedRoles', name: 'common_roles', matched: true },
             ],
           },
         },
@@ -890,22 +894,24 @@ describe('Kerberos', () => {
       assert.strictEqual(isAllowed, true);
     });
 
-    it('should combine multiple role policies with deny precedence', async () => {
+    it('should union multiple role policies rather than intersect them', async () => {
+      // derek holds USER and MANAGER. The USER role policy does not permit
+      // `delete` but the MANAGER one does — holding an extra role must never
+      // take access away (Cerbos anti-lockout).
       const results = await kerberos.checkResources({
         principal: principalsPolicy.derek,
         resources: [{ resource: resourcesPolicy.expense2, actions: ['delete'] }],
         includeMeta: true,
       });
 
-      assert.strictEqual(results.results[0].actions.delete, Effect.Deny);
-      assert.strictEqual(results.results[0].meta.actions.delete.matchedPolicy, 'role.USER.vdefault');
+      assert.strictEqual(results.results[0].actions.delete, Effect.Allow);
     });
   });
 
   describe('role policy inheritance', () => {
     const kerberos = new Kerberos([expensePolicy, userRolePolicy, limitedManagerRolePolicy], [commonRolesPolicy]);
 
-    it('should require parent role policies to allow child actions', async () => {
+    it('should keep denying when the parent role policy does not allow the child action', async () => {
       const principal = {
         id: 'mila',
         roles: ['LIMITED_MANAGER'],
@@ -921,21 +927,27 @@ describe('Kerberos', () => {
       });
 
       assert.strictEqual(results.results[0].actions.delete, Effect.Deny);
-      assert.strictEqual(results.results[0].meta.actions.delete.matchedPolicy, 'role.USER.vdefault');
+      // The resource policy does not grant `delete` to this principal either,
+      // so it is the layer that refuses. The parentRoles intersection itself is
+      // pinned in test/RolePolicy.test.js and test/PlanResources.test.js.
+      assert.strictEqual(results.results[0].meta.actions.delete.matchedPolicy, 'resource.expense.vdefault');
     });
   });
 
   describe('scoped role policy lookup', () => {
     const kerberos = new Kerberos([expensePolicy, userRolePolicy, scopedUserRolePolicy], [commonRolesPolicy]);
 
+    // Role policies filter the resource layer, so scope selection is observed
+    // on an action the resource policy DOES grant: the base USER policy permits
+    // `create`, the `acme.corp` one does not.
     it('should use the base role policy when principal scope is not provided', async () => {
       const isAllowed = await kerberos.isAllowed({
         principal: principalsPolicy.sally,
-        action: 'delete',
+        action: 'create',
         resource: resourcesPolicy.expense2,
       });
 
-      assert.strictEqual(isAllowed, false);
+      assert.strictEqual(isAllowed, true);
     });
 
     it('should use the scoped role policy when principal scope matches', async () => {
@@ -944,11 +956,11 @@ describe('Kerberos', () => {
           ...principalsPolicy.sally,
           scope: 'acme.corp',
         },
-        action: 'delete',
+        action: 'create',
         resource: resourcesPolicy.expense2,
       });
 
-      assert.strictEqual(isAllowed, true);
+      assert.strictEqual(isAllowed, false);
     });
   });
 });

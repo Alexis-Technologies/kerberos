@@ -12,10 +12,11 @@
  *              AND(NOT(PA), NOT(PD), layer) )     — principal silent → next layer
  *
  * where PA/PD are the ORs of fulfilled allow/deny principal rules, and
- * `layer` is the role layer when applicable (allowlist with implicit deny,
- * Deny-wins across roles, parentRoles intersection — semantics of
- * `#evaluateRolePolicies`) or the resource layer otherwise
- * (`AND(OR(allow rules), NOT(OR(deny rules)))`, default deny).
+ * `layer` is the resource layer — conflict resolution per principal role
+ * (`OR` over roles of `AND(OR(allow rules), NOT(OR(deny rules)))`, default
+ * deny) — `AND`ed with the role-policy filter when every principal role is
+ * constrained by an applicable role policy (union across roles, parentRoles
+ * intersection within one — semantics of `#evaluateRolePolicies`).
  *
  * All inputs are pre-resolved policy class instances — this module is pure
  * and synchronous; the engine does the (async, cache-aware) lookups.
@@ -162,14 +163,14 @@ function buildResourcePlan({
     return node;
   }
 
-  function roleLayerNode(action) {
-    // Deny-wins across roles: every applicable role must effectively allow.
+  // Union across roles: the principal may do what ANY of its roles permits.
+  function roleFilterNode(action) {
     const memo = new Map();
     const parts = new Array(applicableRolePolicies.length);
     for (let i = 0; i < applicableRolePolicies.length; i++) {
       parts[i] = roleAllowNode(applicableRolePolicies[i], action, memo, new Set());
     }
-    return andNode(parts);
+    return orNode(parts);
   }
 
   // ---- derived roles (resource layer) --------------------------------------
@@ -303,11 +304,20 @@ function buildResourcePlan({
 
   // ---- composition ---------------------------------------------------------
 
-  const roleLayerApplicable = applicableRolePolicies.length > 0;
+  // The role layer narrows the resource layer only when EVERY principal role is
+  // constrained by an applicable role policy; a role without one is
+  // unrestricted, so the union already permits everything. Mirrors
+  // `#evaluateRolePolicies`.
+  const roleLayerApplicable =
+    applicableRolePolicies.length > 0 && applicableRolePolicies.length >= principalRoleSet.size;
 
   function planAction(action) {
     const { allow, deny } = principalNodes(action);
-    const layer = roleLayerApplicable ? roleLayerNode(action) : resourceLayerNode(action);
+    // Role policies can never grant on their own — they filter the resource
+    // layer, which is always the thing that decides.
+    const layer = roleLayerApplicable
+      ? andNode([resourceLayerNode(action), roleFilterNode(action)])
+      : resourceLayerNode(action);
     return orNode([andNode([allow, notNode(deny)]), andNode([notNode(allow), notNode(deny), layer])]);
   }
 

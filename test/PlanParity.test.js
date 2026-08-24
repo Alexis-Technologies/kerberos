@@ -197,6 +197,12 @@ const principals = [
   { id: 'u1', roles: ['USER', 'AUDITOR'] },
   { id: 'm2', roles: ['AUDITOR'] },
   { id: 'm3', roles: ['USER', 'ADMIN'] },
+  // Role-layer shapes. `c2` mixes a role that HAS a role policy with one that
+  // does not (the layer must abstain entirely); `c3` holds two policied roles
+  // (the layer must union them). Neither is observable with a single-role
+  // principal, which is how the intersection semantics went unnoticed.
+  { id: 'c2', roles: ['CONTRACTOR', 'USER'] },
+  { id: 'c3', roles: ['CONTRACTOR', 'STAFF'] },
 ];
 
 const actions = ['view', 'edit', 'count'];

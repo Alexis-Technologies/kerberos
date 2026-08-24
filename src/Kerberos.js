@@ -1145,20 +1145,25 @@ class Kerberos {
 
   // Deny-wins merge of one role policy's result into the accumulated role
   // layer. Shared by the async and sync role evaluators.
+  // Union across role policies (Cerbos semantics): the principal may do what
+  // ANY of its roles permits. A role that does not permit an action simply does
+  // not contribute it — it cannot take it away from another role.
   static #mergeRoleResultInto(effects, outputs, actionsMeta, result, req) {
     for (const [src, output] of result.outputs.entries()) outputs.set(src, output);
 
     for (const action of req.actions) {
       if (!result.effects.has(action)) continue;
 
-      if (result.effects.get(action) === Effect.Deny) {
-        effects.set(action, Effect.Deny);
+      if (result.effects.get(action) === Effect.Allow) {
+        effects.set(action, Effect.Allow);
         if (result.meta.actions[action]) actionsMeta[action] = result.meta.actions[action];
         continue;
       }
 
+      // Record the first refusal only so that `meta` explains a filtered action
+      // when no other role ends up permitting it.
       if (!effects.has(action)) {
-        effects.set(action, Effect.Allow);
+        effects.set(action, Effect.Deny);
         if (result.meta.actions[action]) actionsMeta[action] = result.meta.actions[action];
       }
     }
@@ -1173,10 +1178,22 @@ class Kerberos {
     const actionsMeta = {};
     const memo = new Map();
     const actionsKey = req.actions.join(',');
+    let applicable = 0;
 
     for (const policy of rolePolicies) {
       const result = await this.#evaluateRolePolicy(policy, req, memo, new Set(), actionsKey, lookups);
+      // A role policy that targets no rule for this resource kind produces no
+      // effects at all and constrains nothing.
+      if (result.effects.size === 0) continue;
+      applicable += 1;
       Kerberos.#mergeRoleResultInto(effects, outputs, actionsMeta, result, req);
+    }
+
+    // A role WITHOUT an applicable role policy is unrestricted, so the union
+    // across the principal's roles permits everything and the filter must not
+    // narrow at all. Only when every role is constrained does the layer apply.
+    if (applicable < Kerberos.#uniqueRoleCount(req)) {
+      return { ...createEmptyPolicyResult(), hadPolicies: false };
     }
 
     return {
@@ -1188,6 +1205,12 @@ class Kerberos {
       },
       hadPolicies: true,
     };
+  }
+
+  static #uniqueRoleCount(req) {
+    const seen = new Set();
+    for (const role of req.P.roles) seen.add(role);
+    return seen.size;
   }
 
   /**
@@ -1330,21 +1353,18 @@ class Kerberos {
     let roleResult = createEmptyPolicyResult();
     let resourceResult = createEmptyPolicyResult();
 
-    const roleUnresolvedActions = [];
     if (unresolvedActions.length) {
       const roleReq = unresolvedActions.length === req.actions.length ? req : { ...req, actions: unresolvedActions };
       roleResult = await this.#evaluateRolePolicies(roleReq, trace, lookups);
-
-      for (const action of unresolvedActions) {
-        if (!roleResult.effects.has(action)) roleUnresolvedActions.push(action);
-      }
     }
 
-    if (roleUnresolvedActions.length) {
+    // The resource layer is consulted for every action the principal policy
+    // left open — role policies narrow it, they never stand in for it.
+    if (unresolvedActions.length) {
       const resourcePolicy = await this.#getResourcePolicy(req, trace, lookups);
       if (resourcePolicy) {
         const resourceReq =
-          roleUnresolvedActions.length === req.actions.length ? req : { ...req, actions: roleUnresolvedActions };
+          unresolvedActions.length === req.actions.length ? req : { ...req, actions: unresolvedActions };
         const importedDerivedRoles = await this.#getImportedDerivedRoles(
           resourcePolicy,
           req,
@@ -1373,15 +1393,22 @@ class Kerberos {
         continue;
       }
 
-      if (roleResult.effects.has(action)) {
-        effects.set(action, roleResult.effects.get(action));
-        if (roleResult.meta.actions[action]) actionsMeta[action] = roleResult.meta.actions[action];
-        continue;
-      }
+      // Role policies are a narrowing filter over the resource layer, not a
+      // layer that can grant on its own (Cerbos semantics: "a role policy
+      // cannot grant access that the resource policy does not already allow").
+      // The filter applies only when every principal role is constrained by an
+      // applicable role policy — see #evaluateRolePolicies.
+      const filteredOut = roleResult.hadPolicies && roleResult.effects.get(action) !== Effect.Allow;
 
       if (resourceResult.effects.has(action)) {
-        effects.set(action, resourceResult.effects.get(action));
-        if (resourceResult.meta.actions[action]) actionsMeta[action] = resourceResult.meta.actions[action];
+        const resourceEffect = resourceResult.effects.get(action);
+        if (filteredOut && resourceEffect === Effect.Allow) {
+          effects.set(action, Effect.Deny);
+          actionsMeta[action] = roleResult.meta.actions[action] ?? { reason: 'rule-miss' };
+        } else {
+          effects.set(action, resourceEffect);
+          if (resourceResult.meta.actions[action]) actionsMeta[action] = resourceResult.meta.actions[action];
+        }
         continue;
       }
 
@@ -1486,10 +1513,17 @@ class Kerberos {
     const actionsMeta = {};
     const memo = new Map();
     const actionsKey = req.actions.join(',');
+    let applicable = 0;
 
     for (const policy of rolePolicies) {
       const result = this.#evaluateRolePolicySync(policy, req, memo, new Set(), actionsKey);
+      if (result.effects.size === 0) continue;
+      applicable += 1;
       Kerberos.#mergeRoleResultInto(effects, outputs, actionsMeta, result, req);
+    }
+
+    if (applicable < Kerberos.#uniqueRoleCount(req)) {
+      return { ...createEmptyPolicyResult(), hadPolicies: false };
     }
 
     return {
@@ -1560,17 +1594,14 @@ class Kerberos {
     let roleResult = createEmptyPolicyResult();
     let resourceResult = createEmptyPolicyResult();
 
-    const roleUnresolvedActions = [];
     if (unresolvedActions.length) {
       const roleReq = unresolvedActions.length === req.actions.length ? req : { ...req, actions: unresolvedActions };
       roleResult = this.#evaluateRolePoliciesSync(roleReq, trace);
-
-      for (const action of unresolvedActions) {
-        if (!roleResult.effects.has(action)) roleUnresolvedActions.push(action);
-      }
     }
 
-    if (roleUnresolvedActions.length) {
+    // Mirrors the async driver: the resource layer always runs for the actions
+    // the principal policy left open; role policies only narrow it.
+    if (unresolvedActions.length) {
       const resourcePolicy = this.#resolvePolicyFromMemory(
         'resource',
         this.#resourcePolicies,
@@ -1581,7 +1612,7 @@ class Kerberos {
       );
       if (resourcePolicy) {
         const resourceReq =
-          roleUnresolvedActions.length === req.actions.length ? req : { ...req, actions: roleUnresolvedActions };
+          unresolvedActions.length === req.actions.length ? req : { ...req, actions: unresolvedActions };
         const importedDerivedRoles = this.#getImportedDerivedRolesSync(resourcePolicy, req, trace);
         resourceResult = resourcePolicy.check(resourceReq, importedDerivedRoles);
       }

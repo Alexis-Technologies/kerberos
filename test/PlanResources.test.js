@@ -291,6 +291,17 @@ describe('planResources', () => {
   });
 
   describe('role layer', () => {
+    // Role policies narrow the resource layer and never grant on their own, so
+    // these fixtures pair each role policy with a permissive resource policy —
+    // otherwise every plan below is trivially KIND_ALWAYS_DENIED.
+    const openDocumentPolicy = {
+      resourcePolicy: {
+        resource: 'document',
+        version: 'default',
+        rules: [{ actions: ['*'], effect: Effect.Allow, roles: ['*'] }],
+      },
+    };
+
     it('applies allowlist semantics with implicit deny', async () => {
       const kerberos = new Kerberos(
         [
@@ -316,6 +327,7 @@ describe('planResources', () => {
     it('keeps role rule conditions residual', async () => {
       const kerberos = new Kerberos(
         [
+          openDocumentPolicy,
           dynamicPolicy({
             rolePolicy: {
               role: 'USER',
@@ -338,9 +350,10 @@ describe('planResources', () => {
       });
     });
 
-    it('lets deny win across multiple role policies', async () => {
+    it('unions multiple role policies rather than intersecting them', async () => {
       const kerberos = new Kerberos(
         [
+          openDocumentPolicy,
           {
             rolePolicy: { role: 'USER', version: 'default', rules: [{ resource: 'document', allowActions: ['view'] }] },
           },
@@ -354,10 +367,13 @@ describe('planResources', () => {
         ],
         [],
       );
-      // AUDITOR matches the resource but does not allowlist 'view' → Deny
-      // wins over USER's Allow.
-      const plan = await planOf(kerberos, { principal: { id: 'u1', roles: ['USER', 'AUDITOR'] } });
-      assert.deepStrictEqual(plan.filter, { kind: DENIED });
+      const both = { id: 'u1', roles: ['USER', 'AUDITOR'] };
+      // AUDITOR does not allowlist 'view', but USER does — holding both roles
+      // must not take away what either grants alone.
+      assert.deepStrictEqual((await planOf(kerberos, { principal: both })).filter, { kind: ALLOWED });
+      assert.deepStrictEqual((await planOf(kerberos, { principal: both, action: 'audit' })).filter, { kind: ALLOWED });
+      // Neither role allowlists 'delete'.
+      assert.deepStrictEqual((await planOf(kerberos, { principal: both, action: 'delete' })).filter, { kind: DENIED });
     });
 
     it('intersects child allows with parent role policies', async () => {
@@ -372,7 +388,7 @@ describe('planResources', () => {
       const parent = {
         rolePolicy: { role: 'READER', version: 'default', rules: [{ resource: 'document', allowActions: ['view'] }] },
       };
-      const kerberos = new Kerberos([child, parent], []);
+      const kerberos = new Kerberos([openDocumentPolicy, child, parent], []);
       const editor = { id: 'u1', roles: ['EDITOR'] };
 
       assert.deepStrictEqual((await planOf(kerberos, { principal: editor })).filter, { kind: ALLOWED });
@@ -383,6 +399,7 @@ describe('planResources', () => {
     it('denies when a parent role policy never targets the resource', async () => {
       const kerberos = new Kerberos(
         [
+          openDocumentPolicy,
           {
             rolePolicy: {
               role: 'EDITOR',

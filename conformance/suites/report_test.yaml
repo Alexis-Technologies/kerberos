@@ -1,0 +1,81 @@
+---
+name: RolePolicyConformance
+description: >-
+  Role policies as a narrowing filter over the resource policy: union across
+  roles, no grant of their own, and no restriction from a role that has no
+  applicable role policy.
+
+principals:
+  reader:
+    id: r1
+    roles: ['READER']
+  writer:
+    id: w1
+    roles: ['WRITER']
+  reader_writer:
+    id: rw1
+    roles: ['READER', 'WRITER']
+  reader_plus_unpolicied:
+    id: rp1
+    roles: ['READER', 'PLAIN']
+
+resources:
+  report:
+    id: rep1
+    kind: report
+
+tests:
+  - name: one role policy narrows the resource policy to its allowlist
+    input:
+      principals: [reader, writer]
+      resources: [report]
+      actions: [view, edit, delete]
+    expected:
+      - principal: reader
+        resource: report
+        actions: { view: EFFECT_ALLOW, edit: EFFECT_DENY, delete: EFFECT_DENY }
+      - principal: writer
+        resource: report
+        actions: { view: EFFECT_DENY, edit: EFFECT_ALLOW, delete: EFFECT_DENY }
+
+  - name: multiple role policies union rather than intersect
+    description: >-
+      READER permits only `view`, WRITER only `edit`. Holding both must permit
+      both — an intersection would leave the principal with less access than
+      either role grants alone. `delete` is in neither allowlist, so the filter
+      still removes it.
+    input:
+      principals: [reader_writer]
+      resources: [report]
+      actions: [view, edit, delete]
+    expected:
+      - principal: reader_writer
+        resource: report
+        actions: { view: EFFECT_ALLOW, edit: EFFECT_ALLOW, delete: EFFECT_DENY }
+
+  - name: a role with no applicable role policy imposes no restriction
+    description: >-
+      PLAIN has no role policy, so it is unconstrained; the union therefore
+      permits everything the resource policy allows and READER's allowlist stops
+      applying. Adding a role can widen access, never narrow it.
+    input:
+      principals: [reader_plus_unpolicied]
+      resources: [report]
+      actions: [view, edit, delete]
+    expected:
+      - principal: reader_plus_unpolicied
+        resource: report
+        actions: { view: EFFECT_ALLOW, edit: EFFECT_ALLOW, delete: EFFECT_ALLOW }
+
+  - name: a role policy cannot grant what the resource policy does not allow
+    description: >-
+      READER allowlists `archive`, but no resource-policy rule grants it. Role
+      policies only ever take away.
+    input:
+      principals: [reader, reader_writer]
+      resources: [report]
+      actions: [archive]
+    expected:
+      - principals: [reader, reader_writer]
+        resource: report
+        actions: { archive: EFFECT_DENY }

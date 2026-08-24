@@ -251,7 +251,16 @@ function loadCorpus(dir) {
   for (const file of fs.readdirSync(dir).sort()) {
     if (!/\.ya?ml$/.test(file)) continue;
     const text = fs.readFileSync(path.join(dir, file), 'utf8');
-    for (const [index, doc] of YAML.parseAllDocuments(text).entries()) {
+    const documents = YAML.parseAllDocuments(text).filter((doc) => doc.toJS() !== null);
+    // Cerbos rejects a policy file carrying more than one YAML document
+    // ("more than one YAML document detected"). Refuse it here too, so the
+    // offline run cannot pass on a corpus a real PDP would not even load.
+    if (documents.length > 1) {
+      throw new ConformanceUnsupportedError(
+        `${file}: more than one YAML document in a policy file — Cerbos loads one policy per file`,
+      );
+    }
+    for (const [index, doc] of documents.entries()) {
       const parsed = doc.toJS();
       if (!parsed) continue;
       const where = `${file}[${index}]`;

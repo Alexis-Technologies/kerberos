@@ -31,7 +31,9 @@ const policies = [
           condition: { match: ({ V, C, R }) => V.isOpen && R.attr.amount < C.limit },
           output: { when: { ruleActivated: ({ P }) => ({ editor: P.id }) } },
         },
-        { actions: ['view'], effect: Effect.Allow, roles: ['USER'] },
+        // AUDITOR is listed here because the AUDITOR role policy below can only
+        // FILTER this grant — a role policy never grants on its own.
+        { actions: ['view'], effect: Effect.Allow, roles: ['USER', 'AUDITOR'] },
       ],
     },
   },
