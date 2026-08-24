@@ -4,7 +4,7 @@ import { withMermaid } from 'vitepress-plugin-mermaid';
 const ogTitle = 'Kerberos.js — embedded authorization engine for Node.js & the browser';
 const ogDescription =
   'Zero-dependency, in-process authorization engine for JavaScript. Cerbos-style RBAC + ABAC policies, ' +
-  'Zanzibar-inspired ReBAC relations and Cerbos-compatible query plans — no server to deploy, ~25 KB min+gzip.';
+  'Zanzibar-inspired ReBAC relations and Cerbos-compatible query plans — no server to deploy, ~29 KB min+gzip.';
 const repo = 'https://github.com/Alexis-Technologies/kerberos';
 const base = '/';
 const hostname = 'https://kerberosjs.vercel.app/';

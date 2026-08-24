@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Kerberos.js (`@alexify/kerberos`) is a zero-dependency (~8 KB), in-process authorization engine for JavaScript — a lightweight, embeddable alternative to Cerbos. It evaluates `resourcePolicy` / `principalPolicy` / `rolePolicy` documents against `(principal, resource, action)` requests and returns `EFFECT_ALLOW` / `EFFECT_DENY`, with optional derived roles, conditions, variables, constants, outputs, scopes, schema validation, audit logging, cache-backed dynamic policies, ReBAC (relation-backed derived roles + a built-in SpiceDB-inspired Zanzibar-lite resolver on the `/relations` subpath), and Cerbos-compatible resources query plans (`planResources`). Runs in Node.js and the browser.
+Kerberos.js (`@alexify/kerberos`) is a zero-dependency (~29 KB min+gzip), in-process authorization engine for JavaScript — a lightweight, embeddable alternative to Cerbos. It evaluates `resourcePolicy` / `principalPolicy` / `rolePolicy` documents against `(principal, resource, action)` requests and returns `EFFECT_ALLOW` / `EFFECT_DENY`, with optional derived roles, conditions, variables, constants, outputs, scopes, schema validation, audit logging, cache-backed dynamic policies, ReBAC (relation-backed derived roles + a built-in SpiceDB-inspired Zanzibar-lite resolver on the `/relations` subpath), and Cerbos-compatible resources query plans (`planResources`). Runs in Node.js and the browser.
 
 Package manager is **pnpm** (the exact pinned version is the `packageManager` field in `package.json`). CommonJS throughout (`require`/`module.exports`), no build/transpile step — `src/` ships as-is.
 
