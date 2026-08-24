@@ -54,12 +54,30 @@ This is a difference in _representation_, not in meaning, but it means a byte-fo
 
 _Enforcement: corpus._
 
-## Open question: conflict resolution across roles
+## ⚠️ Conflict resolution across roles — a real incompatibility
 
-**Kerberos is deny-overrides, unconditionally.** Verified directly: given a resource policy with an ALLOW rule targeting role `r1` and a DENY rule targeting role `r2`, a principal holding both gets **DENY**, and rule order does not change it. The same holds for an ALLOW and a DENY targeting the same single role.
+This is the one place where the two engines return **different decisions for the same policy and the same request**. It is verified against a real Cerbos PDP, not inferred from documentation.
 
-Cerbos is documented as deny-overrides for resource-policy rules, but is also described in places as having anti-lockout behaviour in which an ALLOW derived from one role wins over a DENY from another. These cannot both be true for the case above, and the difference is exactly the kind that a reimplementation gets wrong silently — every single-role test passes either way.
+|     | Rule combination                                                             | Kerberos | Cerbos ≥ 0.41 |
+| --- | ---------------------------------------------------------------------------- | -------: | ------------: |
+| 1   | ALLOW `roles: [SUPPORT]` + DENY `roles: [AUDITOR]`, principal holds **both** |   `DENY` |   **`ALLOW`** |
+| 2   | ALLOW `roles: [SUPPORT]` + DENY `roles: ['*']`                               |   `DENY` |        `DENY` |
+| 3   | ALLOW `roles: [SUPPORT]` + DENY `roles: [SUPPORT, AUDITOR]`                  |   `DENY` |        `DENY` |
+| 4   | ALLOW + conditional DENY, both on the **same** role                          |   `DENY` |        `DENY` |
 
-`suites/ticket_test.yaml` encodes the case as an executable probe with Kerberos's verified behaviour as the expectation. **If the live-PDP leg fails on `a DENY from one role overrides an ALLOW from another`, that is a finding, not a regression:** record the real Cerbos behaviour here and decide whether Kerberos should change, rather than editing the expectation to make the suite green.
+**Kerberos is deny-overrides, unconditionally.** Any matching DENY wins, regardless of which role it targets or where it sits in the rule list.
 
-_Enforcement: corpus (Kerberos side verified; Cerbos side pending the first live run)._
+**Cerbos is deny-overrides _within_ a role, allow-overrides _across_ roles.** Its evaluation loop runs once per principal role and returns the first role that independently produces an ALLOW; a DENY recorded by an earlier role is overwritten. This is intentional anti-lockout behaviour — the documented rationale is stopping an admin from locking themselves out because they also hold a less privileged role.
+
+Only row 1 diverges. A DENY still wins whenever it **covers the role that carries the ALLOW** — as a wildcard (row 2) or by enumeration (row 3) — which is why the practical blast radius is narrower than it first looks. All four rows are pinned in `suites/ticket_test.yaml`; row 1 carries a `cerbosActions` override recording the other engine's answer, and the runner asserts the two engines still disagree, so this entry cannot go stale unnoticed.
+
+### Direction of risk
+
+Porting Cerbos policies **to** Kerberos fails closed: Kerberos denies some things Cerbos would allow. Nothing leaks; access is lost. Porting the other way is the dangerous direction — a policy set relied upon to deny in Kerberos may allow under Cerbos.
+
+### Two traps worth knowing
+
+- **The behaviour changed in Cerbos 0.41.0**, bisected empirically (0.40.0 returns `DENY`, 0.41.0 returns `ALLOW`), coinciding with the rule-table engine rewrite. Kerberos matches Cerbos ≤ 0.40.
+- **`ghcr.io/cerbos/cerbos:latest` is stale and serves 0.40.0.** Benchmarking parity against `latest` validates the _old_ semantics and hides this entirely — which is why CI pins an explicit version. Cerbos's own docs also lagged the code here until 0.52.0, and the change was not listed as breaking.
+
+_Enforcement: corpus, both engines verified against Cerbos 0.55.0._

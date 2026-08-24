@@ -56,6 +56,9 @@ function expandSuite(suite, file) {
             resource: resource.value,
             actions: Object.keys(expectation.actions),
             expected: expectation.actions,
+            // Present only for a recorded divergence: what a real Cerbos PDP
+            // returns instead. See DIVERGENCES.md.
+            cerbosExpected: expectation.cerbosActions ?? null,
           });
         }
       }

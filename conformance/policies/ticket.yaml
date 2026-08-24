@@ -24,6 +24,29 @@ resourcePolicy:
       effect: EFFECT_DENY
       roles: ['AUDITOR']
 
+    # Same shape as `close`, but the DENY is a blanket one. Narrows how far the
+    # cross-role divergence reaches.
+    - name: support-may-escalate
+      actions: ['escalate']
+      effect: EFFECT_ALLOW
+      roles: ['SUPPORT']
+
+    - name: nobody-escalates
+      actions: ['escalate']
+      effect: EFFECT_DENY
+      roles: ['*']
+
+    # Same shape again, but the DENY enumerates the allowing role too.
+    - name: support-may-delete
+      actions: ['delete']
+      effect: EFFECT_ALLOW
+      roles: ['SUPPORT']
+
+    - name: neither-role-deletes
+      actions: ['delete']
+      effect: EFFECT_DENY
+      roles: ['SUPPORT', 'AUDITOR']
+
     # Same action, same single role: ALLOW listed before DENY.
     - name: support-may-comment
       actions: ['comment']

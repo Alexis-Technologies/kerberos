@@ -63,14 +63,13 @@ tests:
         resource: locked_ticket
         actions: { comment: EFFECT_DENY }
 
-  - name: a DENY from one role overrides an ALLOW from another
+  - name: KNOWN DIVERGENCE — a DENY scoped to another role
     description: >-
-      OPEN QUESTION until this runs against a live PDP. Kerberos is
-      deny-overrides across roles (verified). Cerbos is documented as
-      deny-overrides for resource-policy rules, but is also described in places
-      as having anti-lockout behaviour where an ALLOW from one role wins. If the
-      live leg fails here, that is a real finding, not a regression — record it
-      in DIVERGENCES.md rather than editing this expectation to match.
+      Kerberos is deny-overrides unconditionally, so the AUDITOR deny wins.
+      Cerbos >= 0.41 is deny-overrides *within* a role but allow-overrides
+      *across* roles (anti-lockout), so the SUPPORT allow wins. Verified against
+      a real PDP. See DIVERGENCES.md — `cerbosActions` records the other
+      engine's behaviour so the difference stays pinned instead of hidden.
     input:
       principals: [support_auditor]
       resources: [open_ticket]
@@ -79,3 +78,30 @@ tests:
       - principal: support_auditor
         resource: open_ticket
         actions: { close: EFFECT_DENY }
+        cerbosActions: { close: EFFECT_ALLOW }
+
+  - name: a blanket DENY still overrides an ALLOW from any role
+    description: >-
+      Bounds the divergence above. `roles: ['*']` covers the allowing role too,
+      so both engines deny — blanket denies are not affected.
+    input:
+      principals: [support_auditor, support]
+      resources: [open_ticket]
+      actions: [escalate]
+    expected:
+      - principals: [support_auditor, support]
+        resource: open_ticket
+        actions: { escalate: EFFECT_DENY }
+
+  - name: a DENY that also enumerates the allowing role wins
+    description: >-
+      Bounds the divergence from the other side: once the DENY covers SUPPORT
+      as well, Cerbos's per-role resolution denies too, and the engines agree.
+    input:
+      principals: [support_auditor]
+      resources: [open_ticket]
+      actions: [delete]
+    expected:
+      - principal: support_auditor
+        resource: open_ticket
+        actions: { delete: EFFECT_DENY }

@@ -46,6 +46,11 @@ await kerberos.isAllowed({
 | Consistency | in-process state + your cache ([honest limitations](#consistency-honest-limitations)) | per-PDP policy sync                | Zanzibar consistency (zookies) |
 | Best when | JS/TS stack, zero-infra, browser/edge                                                 | polyglot stack, central governance | relationship graphs at scale, strict consistency |
 
+> [!IMPORTANT]
+> Compatibility with Cerbos is checked in CI by a [conformance suite](./conformance/) that runs one corpus against both engines. It is close but not total, and the differences are catalogued in [DIVERGENCES.md](./conformance/DIVERGENCES.md).
+>
+> The one that changes decisions: **Kerberos is deny-overrides unconditionally, while Cerbos ≥ 0.41 is deny-overrides within a role but allow-overrides across roles** (anti-lockout). A DENY scoped only to role `B` does not veto an ALLOW on role `A` in Cerbos; in Kerberos it does. Denies that cover the allowing role — via `roles: ['*']` or by naming it — behave identically in both. Porting Cerbos policies here therefore fails closed, never open.
+
 ### When NOT to use Kerberos.js
 
 - **Polyglot backends** — if Go/Python/Java services need the same decisions, a central PDP (Cerbos) beats reimplementing policies per language.

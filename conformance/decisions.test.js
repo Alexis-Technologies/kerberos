@@ -85,6 +85,24 @@ describe('Cerbos conformance — decisions', () => {
           const cerbosSubset = Object.fromEntries(
             Object.keys(testCase.expected).map((action) => [action, cerbosActions[action]]),
           );
+
+          if (testCase.cerbosExpected) {
+            // A recorded divergence (DIVERGENCES.md): pin BOTH engines to their
+            // own verified behaviour, and fail if they ever agree again — a
+            // stale divergence entry is as misleading as an undocumented one.
+            assert.deepEqual(
+              cerbosSubset,
+              testCase.cerbosExpected,
+              'live Cerbos PDP no longer matches the recorded divergence — re-verify and update DIVERGENCES.md',
+            );
+            assert.notDeepEqual(
+              actual,
+              cerbosSubset,
+              'the engines now agree here, so this is no longer a divergence — drop `cerbosActions` and the DIVERGENCES.md entry',
+            );
+            return;
+          }
+
           assert.deepEqual(cerbosSubset, testCase.expected, 'live Cerbos PDP differs from the corpus expectation');
           assert.deepEqual(actual, cerbosSubset, 'Kerberos and the live Cerbos PDP disagree');
         });

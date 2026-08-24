@@ -69,6 +69,11 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
 
+      # The Cerbos version is pinned deliberately: the `latest` tag is stale and
+      # still serves 0.40.0, which predates the 0.41.0 change to cross-role
+      # conflict resolution — testing against it would hide a known divergence.
+      # See conformance/DIVERGENCES.md.
+      #
       # Fails fast with a readable compile error if the corpus is malformed,
       # rather than surfacing as an opaque 400 from the running PDP.
       - name: Compile the corpus with Cerbos
