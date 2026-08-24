@@ -49,37 +49,133 @@ export type ValidationOptions = {
   typebox?: TypeBoxLike;
 };
 
-export type RequestPrincipal = {
-  id: string;
-  roles: string[];
-  policyVersion?: string;
-  scope?: string;
+/* -------------------------------------------------------------------------- *
+ * Typed authoring
+ *
+ * Every public policy/request type below is generic over an optional
+ * application schema `S` naming the resource kinds, the actions each kind
+ * supports, their attribute bags, and the principal's roles/attributes. All
+ * parameters default to `AnySchema`, which reproduces the untyped
+ * (`string` / `Record<string, unknown>`) surface verbatim — declaring a schema
+ * is purely opt-in and changes nothing at runtime.
+ *
+ * ```ts
+ * type AppSchema = {
+ *   principal: { roles: 'admin' | 'user'; attr: { department: string } };
+ *   resources: {
+ *     document: { actions: 'view' | 'edit'; attr: { ownerId: string } };
+ *     invoice: { actions: 'view' | 'approve'; attr: { amount: number } };
+ *   };
+ * };
+ *
+ * const kerberos = new Kerberos<AppSchema>(policies, derivedRoles);
+ * await kerberos.isAllowed({
+ *   principal: { id: 'u1', roles: ['admin'], attr: { department: 'eng' } },
+ *   resource: { kind: 'document', id: 'd1', attr: { ownerId: 'u1' } },
+ *   action: 'view', // ← checked against `document`'s actions, not `invoice`'s
+ * });
+ * ```
+ * -------------------------------------------------------------------------- */
+
+/** One resource kind's contract: the actions it supports and its attribute bag. */
+export type KerberosResourceContract = {
+  actions?: string;
   attr?: Record<string, unknown>;
 };
 
-export type RequestResource = {
-  id: string;
-  kind: string;
-  policyVersion?: string;
-  scope?: string;
-  attr?: Record<string, unknown>;
+/** An application's authorization domain — the type argument of {@link Kerberos}. */
+export type KerberosSchema = {
+  principal?: { roles?: string; attr?: Record<string, unknown> };
+  resources?: Record<string, KerberosResourceContract>;
 };
 
-export type BaseRequest = {
-  principal: RequestPrincipal;
-  P: RequestPrincipal;
-  resource: RequestResource;
-  R: RequestResource;
-  actions: string[];
+/** The permissive default: any resource kind, any action, any attribute. */
+export type AnySchema = {
+  principal: { roles: string; attr: Record<string, unknown> };
+  resources: Record<string, { actions: string; attr: Record<string, unknown> }>;
+};
+
+type ResourcesOf<S extends KerberosSchema> = S extends {
+  resources: infer R extends Record<string, KerberosResourceContract>;
+}
+  ? R
+  : AnySchema['resources'];
+
+/** Resource kinds declared by the schema (`string` when untyped). */
+export type ResourceKindOf<S extends KerberosSchema = AnySchema> = keyof ResourcesOf<S> & string;
+
+/** Actions valid for one resource kind (`string` when untyped). */
+export type ActionOf<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> = ResourcesOf<S>[K & keyof ResourcesOf<S>] extends { actions: infer A extends string } ? A : string;
+
+/** Attribute bag of one resource kind (`Record<string, unknown>` when untyped). */
+export type ResourceAttrOf<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> = ResourcesOf<S>[K & keyof ResourcesOf<S>] extends { attr: infer A extends Record<string, unknown> }
+  ? A
+  : Record<string, unknown>;
+
+/** Roles the schema's principals may carry (`string` when untyped). */
+export type PrincipalRoleOf<S extends KerberosSchema = AnySchema> = S extends {
+  principal: { roles: infer R extends string };
+}
+  ? R
+  : string;
+
+/** Attribute bag of the schema's principals (`Record<string, unknown>` when untyped). */
+export type PrincipalAttrOf<S extends KerberosSchema = AnySchema> = S extends {
+  principal: { attr: infer A extends Record<string, unknown> };
+}
+  ? A
+  : Record<string, unknown>;
+
+export type RequestPrincipal<S extends KerberosSchema = AnySchema> = {
+  id: string;
+  roles: PrincipalRoleOf<S>[];
+  policyVersion?: string;
+  scope?: string;
+  attr?: PrincipalAttrOf<S>;
+};
+
+export type RequestResource<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> = {
+  id: string;
+  kind: K;
+  policyVersion?: string;
+  scope?: string;
+  attr?: ResourceAttrOf<S, K>;
+};
+
+export type BaseRequest<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> = {
+  principal: RequestPrincipal<S>;
+  P: RequestPrincipal<S>;
+  resource: RequestResource<S, K>;
+  R: RequestResource<S, K>;
+  actions: ActionOf<S, K>[];
   reqId?: string;
   callId?: string;
   includeMeta?: boolean;
 };
 
-export enum Effect {
-  Allow = 'EFFECT_ALLOW',
-  Deny = 'EFFECT_DENY',
-}
+/**
+ * Policy rule effects. Declared as a frozen const object (not a TypeScript
+ * `enum`) so that plain JSON policy literals — `effect: 'EFFECT_ALLOW'` — are
+ * assignable to the `Effect` type, which is what stored/serialized policies
+ * actually contain. `Effect.Allow` keeps working as before.
+ */
+export declare const Effect: {
+  readonly Allow: 'EFFECT_ALLOW';
+  readonly Deny: 'EFFECT_DENY';
+};
+export type Effect = 'EFFECT_ALLOW' | 'EFFECT_DENY';
 
 export class ZodSchemas {
   static buildScopeString(z: unknown): unknown;
@@ -103,7 +199,10 @@ export class TypeBoxSchemas {
 }
 
 type ConstantsSchema = Record<string, unknown>;
-type RequestWithConstants = BaseRequest & Partial<{ C: ConstantsSchema; constants: ConstantsSchema }>;
+type RequestWithConstants<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> = BaseRequest<S, K> & Partial<{ C: ConstantsSchema; constants: ConstantsSchema }>;
 export class Constants {
   constructor(schema: ConstantsSchema, options?: ValidationOptions);
   get(): ConstantsSchema;
@@ -121,11 +220,20 @@ export class ConstantsTypeBoxSchemas {
   static buildRequestWithConstants(typebox: TypeBoxLike): unknown;
 }
 
-type VariablesSchema = Record<string, (req: RequestWithConstants) => unknown>;
-type RequestWithVariables = BaseRequest & Partial<{ V: Record<string, unknown>; variables: Record<string, unknown> }>;
-export class Variables {
-  constructor(schema: VariablesSchema, options?: ValidationOptions);
-  get(req: RequestWithConstants): Record<string, unknown>;
+type VariablesSchema<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> = Record<string, (req: RequestWithConstants<S, K>) => unknown>;
+type RequestWithVariables<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> = BaseRequest<S, K> & Partial<{ V: Record<string, unknown>; variables: Record<string, unknown> }>;
+export class Variables<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> {
+  constructor(schema: VariablesSchema<S, K>, options?: ValidationOptions);
+  get(req: RequestWithConstants<S, K>): Record<string, unknown>;
 }
 export class VariablesZodSchemas {
   static buildShape(z: unknown): unknown;
@@ -140,24 +248,40 @@ export class VariablesTypeBoxSchemas {
   static buildRequestWithVariables(typebox: TypeBoxLike): unknown;
 }
 
-type ConditionSingleMatchExpression = (req: RequestWithConstants & RequestWithVariables) => boolean;
-type ConditionMatch =
-  | ConditionSingleMatchExpression
+/** The `{ P, R, V, C, ... }` envelope handed to condition/variable/output callbacks. */
+export type PolicyEvalRequest<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> = RequestWithConstants<S, K> & RequestWithVariables<S, K>;
+
+type ConditionSingleMatchExpression<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> = (req: PolicyEvalRequest<S, K>) => boolean;
+type ConditionMatch<S extends KerberosSchema = AnySchema, K extends ResourceKindOf<S> = ResourceKindOf<S>> =
+  | ConditionSingleMatchExpression<S, K>
+  | PolicyExprDescriptor
   | {
-      any: NonEmptyArray<ConditionMatch>;
+      any: NonEmptyArray<ConditionMatch<S, K>>;
     }
   | {
-      all: NonEmptyArray<ConditionMatch>;
+      all: NonEmptyArray<ConditionMatch<S, K>>;
     }
   | {
-      none: NonEmptyArray<ConditionMatch>;
+      none: NonEmptyArray<ConditionMatch<S, K>>;
     };
-export type ConditionsSchema = {
-  match: ConditionMatch;
+export type ConditionsSchema<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> = {
+  match: ConditionMatch<S, K>;
 };
-export class Conditions {
-  constructor(schema: ConditionsSchema, options?: ValidationOptions);
-  isFulfilled(req: RequestWithConstants & RequestWithVariables, condition?: ConditionMatch): boolean;
+export class Conditions<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> {
+  constructor(schema: ConditionsSchema<S, K>, options?: ValidationOptions);
+  isFulfilled(req: PolicyEvalRequest<S, K>, condition?: ConditionMatch<S, K>): boolean;
 }
 export class ConditionsZodSchemas {
   static buildShape(z: unknown): unknown;
@@ -172,17 +296,24 @@ export class ConditionsTypeBoxSchemas {
   static buildFullRequest(typebox: TypeBoxLike): unknown;
 }
 
-export type OutputsSchema =
+export type OutputsSchema<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> =
   | {
       when: {
-        ruleActivated?: (req: RequestWithConstants & RequestWithVariables) => unknown;
-        conditionNotMet?: (req: RequestWithConstants & RequestWithVariables) => unknown;
+        ruleActivated?: ((req: PolicyEvalRequest<S, K>) => unknown) | PolicyExprDescriptor;
+        conditionNotMet?: ((req: PolicyEvalRequest<S, K>) => unknown) | PolicyExprDescriptor;
       };
     }
-  | ((req: RequestWithConstants & RequestWithVariables) => unknown);
-export class Outputs {
-  constructor(schema: OutputsSchema, options?: ValidationOptions);
-  build(req: RequestWithConstants & RequestWithVariables, isConditionFulfilled: boolean, src: string): {
+  | ((req: PolicyEvalRequest<S, K>) => unknown)
+  | PolicyExprDescriptor;
+export class Outputs<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> {
+  constructor(schema: OutputsSchema<S, K>, options?: ValidationOptions);
+  build(req: PolicyEvalRequest<S, K>, isConditionFulfilled: boolean, src: string): {
     src: string;
     val: unknown;
   };
@@ -214,34 +345,36 @@ export class MetadataTypeBoxSchemas {
 }
 
 /** Classic condition-backed definition: parentRoles and condition required. */
-type ConditionDerivedRolesDefinition = {
+type ConditionDerivedRolesDefinition<S extends KerberosSchema = AnySchema> = {
   name: string;
-  parentRoles: NonEmptyArray<string>;
-  condition: ConditionsSchema | Conditions;
+  parentRoles: NonEmptyArray<PrincipalRoleOf<S> | '*'>;
+  condition: ConditionsSchema<S> | Conditions<S>;
 };
 /**
  * Relation-backed (ReBAC) definition: the role activates when the configured
  * `relations` resolver grants the named relation/permission on the request's
  * resource. `parentRoles` and `condition` become optional synchronous gates.
  */
-type RelationDerivedRolesDefinition = {
+type RelationDerivedRolesDefinition<S extends KerberosSchema = AnySchema> = {
   name: string;
   relation: string;
-  parentRoles?: NonEmptyArray<string>;
-  condition?: ConditionsSchema | Conditions;
+  parentRoles?: NonEmptyArray<PrincipalRoleOf<S> | '*'>;
+  condition?: ConditionsSchema<S> | Conditions<S>;
 };
-type DerivedRolesDefinition = ConditionDerivedRolesDefinition | RelationDerivedRolesDefinition;
-export type DerivedRolesSchema = {
+type DerivedRolesDefinition<S extends KerberosSchema = AnySchema> =
+  | ConditionDerivedRolesDefinition<S>
+  | RelationDerivedRolesDefinition<S>;
+export type DerivedRolesSchema<S extends KerberosSchema = AnySchema> = {
   name: string;
   description?: string;
-  variables?: VariablesSchema | Variables;
+  variables?: VariablesSchema<S> | Variables<S>;
   constants?: ConstantsSchema | Constants;
-  definitions: NonEmptyArray<DerivedRolesDefinition>;
+  definitions: NonEmptyArray<DerivedRolesDefinition<S>>;
 };
-export class DerivedRoles {
-  constructor(schema: DerivedRolesSchema, options?: ValidationOptions);
-  get(req: BaseRequest): Set<string>;
-  getRelationCandidates(req: BaseRequest): Array<{ name: string; relation: string }>;
+export class DerivedRoles<S extends KerberosSchema = AnySchema> {
+  constructor(schema: DerivedRolesSchema<S>, options?: ValidationOptions);
+  get(req: BaseRequest<S>): Set<string>;
+  getRelationCandidates(req: BaseRequest<S>): Array<{ name: string; relation: string }>;
 }
 export class DerivedRolesZodSchemas {
   static buildShape(z: unknown): unknown;
@@ -253,34 +386,48 @@ export class DerivedRolesTypeBoxSchemas {
   static buildShape(typebox: TypeBoxLike): unknown;
 }
 
-type BaseRule = {
-  actions: NonEmptyArray<string>;
+type BaseRule<S extends KerberosSchema = AnySchema, K extends ResourceKindOf<S> = ResourceKindOf<S>> = {
+  name?: string;
+  actions: NonEmptyArray<ActionOf<S, K> | '*'>;
   effect: Effect;
-  condition?: ConditionsSchema | Conditions;
-  output?: OutputsSchema | Outputs;
+  condition?: ConditionsSchema<S, K> | Conditions<S, K>;
+  output?: OutputsSchema<S, K> | Outputs<S, K>;
 };
-type RuleWithRoles = BaseRule & {
-  roles: NonEmptyArray<string> | readonly ['*'];
-};
-type RuleWithDerivedRoles = BaseRule & {
+type RuleWithRoles<S extends KerberosSchema = AnySchema, K extends ResourceKindOf<S> = ResourceKindOf<S>> =
+  BaseRule<S, K> & {
+    roles: NonEmptyArray<PrincipalRoleOf<S> | '*'>;
+  };
+type RuleWithDerivedRoles<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> = BaseRule<S, K> & {
   derivedRoles: NonEmptyArray<string>;
 };
-type Rule = RuleWithRoles | RuleWithDerivedRoles;
-export type ResourcePolicySchema = {
-  version: string;
-  resource: string;
-  scope?: string;
-  rules: NonEmptyArray<Rule>;
-  variables?: VariablesSchema | Variables;
-  constants?: ConstantsSchema | Constants;
-  importDerivedRoles?: NonEmptyArray<string> | readonly string[];
+type Rule<S extends KerberosSchema = AnySchema, K extends ResourceKindOf<S> = ResourceKindOf<S>> =
+  | RuleWithRoles<S, K>
+  | RuleWithDerivedRoles<S, K>;
+/**
+ * One resource policy. When the schema declares resource kinds this is a
+ * discriminated union over `resource:` — writing `resource: 'document'`
+ * narrows every rule's `actions` and every condition's `R.attr` to that kind.
+ */
+export type ResourcePolicySchema<S extends KerberosSchema = AnySchema> = {
+  [K in ResourceKindOf<S>]: {
+    version: string;
+    resource: K;
+    scope?: string;
+    rules: NonEmptyArray<Rule<S, K>>;
+    variables?: VariablesSchema<S, K> | Variables<S, K>;
+    constants?: ConstantsSchema | Constants;
+    importDerivedRoles?: NonEmptyArray<string> | readonly string[];
+  };
+}[ResourceKindOf<S>];
+export type ResourcePolicyRootSchema<S extends KerberosSchema = AnySchema> = {
+  resourcePolicy: ResourcePolicySchema<S>;
 };
-export type ResourcePolicyRootSchema = {
-  resourcePolicy: ResourcePolicySchema;
-};
-export class ResourcePolicy {
-  constructor(schema: ResourcePolicyRootSchema, options?: ValidationOptions);
-  check(req: BaseRequest, derivedRoles: Set<string>, effectAsBoolean?: boolean): {
+export class ResourcePolicy<S extends KerberosSchema = AnySchema> {
+  constructor(schema: ResourcePolicyRootSchema<S>, options?: ValidationOptions);
+  check(req: BaseRequest<S>, derivedRoles: Set<string>, effectAsBoolean?: boolean): {
     effects: Map<string, Effect | boolean>;
     outputs: Map<string, unknown>;
     meta: {
@@ -299,31 +446,37 @@ export class ResourcePolicyTypeBoxSchemas {
   static buildShape(typebox: TypeBoxLike): unknown;
 }
 
-type PrincipalPolicyActionRuleSchema = {
+type PrincipalPolicyActionRuleSchema<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> = {
   name?: string;
-  action: string;
+  action: ActionOf<S, K> | '*';
   effect: Effect;
-  condition?: ConditionsSchema | Conditions;
-  output?: OutputsSchema | Outputs;
+  condition?: ConditionsSchema<S, K> | Conditions<S, K>;
+  output?: OutputsSchema<S, K> | Outputs<S, K>;
 };
-type PrincipalPolicyRuleSchema = {
-  resource: string;
-  actions: NonEmptyArray<PrincipalPolicyActionRuleSchema>;
-};
-export type PrincipalPolicySchema = {
+/** Discriminated over `resource:` — the kind narrows each entry's `action`. */
+type PrincipalPolicyRuleSchema<S extends KerberosSchema = AnySchema> = {
+  [K in ResourceKindOf<S>]: {
+    resource: K | '*';
+    actions: NonEmptyArray<PrincipalPolicyActionRuleSchema<S, K>>;
+  };
+}[ResourceKindOf<S>];
+export type PrincipalPolicySchema<S extends KerberosSchema = AnySchema> = {
   principal: string;
   version: string;
   scope?: string;
-  rules: NonEmptyArray<PrincipalPolicyRuleSchema>;
-  variables?: VariablesSchema | Variables;
+  rules: NonEmptyArray<PrincipalPolicyRuleSchema<S>>;
+  variables?: VariablesSchema<S> | Variables<S>;
   constants?: ConstantsSchema | Constants;
 };
-export type PrincipalPolicyRootSchema = {
-  principalPolicy: PrincipalPolicySchema;
+export type PrincipalPolicyRootSchema<S extends KerberosSchema = AnySchema> = {
+  principalPolicy: PrincipalPolicySchema<S>;
 };
-export class PrincipalPolicy {
-  constructor(schema: PrincipalPolicyRootSchema, options?: ValidationOptions);
-  check(req: BaseRequest, effectAsBoolean?: boolean): {
+export class PrincipalPolicy<S extends KerberosSchema = AnySchema> {
+  constructor(schema: PrincipalPolicyRootSchema<S>, options?: ValidationOptions);
+  check(req: BaseRequest<S>, effectAsBoolean?: boolean): {
     effects: Map<string, Effect | boolean>;
     outputs: Map<string, unknown>;
     meta: {
@@ -342,28 +495,31 @@ export class PrincipalPolicyTypeBoxSchemas {
   static buildShape(typebox: TypeBoxLike): unknown;
 }
 
-type RolePolicyRuleSchema = {
-  name?: string;
-  resource: string;
-  allowActions: NonEmptyArray<string>;
-  condition?: ConditionsSchema | Conditions;
-  output?: OutputsSchema | Outputs;
-};
-export type RolePolicySchema = {
-  role: string;
+/** Discriminated over `resource:` — the kind narrows `allowActions`. */
+type RolePolicyRuleSchema<S extends KerberosSchema = AnySchema> = {
+  [K in ResourceKindOf<S>]: {
+    name?: string;
+    resource: K | '*';
+    allowActions: NonEmptyArray<ActionOf<S, K> | '*'>;
+    condition?: ConditionsSchema<S, K> | Conditions<S, K>;
+    output?: OutputsSchema<S, K> | Outputs<S, K>;
+  };
+}[ResourceKindOf<S>];
+export type RolePolicySchema<S extends KerberosSchema = AnySchema> = {
+  role: PrincipalRoleOf<S>;
   version: string;
   scope?: string;
-  parentRoles?: NonEmptyArray<string> | readonly string[];
-  rules: NonEmptyArray<RolePolicyRuleSchema>;
-  variables?: VariablesSchema | Variables;
+  parentRoles?: NonEmptyArray<PrincipalRoleOf<S>> | readonly PrincipalRoleOf<S>[];
+  rules: NonEmptyArray<RolePolicyRuleSchema<S>>;
+  variables?: VariablesSchema<S> | Variables<S>;
   constants?: ConstantsSchema | Constants;
 };
-export type RolePolicyRootSchema = {
-  rolePolicy: RolePolicySchema;
+export type RolePolicyRootSchema<S extends KerberosSchema = AnySchema> = {
+  rolePolicy: RolePolicySchema<S>;
 };
-export class RolePolicy {
-  constructor(schema: RolePolicyRootSchema, options?: ValidationOptions);
-  check(req: BaseRequest, effectAsBoolean?: boolean): {
+export class RolePolicy<S extends KerberosSchema = AnySchema> {
+  constructor(schema: RolePolicyRootSchema<S>, options?: ValidationOptions);
+  check(req: BaseRequest<S>, effectAsBoolean?: boolean): {
     effects: Map<string, Effect | boolean>;
     outputs: Map<string, unknown>;
     meta: {
@@ -381,14 +537,14 @@ export class RolePolicyTypeBoxSchemas {
   static buildShape(typebox: TypeBoxLike): unknown;
 }
 
-export type KerberosPolicy =
-  | ResourcePolicy
-  | ResourcePolicyRootSchema
-  | PrincipalPolicy
-  | PrincipalPolicyRootSchema
-  | RolePolicy
-  | RolePolicyRootSchema;
-export type KerberosDerivedRoles = DerivedRoles | DerivedRolesSchema;
+export type KerberosPolicy<S extends KerberosSchema = AnySchema> =
+  | ResourcePolicy<S>
+  | ResourcePolicyRootSchema<S>
+  | PrincipalPolicy<S>
+  | PrincipalPolicyRootSchema<S>
+  | RolePolicy<S>
+  | RolePolicyRootSchema<S>;
+export type KerberosDerivedRoles<S extends KerberosSchema = AnySchema> = DerivedRoles<S> | DerivedRolesSchema<S>;
 export type KerberosAuditLogEntry = {
   callId?: string;
   reqId?: string;
@@ -667,13 +823,13 @@ export function deserializePolicy(json: unknown, codec: PolicyCodec): unknown;
  * is request-scoped and shared across all resources of a `checkResources`
  * batch — resolvers may use it to share subproblems.
  */
-export type KerberosRelationsResolver = {
+export type KerberosRelationsResolver<S extends KerberosSchema = AnySchema> = {
   check(
-    args: { principal: RequestPrincipal; resource: RequestResource; relation: string },
+    args: { principal: RequestPrincipal<S>; resource: RequestResource<S>; relation: string },
     opts?: { memo?: Map<string, unknown> | null; callId?: string | null },
   ): boolean | Promise<boolean>;
   list?(
-    args: { principal: RequestPrincipal; resource: RequestResource; relations: string[] },
+    args: { principal: RequestPrincipal<S>; resource: RequestResource<S>; relations: string[] },
     opts?: { memo?: Map<string, unknown> | null; callId?: string | null },
   ): Set<string> | string[] | Promise<Set<string> | string[]>;
 };
@@ -698,7 +854,7 @@ export type KerberosCacheRetry = {
   onExhausted?: 'throw' | 'miss';
 };
 
-export type KerberosOptions = ValidationOptions & {
+export type KerberosOptions<S extends KerberosSchema = AnySchema> = ValidationOptions & {
   logger?: KerberosLogger | boolean;
   telemetry?: KerberosTelemetryOptions;
   cache?: CacheLike;
@@ -708,7 +864,7 @@ export type KerberosOptions = ValidationOptions & {
   cacheKeyPrefix?: string;
   codec?: PolicyCodec;
   /** ReBAC resolver used for relation-backed derived roles. */
-  relations?: KerberosRelationsResolver | null;
+  relations?: KerberosRelationsResolver<S> | null;
   /** Optional bound on each `relations.check`/`relations.list` call; a hung resolver fails as `KerberosRelationsError` instead of hanging authorization. Off by default. */
   relationsTimeoutMs?: number;
   /**
@@ -755,12 +911,18 @@ export function createCacheReader(
   retry?: KerberosCacheRetry | null,
 ): { enabled: boolean; get(key: string): Promise<unknown> };
 
-/** planResources filter outcome (Cerbos-compatible). */
-export enum PlanKind {
-  AlwaysAllowed = 'KIND_ALWAYS_ALLOWED',
-  AlwaysDenied = 'KIND_ALWAYS_DENIED',
-  Conditional = 'KIND_CONDITIONAL',
-}
+/**
+ * planResources filter outcome (Cerbos-compatible). Declared as a frozen const
+ * object rather than a TypeScript `enum` so that the raw wire strings
+ * (`'KIND_CONDITIONAL'`) — which is what a serialized plan actually carries —
+ * are assignable to the `PlanKind` type. `PlanKind.Conditional` still works.
+ */
+export declare const PlanKind: {
+  readonly AlwaysAllowed: 'KIND_ALWAYS_ALLOWED';
+  readonly AlwaysDenied: 'KIND_ALWAYS_DENIED';
+  readonly Conditional: 'KIND_CONDITIONAL';
+};
+export type PlanKind = 'KIND_ALWAYS_ALLOWED' | 'KIND_ALWAYS_DENIED' | 'KIND_CONDITIONAL';
 
 /**
  * One operand of a planResources condition tree: a literal, a reference to an
@@ -782,32 +944,38 @@ export type PlanFilter = {
 };
 
 /** planResources plans over a resource KIND: no `id`, `attr` = KNOWN fields. */
-export type RequestPlanResource = {
-  kind: string;
+export type RequestPlanResource<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> = {
+  kind: K;
   policyVersion?: string;
   scope?: string;
-  attr?: Record<string, unknown>;
+  attr?: Partial<ResourceAttrOf<S, K>>;
 };
 
-export type PlanResourcesArgs = {
+export type PlanResourcesArgs<
+  S extends KerberosSchema = AnySchema,
+  K extends ResourceKindOf<S> = ResourceKindOf<S>,
+> = {
   reqId?: string;
-  principal: RequestPrincipal;
-  resource: RequestPlanResource;
+  principal: RequestPrincipal<S>;
+  resource: RequestPlanResource<S, K>;
   /** Exactly one of `action` / `actions` must be provided. */
-  action?: string;
+  action?: ActionOf<S, K>;
   /** Multiple actions plan the conjunction (Cerbos AND semantics). */
-  actions?: string[];
+  actions?: ActionOf<S, K>[];
   includeMeta?: boolean;
 };
 
-export type PlanResourcesResponse = {
+export type PlanResourcesResponse<S extends KerberosSchema = AnySchema> = {
   reqId?: string;
   kerberosCallId: string;
   /** Echo of the request form: `action` for single-action requests… */
-  action?: string;
+  action?: ActionOf<S>;
   /** …or `actions` for multi-action requests. */
-  actions?: string[];
-  resourceKind: string;
+  actions?: ActionOf<S>[];
+  resourceKind: ResourceKindOf<S>;
   policyVersion: string;
   filter: PlanFilter;
   meta?: {
@@ -828,13 +996,50 @@ export type PlanResourcesResponse = {
  * by `RelationResolver.lookupResources` from `@alexify/kerberos/relations`),
  * then re-normalizes the filter. Returns a new response object.
  */
-export function expandRelationOperands(
-  planResponse: PlanResourcesResponse,
+export function expandRelationOperands<S extends KerberosSchema = AnySchema>(
+  planResponse: PlanResourcesResponse<S>,
   lookup: (args: { name: string; relation: string }) => Promise<Iterable<string>> | Iterable<string>,
-): Promise<PlanResourcesResponse>;
+): Promise<PlanResourcesResponse<S>>;
 
-export class Kerberos {
-  constructor(policies: KerberosPolicy[], derivedRoles: KerberosDerivedRoles[], options?: KerberosOptions);
+/** One entry of a `checkResources` batch — the kind narrows its `actions`. */
+export type CheckResourcesEntry<S extends KerberosSchema = AnySchema> = {
+  [K in ResourceKindOf<S>]: { resource: RequestResource<S, K>; actions: ActionOf<S, K>[] };
+}[ResourceKindOf<S>];
+
+export type CheckResourcesArgs<S extends KerberosSchema = AnySchema> = {
+  reqId?: string;
+  principal: RequestPrincipal<S>;
+  resources: CheckResourcesEntry<S>[];
+  includeMeta?: boolean;
+};
+
+/** `E` is `Effect` by default and `boolean` when `effectAsBoolean` is set. */
+export type CheckResourcesResult<S extends KerberosSchema = AnySchema, E = Effect> = {
+  resource: Pick<RequestResource<S>, 'id' | 'kind' | 'policyVersion' | 'scope'>;
+  actions: Record<ActionOf<S>, E>;
+  outputs: unknown[];
+  meta?: {
+    actions: Record<string, {
+      matchedPolicy?: string;
+      matchedRule?: string;
+      matchedScope?: string;
+      reason?: KerberosDecisionReason;
+      /** Error class name for `'evaluation-error'` fail-closed denials. */
+      errorName?: string;
+    }>;
+    effectiveDerivedRoles: string[];
+    resolution?: KerberosResolutionTraceEntry[];
+  };
+};
+
+export type CheckResourcesResponse<S extends KerberosSchema = AnySchema, E = Effect> = {
+  reqId?: string;
+  kerberosCallId: string;
+  results: CheckResourcesResult<S, E>[];
+};
+
+export class Kerberos<S extends KerberosSchema = AnySchema> {
+  constructor(policies: KerberosPolicy<S>[], derivedRoles: KerberosDerivedRoles<S>[], options?: KerberosOptions<S>);
   static generateCallId(): string;
   static normalizeScope(scope?: string): string;
   static getScopeSearchChain(scope?: string): string[];
@@ -850,41 +1055,20 @@ export class Kerberos {
   static parseCheckResourcesArgs(args: unknown, options?: ValidationOptions & { schema?: unknown }): Record<string, unknown>;
   /** Validates `planResources` arguments with the configured backend. */
   static parsePlanResourcesArgs(args: unknown, options?: ValidationOptions & { schema?: unknown }): Record<string, unknown>;
-  isAllowed(args: {
+  isAllowed<K extends ResourceKindOf<S>>(args: {
     reqId?: string;
-    principal: RequestPrincipal;
-    resource: RequestResource;
-    action: string;
+    principal: RequestPrincipal<S>;
+    resource: RequestResource<S, K>;
+    action: ActionOf<S, K>;
     includeMeta?: boolean;
   }): Promise<boolean>;
+  checkResources(args: CheckResourcesArgs<S>, effectAsBoolean: true): Promise<CheckResourcesResponse<S, boolean>>;
+  checkResources(args: CheckResourcesArgs<S>, effectAsBoolean?: false): Promise<CheckResourcesResponse<S, Effect>>;
   checkResources(
-    args: {
-      reqId?: string;
-      principal: RequestPrincipal;
-      resources: { resource: RequestResource; actions: string[] }[];
-      includeMeta?: boolean;
-    },
+    args: CheckResourcesArgs<S>,
     effectAsBoolean?: boolean,
-  ): Promise<{
-    reqId?: string;
-    kerberosCallId: string;
-    results: {
-      resource: Pick<RequestResource, 'id' | 'kind' | 'policyVersion' | 'scope'>;
-      actions: Record<string, Effect | boolean>;
-      outputs: unknown[];
-      meta?: {
-        actions: Record<string, {
-          matchedPolicy?: string;
-          matchedRule?: string;
-          matchedScope?: string;
-          reason?: KerberosDecisionReason;
-        }>;
-        effectiveDerivedRoles: string[];
-        resolution?: KerberosResolutionTraceEntry[];
-      };
-    }[];
-  }>;
-  planResources(args: PlanResourcesArgs): Promise<PlanResourcesResponse>;
+  ): Promise<CheckResourcesResponse<S, Effect | boolean>>;
+  planResources<K extends ResourceKindOf<S>>(args: PlanResourcesArgs<S, K>): Promise<PlanResourcesResponse<S>>;
 }
 export class KerberosZodSchemas {
   static buildResourcePolicyInstance(z: unknown): unknown;

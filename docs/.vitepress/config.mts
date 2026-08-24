@@ -134,6 +134,7 @@ export default withMermaid(
             text: 'Core features',
             items: [
               { text: 'Configuration', link: '/guide/configuration' },
+              { text: 'TypeScript', link: '/guide/typescript' },
               { text: 'Outputs', link: '/guide/outputs' },
               { text: 'Decision metadata', link: '/guide/decision-metadata' },
               { text: 'Schema validation', link: '/guide/schema-validation' },

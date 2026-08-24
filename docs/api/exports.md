@@ -7,16 +7,28 @@ The full public surface of the package, by entry point.
 | Export | Purpose |
 | ------ | ------- |
 | `Kerberos` | Main authorization engine. |
-| `Effect` | `{ Allow: 'EFFECT_ALLOW', Deny: 'EFFECT_DENY' }`. |
+| `Effect` | `{ Allow: 'EFFECT_ALLOW', Deny: 'EFFECT_DENY' }` — a frozen const object, [not an `enum`](/guide/typescript#effect-and-plankind-are-const-objects). |
 | `ResourcePolicy`, `PrincipalPolicy`, `RolePolicy`, `DerivedRoles` | Policy classes (rarely constructed directly). |
 | `Conditions`, `Variables`, `Constants`, `Outputs` | DSL building blocks. |
 | `createSafeExprCodec`, `serializePolicy`, `deserializePolicy` | Safe AST codec for [dynamic/stored policies](/guide/caching). |
-| `PlanKind` | `{ AlwaysAllowed, AlwaysDenied, Conditional }` — [query plan](/guide/query-plans) filter kinds. |
+| `PlanKind` | `{ AlwaysAllowed, AlwaysDenied, Conditional }` — [query plan](/guide/query-plans) filter kinds (const object, not an `enum`). |
 | `expandRelationOperands` | Materializes ReBAC `relation` operands of a [query plan](/guide/query-plans) into id filters. |
 | `KerberosValidationError`, `KerberosCacheError`, `KerberosCodecError`, `KerberosExprError`, `KerberosRelationsError` | Typed [error classes](/api/errors). |
 | `registerAjvKeywords`, `createAjvAdapter` | [Validation](/guide/schema-validation) helpers. |
 | `JsonSchemas`, `TypeBoxSchemas`, `ZodSchemas`, `KerberosJsonSchemas`, `ResourcePolicyJsonSchemas`, `PrincipalPolicyJsonSchemas`, `RolePolicyJsonSchemas`, … | Schema builders for the three backends. |
 | `ALL_ACTIONS`, `ALL_ROLES`, `ALL_RESOURCES`, `DEFAULT_VERSION`, `BASE_SCOPE` | Wildcard/default tokens (`'*'`, `'default'`, `''`). |
+
+Type-only exports for [typed authoring](/guide/typescript) (erased at runtime):
+
+| Type | Purpose |
+| ---- | ------- |
+| `KerberosSchema`, `AnySchema`, `KerberosResourceContract` | Shape of an application authorization schema, and the permissive default. |
+| `ResourceKindOf<S>`, `ActionOf<S, K>`, `ResourceAttrOf<S, K>` | Projections of the declared resource kinds. |
+| `PrincipalRoleOf<S>`, `PrincipalAttrOf<S>` | Projections of the declared principal. |
+| `RequestPrincipal<S>`, `RequestResource<S, K>`, `BaseRequest<S, K>`, `PolicyEvalRequest<S, K>` | Request shapes, including the `{ P, R, V, C }` callback envelope. |
+| `KerberosPolicy<S>`, `ResourcePolicySchema<S>`, `PrincipalPolicySchema<S>`, `RolePolicySchema<S>`, `DerivedRolesSchema<S>` | Policy document shapes. |
+| `CheckResourcesArgs<S>`, `CheckResourcesEntry<S>`, `CheckResourcesResult<S, E>`, `CheckResourcesResponse<S, E>` | `checkResources` arguments and response. |
+| `PlanResourcesArgs<S, K>`, `PlanResourcesResponse<S>`, `PlanFilter`, `PlanExpressionOperand` | `planResources` arguments and response. |
 
 ## `@alexify/kerberos/relations`
 

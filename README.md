@@ -75,6 +75,8 @@ await kerberos.isAllowed({
 - [Scopes and Policy Versions](#scopes-and-policy-versions)
 - [API Reference](#api-reference)
   - [`new Kerberos(...)`](#new-kerberospolicies-derivedroles-options) · [`isAllowed`](#kerberosisallowedargs--promiseboolean) · [`checkResources`](#kerberoscheckresourcesargs-effectasboolean--false--promisecheckresourcesresponse) · [`planResources`](#kerberosplanresourcesargs--promiseplanresourcesresponse) · [Errors](#errors) · [Exports](#exports)
+- [TypeScript](#typescript)
+  - [Declaring a schema](#declaring-a-schema) · [What it buys you](#what-it-buys-you) · [Schema helper types](#schema-helper-types)
 - [Configuration Options](#configuration-options)
   - [Options](#options) · [Pino logging](#using-pino-for-production-logging) · [Call ID generation](#call-id-generation)
 - [Outputs](#outputs)
@@ -473,7 +475,7 @@ All error classes are exported from the main entry. Evaluation-phase errors foll
 | Export | Purpose |
 | ------ | ------- |
 | `Kerberos` | Main authorization engine. |
-| `Effect` | `{ Allow: 'EFFECT_ALLOW', Deny: 'EFFECT_DENY' }`. |
+| `Effect` | `{ Allow: 'EFFECT_ALLOW', Deny: 'EFFECT_DENY' }` — a frozen const object, [not an `enum`](#typescript). |
 | `ResourcePolicy`, `PrincipalPolicy`, `RolePolicy`, `DerivedRoles` | Policy classes (rarely constructed directly). |
 | `Conditions`, `Variables`, `Constants`, `Outputs` | DSL building blocks. |
 | `createSafeExprCodec`, `serializePolicy`, `deserializePolicy` | Safe AST codec for [dynamic/stored policies](#caching--storing-policies). |
@@ -499,6 +501,110 @@ Subpath **`@alexify/kerberos/tests`** (dev/test only — not loaded by the main 
 | `KerberosTest`, `KerberosTests` | Cerbos-style declarative test runner. |
 | `PrincipalMock`, `PrincipalsMock`, `ResourceMock`, `ResourcesMock` | Named fixtures for test suites. |
 | `*ZodSchemas`, `*JsonSchemas`, `*TypeBoxSchemas` | Schema builders for the test harness. |
+
+## TypeScript
+
+Kerberos.js ships hand-maintained types. By default every position is open — `kind` and `action` are `string`, `attr` is `Record<string, unknown>` — which is what you want for policies loaded from a store at runtime.
+
+When your resource kinds are known at compile time, declare them once and the whole surface narrows to them.
+
+### Declaring a schema
+
+```typescript
+import { Kerberos, Effect, type KerberosPolicy } from '@alexify/kerberos';
+
+type AppSchema = {
+  principal: {
+    roles: 'admin' | 'user';
+    attr: { department: string; clearance: number };
+  };
+  resources: {
+    document: { actions: 'view' | 'edit' | 'delete'; attr: { ownerId: string; status: 'draft' | 'published' } };
+    invoice: { actions: 'view' | 'approve'; attr: { amount: number } };
+  };
+};
+
+const kerberos = new Kerberos<AppSchema>(policies, derivedRoles);
+```
+
+Both keys are optional — declare only `resources` if you do not want to enumerate roles.
+
+### What it buys you
+
+The resource kind drives everything else. `action`, `attr`, and the condition callbacks all narrow to the kind you named:
+
+```typescript
+await kerberos.isAllowed({
+  principal: { id: 'u1', roles: ['admin'], attr: { department: 'eng', clearance: 3 } },
+  resource: { kind: 'document', id: 'd1', attr: { ownerId: 'u1', status: 'draft' } },
+  action: 'edit', // ✅ autocompleted from `document`'s actions
+});
+
+await kerberos.isAllowed({
+  principal: { id: 'u1', roles: ['admin'] },
+  resource: { kind: 'document', id: 'd1' },
+  action: 'approve', // ❌ 'approve' belongs to `invoice`, not `document`
+});
+```
+
+Policy documents are checked the same way — `resource:` discriminates the rules, so a typo in an action or a role is a compile error rather than a silent `EFFECT_DENY` at 3am:
+
+```typescript
+const policy: KerberosPolicy<AppSchema> = {
+  resourcePolicy: {
+    version: 'default',
+    resource: 'document',
+    rules: [
+      { actions: ['view', 'edit'], effect: Effect.Allow, roles: ['admin'] },
+      {
+        actions: ['edit'],
+        effect: Effect.Allow,
+        roles: ['user'],
+        // R.attr is { ownerId: string; status: 'draft' | 'published' }
+        condition: { match: ({ R, P }) => R.attr?.ownerId === P.id && R.attr?.status === 'draft' },
+      },
+    ],
+  },
+};
+```
+
+`checkResources` keeps each batch entry typed independently, so a mixed batch still catches a wrong action per kind:
+
+```typescript
+const { results } = await kerberos.checkResources({
+  principal: { id: 'u1', roles: ['user'] },
+  resources: [
+    { resource: { kind: 'document', id: 'd1' }, actions: ['view', 'edit'] },
+    { resource: { kind: 'invoice', id: 'i1' }, actions: ['approve'] },
+  ],
+});
+```
+
+The second argument now selects the effect representation through overloads: `checkResources(args)` resolves `results[].actions` to `Effect`, and `checkResources(args, true)` to `boolean` — previously both were typed as the `Effect | boolean` union.
+
+### Schema helper types
+
+Exported so you can build your own typed wrappers (an Express middleware, a React hook) over the same schema:
+
+| Type | Resolves to |
+| ---- | ----------- |
+| `ResourceKindOf<S>` | Union of declared resource kinds. |
+| `ActionOf<S, K>` | Actions for kind `K`; every action across all kinds when `K` is omitted. |
+| `ResourceAttrOf<S, K>` | Attribute bag of kind `K`. |
+| `PrincipalRoleOf<S>` / `PrincipalAttrOf<S>` | Declared principal roles / attributes. |
+| `RequestPrincipal<S>`, `RequestResource<S, K>`, `BaseRequest<S, K>` | Request shapes. |
+| `PolicyEvalRequest<S, K>` | The `{ P, R, V, C }` envelope a condition/variable/output callback receives. |
+| `CheckResourcesArgs<S>`, `CheckResourcesResponse<S, E>`, `PlanResourcesArgs<S, K>`, `PlanResourcesResponse<S>` | Method arguments and responses. |
+| `AnySchema` | The permissive default used when no schema is supplied. |
+
+> [!NOTE]
+> Typing is **compile-time only** — there is no runtime cost and no runtime enforcement. A schema constrains the policies and requests you write in TypeScript; it does not validate policies loaded from a cache at runtime. For that, use [schema validation](#schema-validation).
+
+`Effect` and `PlanKind` are const objects rather than TypeScript `enum`s, so the raw wire strings that a stored policy or a serialized plan actually carries stay assignable:
+
+```typescript
+const rule = { actions: ['view'], effect: 'EFFECT_ALLOW', roles: ['user'] }; // ✅ no `Effect.Allow` needed
+```
 
 ## Configuration Options
 

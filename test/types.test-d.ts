@@ -116,7 +116,11 @@ declare const planResponse: PlanResourcesResponse;
 expectType<PlanFilter>(planResponse.filter);
 expectType<PlanKind>(planResponse.filter.kind);
 expectAssignable<PlanKind>(PlanKind.AlwaysAllowed);
-expectType<PlanKind.Conditional>(PlanKind.Conditional);
+expectType<'KIND_CONDITIONAL'>(PlanKind.Conditional);
+// PlanKind/Effect are const objects, not `enum`s — the raw wire strings that a
+// serialized plan or a JSON policy actually carries stay assignable.
+expectAssignable<PlanKind>('KIND_ALWAYS_DENIED');
+expectAssignable<Effect>('EFFECT_ALLOW');
 // The operand union accepts nested expressions, variables and literals.
 const conditionalOperand: PlanExpressionOperand = {
   expression: {
