@@ -2093,7 +2093,7 @@ describe('RelationResolver contract hardening', () => {
     assert.deepEqual(await relations.lookupSubjects({ resource: 'doc:d1', permission: 'view' }), ['user:*']);
   });
 
-  it('keeps actionsSet/allowActionsSet out of serialized policy shapes (M7)', async () => {
+  it('keeps actionsMatcher/allowActionsMatcher out of serialized policy shapes (M7)', async () => {
     const { ResourcePolicy, RolePolicy } = require('../src/index.js');
     const resourcePolicy = new ResourcePolicy({
       resourcePolicy: {
@@ -2106,11 +2106,11 @@ describe('RelationResolver contract hardening', () => {
       rolePolicy: { role: 'USER', version: 'default', rules: [{ resource: 'expense', allowActions: ['view'] }] },
     });
 
-    assert.equal(JSON.stringify(resourcePolicy.shape).includes('actionsSet'), false);
-    assert.equal(JSON.stringify(rolePolicy.shape).includes('allowActionsSet'), false);
+    assert.equal(JSON.stringify(resourcePolicy.shape).includes('actionsMatcher'), false);
+    assert.equal(JSON.stringify(rolePolicy.shape).includes('allowActionsMatcher'), false);
     // The hot-path Sets still exist as non-enumerable fields.
-    assert.ok(resourcePolicy.rules[0].actionsSet instanceof Set);
-    assert.ok(rolePolicy.rules[0].allowActionsSet instanceof Set);
+    assert.equal(typeof resourcePolicy.rules[0].actionsMatcher.matches, 'function');
+    assert.equal(typeof rolePolicy.rules[0].allowActionsMatcher.matches, 'function');
 
     // And evaluation still works.
     const kerberos = new Kerberos(

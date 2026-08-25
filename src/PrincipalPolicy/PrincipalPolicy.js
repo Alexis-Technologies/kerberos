@@ -1,7 +1,8 @@
 const { parsePrincipalPolicyShape } = require('./validation');
 const { cloneShapeTree, deepFreeze } = require('../freeze.js');
 
-const { ALL_ACTIONS, ALL_RESOURCES, Effect } = require('../schemas');
+const { Effect } = require('../schemas');
+const { compileMatcher } = require('../matching.js');
 const { parseConditions, parseConstants, parseOutputs, parseVariables } = require('../policyParsers.js');
 
 /**
@@ -50,13 +51,19 @@ class PrincipalPolicy {
       for (const rule of this.#shape.principalPolicy.rules) {
         const actions = [];
         for (const actionRule of rule.actions) {
-          actions.push({
+          const parsedAction = {
             ...actionRule,
             condition: PrincipalPolicy.parseConditions(actionRule.condition, options),
             output: PrincipalPolicy.parseOutputs(actionRule.output, options),
-          });
+          };
+          // Glob-aware matchers, precompiled per rule (see ResourcePolicy);
+          // non-enumerable so they never leak into serialized shapes.
+          Object.defineProperty(parsedAction, 'actionMatcher', { value: compileMatcher([actionRule.action]) });
+          actions.push(parsedAction);
         }
-        rules.push({ ...rule, actions });
+        const parsedRule = { ...rule, actions };
+        Object.defineProperty(parsedRule, 'resourceMatcher', { value: compileMatcher([rule.resource]) });
+        rules.push(parsedRule);
       }
       this.#shape.principalPolicy.rules = rules;
     }
@@ -131,12 +138,12 @@ class PrincipalPolicy {
 
       for (let i = 0; i < rules.length; i++) {
         const rule = rules[i];
-        if (rule.resource !== ALL_RESOURCES && rule.resource !== reqWithVariables.R.kind) continue;
+        if (!rule.resourceMatcher.matches(reqWithVariables.R.kind)) continue;
 
         const actionRules = rule.actions;
         for (let j = 0; j < actionRules.length; j++) {
           const actionRule = actionRules[j];
-          if (actionRule.action !== ALL_ACTIONS && actionRule.action !== action) continue;
+          if (!actionRule.actionMatcher.matches(action)) continue;
 
           const isConditionFulfilled = actionRule.condition ? actionRule.condition.isFulfilled(reqWithVariables) : true;
           const metaSrc = `${metaSrcBase}#${actionRule.name || `UNNAMED_RULE_${i + 1}_${j + 1}`}`;

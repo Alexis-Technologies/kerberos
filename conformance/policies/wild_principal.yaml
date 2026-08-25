@@ -1,0 +1,9 @@
+apiVersion: api.cerbos.dev/v1
+principalPolicy:
+  principal: ryan
+  version: default
+  rules:
+    - resource: 'gl*'
+      actions:
+        - action: touch
+          effect: EFFECT_ALLOW

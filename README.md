@@ -392,6 +392,22 @@ Scope behavior follows the Cerbos-style model:
 
 When both policy types are loaded, Kerberos first resolves principal overrides using the principal scope/version chain and then falls back to resource policy lookup when the principal policy is not applicable for a given action.
 
+### How the scope chain is evaluated
+
+Matching Cerbos's `SCOPE_PERMISSIONS_OVERRIDE_PARENT` (its default), the chain is not a lookup for one policy — every policy found along it participates, and evaluation is **per action, per principal role**:
+
+- The first scope whose policy produces a decision (allow or deny) for an action and a role **seals** it; policies further up cannot change it.
+- A rule whose condition fails decides nothing — the walk **falls through** to the parent scope for that action.
+- The walk runs per principal role, so a deny sealing one role at a specific scope does not stop another role from winning an allow at the base scope (allow from any role wins across roles).
+- A scope with no policy at all is simply skipped (Cerbos's `lenientScopeSearch`; Kerberos has no strict mode).
+
+Which scope drives which policy type: **resource policies and role policies** walk the *resource's* scope chain; **principal policies** walk the *principal's*. (Cerbos's docs describe role-policy scope as the principal's, but its engine — and a live PDP — match it against the resource's; see [DIVERGENCES.md](./conformance/DIVERGENCES.md).)
+
+### Wildcards
+
+Name fields glob, exactly as in Cerbos: a bare `*` matches anything; in any other pattern `*` matches within a single `:`-delimited segment (`view:*` matches `view:public` but neither the bare `view` nor `view:a:b`), and `**` crosses segments. Globs work in resource-policy `actions` and `roles`, principal-policy `resource` and `action`, role-policy `resource` and `allowActions`, and derived-role `parentRoles`. `rules[].derivedRoles` references are exact names — Cerbos's schema rejects globs there too.
+
+
 Example:
 
 ```javascript
@@ -960,15 +976,15 @@ Kerberos.js can resolve policies dynamically from a remote store (Redis, MongoDB
 
 ### How it works (fallback layer)
 
-Static policies passed to the constructor stay in memory and are always checked first. The `cache` is only consulted on a **miss**:
+Static policies passed to the constructor stay in memory; the `cache` is a fallback source. Resolution collects the **whole policy chain** along the scope search chain, with per-scope precedence:
 
-1. Resolve the policy by `kind` / `id` / `role` + `policyVersion` + scope chain in memory.
-2. On a miss, and only if a `cache` is configured, call `await cache.get(key)` for each scope in the chain.
-3. On a hit, the JSON document is handled according to the `codec` option (see below).
+1. For each scope in the chain (most specific → base), look the policy up in memory first, then — only on a miss at that scope, and only if a `cache` is configured — call `await cache.get(key)`.
+2. On a hit, the JSON document is handled according to the `codec` option (see below).
+3. Every policy found participates in [per-action scope evaluation](#scopes-and-policy-versions) — a more specific policy decides first, and actions it does not decide fall through to less specific ones.
 4. If nothing matches, the action falls back to `EFFECT_DENY` (unchanged behavior).
 
-> [!WARNING]
-> The whole scope chain is walked **in memory first** — source precedence beats scope specificity. A static base-scope (`''`) policy therefore permanently shadows a *more specific* cached policy for the same `(kind/id/role, version)`: in a hybrid deployment (static org-wide defaults in code + per-tenant overrides in the store) the cached tenant override — including a tightening Deny — silently never loads. Don't combine a static policy and cached policies for the same id/version across scopes; keep each (id, version) fully static or fully cache-backed.
+> [!NOTE]
+> Precedence is **per scope**: an in-memory policy wins at its own scope, but no longer shadows a *more specific* cached policy at a deeper scope. Hybrid deployments (static org-wide defaults in code + per-tenant overrides in the store) resolve the way scope specificity implies.
 
 Cache keys follow this layout:
 

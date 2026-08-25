@@ -1,0 +1,13 @@
+apiVersion: api.cerbos.dev/v1
+principalPolicy:
+  principal: ivy
+  version: default
+  scope: acme
+  rules:
+    - resource: narrow2
+      actions:
+        - action: grant
+          effect: EFFECT_ALLOW
+          condition:
+            match:
+              expr: R.attr.ok == true

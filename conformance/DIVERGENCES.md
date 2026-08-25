@@ -35,6 +35,24 @@ Kerberos always walks the chain and falls through to whatever it finds, with no 
 
 _Enforcement: documented._
 
+### Role-policy scope: Cerbos's docs and engine disagree — we follow the engine
+
+Cerbos's role-policies page calls the `scope` field an "optional **principal** scope", but its rule table places role-policy rows in the resource pass, matched against the **resource** scope chain and the resource `policyVersion` — and a live 0.55.0 PDP confirms the source (a role policy scoped `acme` applies when the _resource_ carries `scope: acme`, not when the principal does). Kerberos follows the observable engine behaviour.
+
+_Enforcement: corpus (`suites/scope_walk_test.yaml`, both directions)._
+
+### Wildcard subset
+
+Cerbos compiles patterns with gobwas/glob (`:` separator; a bare `*` is rewritten to `**`), which also accepts `?`, `[...]` and `{a,b}` forms its docs never mention. Kerberos implements exactly the documented subset — bare `*`, segment-scoped `*`, and `**` — and treats anything fancier as literal text. Partial globs in the `roles` field and in `parentRoles` are docs-silent in Cerbos but engine-supported; Kerberos matches the engine (pinned in `suites/wildcards_test.yaml`).
+
+_Enforcement: corpus + `test/Matching.test.js`._
+
+### Condition runtime errors
+
+Cerbos treats a condition that throws as _not satisfied_ and carries on (its `strictEvaluation` flag turns such errors into denials; note Cerbos's own conditions page claims 0.55 fails closed on DENY-rule errors, which its engine page and source contradict). Kerberos has a different granularity: the request-level `onError: 'throw' | 'deny'` option — there is no per-rule skip-on-error mode.
+
+_Enforcement: documented._
+
 ### Plan operators
 
 Kerberos emits two operators Cerbos has no counterpart for:
@@ -68,3 +86,17 @@ Two traps found while establishing this, worth knowing if you ever re-verify:
 - **`ghcr.io/cerbos/cerbos:latest` is stale and serves 0.40.0.** A parity check against `latest` validates the _old_ semantics and hides this entirely, which is why CI pins an explicit version.
 
 _Enforcement: corpus (`suites/ticket_test.yaml`, all four combinations), plus `test/ConflictResolution.test.js` and the multi-role principals in `test/PlanParity.test.js`._
+
+## Documentation audit (Cerbos 0.55.0)
+
+The semantics implemented here were verified two ways: empirically against a live `ghcr.io/cerbos/cerbos:0.55.0` PDP (the conformance suites), and against Cerbos's documentation plus its v0.55.0 source. The doc audit confirmed, with citations:
+
+1. per-role conflict resolution (deny within a role, allow across roles, order-independent) — evaluation page + `internal/ruletable/check.go`;
+2. derived-role rules collapsing into their `parentRoles` — `internal/ruletable/ruletable.go` ("merge derived roles as roles");
+3. role policies as a non-granting narrowing constraint requiring a resource policy — role-policies page, verbatim;
+4. union across the principal's roles — by composition of (1) and per-role narrowing;
+5. strictly per-role "no role policy = unrestricted" — `appendRolePolicyDenies` (the cross-bucket case is pinned in `scope_walk_test.yaml`);
+6. principal-policy decisions being final — evaluation page, verbatim;
+7. `parentRoles` intersection along the chain — role-policies page + recursive closure in the source.
+
+Where the docs and the engine disagree (role-policy scope source; the conditions page's 0.55 fail-closed claim), the engine wins and the disagreement is recorded above.

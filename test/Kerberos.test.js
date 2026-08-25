@@ -927,20 +927,21 @@ describe('Kerberos', () => {
       });
 
       assert.strictEqual(results.results[0].actions.delete, Effect.Deny);
-      // The resource policy does not grant `delete` to this principal either,
-      // so it is the layer that refuses. The parentRoles intersection itself is
-      // pinned in test/RolePolicy.test.js and test/PlanResources.test.js.
-      assert.strictEqual(results.results[0].meta.actions.delete.matchedPolicy, 'resource.expense.vdefault');
+      // The parent USER role policy is the row that refuses `delete` for the
+      // LIMITED_MANAGER bucket (parentRoles intersect along the chain), and the
+      // decision trace names it.
+      assert.strictEqual(results.results[0].meta.actions.delete.matchedPolicy, 'role.USER.vdefault');
     });
   });
 
   describe('scoped role policy lookup', () => {
     const kerberos = new Kerberos([expensePolicy, userRolePolicy, scopedUserRolePolicy], [commonRolesPolicy]);
 
-    // Role policies filter the resource layer, so scope selection is observed
-    // on an action the resource policy DOES grant: the base USER policy permits
-    // `create`, the `acme.corp` one does not.
-    it('should use the base role policy when principal scope is not provided', async () => {
+    // Role policies ride the RESOURCE scope chain (Cerbos rule-table
+    // semantics — see conformance/DIVERGENCES.md), so scope selection is
+    // observed on an action the resource policy DOES grant: the base USER
+    // policy permits `create`, the `acme.corp` one does not.
+    it('should use the base role policy when the resource scope is not provided', async () => {
       const isAllowed = await kerberos.isAllowed({
         principal: principalsPolicy.sally,
         action: 'create',
@@ -950,14 +951,11 @@ describe('Kerberos', () => {
       assert.strictEqual(isAllowed, true);
     });
 
-    it('should use the scoped role policy when principal scope matches', async () => {
+    it('should use the scoped role policy when the resource scope matches', async () => {
       const isAllowed = await kerberos.isAllowed({
-        principal: {
-          ...principalsPolicy.sally,
-          scope: 'acme.corp',
-        },
+        principal: principalsPolicy.sally,
         action: 'create',
-        resource: resourcesPolicy.expense2,
+        resource: { ...resourcesPolicy.expense2, scope: 'acme.corp' },
       });
 
       assert.strictEqual(isAllowed, false);

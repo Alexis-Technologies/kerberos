@@ -2,6 +2,7 @@ const { parseDerivedRolesShape } = require('./validation');
 const { cloneShapeTree, deepFreeze } = require('../freeze.js');
 
 const { Conditions } = require('../Conditions');
+const { compileMatcher } = require('../matching.js');
 const { parseConstants, parseVariables } = require('../policyParsers.js');
 
 /**
@@ -58,6 +59,12 @@ class DerivedRoles {
         // the optional-field validation on the next construction.
         const parsedDef = { ...def };
         if (def.condition) parsedDef.condition = DerivedRoles.parseConditions(def.condition, options);
+        if (Array.isArray(def.parentRoles) && def.parentRoles.length) {
+          // Cerbos matches parentRoles with globs (`*` and partial patterns
+          // like `adm*`) — precompiled here, non-enumerable like the policy
+          // rule matchers.
+          Object.defineProperty(parsedDef, 'parentRolesMatcher', { value: compileMatcher(def.parentRoles) });
+        }
         defs.push(parsedDef);
       }
       this.#shape.definitions = defs;
@@ -102,8 +109,8 @@ class DerivedRoles {
   }
 
   static #parentRolesMatch(def, principalRoles) {
-    for (const role of def.parentRoles) {
-      if (principalRoles.has(role)) return true;
+    for (const role of principalRoles) {
+      if (def.parentRolesMatcher.matches(role)) return true;
     }
     return false;
   }

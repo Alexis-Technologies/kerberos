@@ -170,6 +170,42 @@ const policies = [
     },
     codec,
   ),
+  // Scoped policy: the per-(action, role) walk must fall through a failed
+  // condition to the base policy, and a scoped deny must seal its role.
+  deserializePolicy(
+    {
+      resourcePolicy: {
+        resource: 'document',
+        version: 'default',
+        scope: 'acme',
+        rules: [
+          { actions: ['edit'], effect: Effect.Deny, roles: ['USER'] },
+          {
+            actions: ['view'],
+            effect: Effect.Allow,
+            roles: ['AUDITOR'],
+            condition: { match: { $expr: 'R.attr.public === true' } },
+          },
+          // Glob rule: matches `count` via a mid-segment wildcard.
+          { actions: ['c*t'], effect: Effect.Allow, roles: ['ADMIN'] },
+        ],
+      },
+    },
+    codec,
+  ),
+  // Scoped role policy at the RESOURCE scope: narrows CONTRACTOR to view-only
+  // at acme while the base policy also allowlists nothing else there.
+  deserializePolicy(
+    {
+      rolePolicy: {
+        role: 'CONTRACTOR',
+        version: 'default',
+        scope: 'acme',
+        rules: [{ resource: 'document', allowActions: ['view'] }],
+      },
+    },
+    codec,
+  ),
 ];
 
 const derivedRoles = [
@@ -249,6 +285,35 @@ describe('planResources ↔ isAllowed parity', () => {
     for (const action of actions) {
       it(`matches isAllowed for ${principal.id}/${action} across the attr grid`, async () => {
         await assertParity(principal, action, { principal, resource: { kind: 'document' }, action }, attrGrid);
+      });
+    }
+  }
+
+  // The scope walk is per (action, role) with condition fall-through — the
+  // planner folds it symbolically, and this sweep pins the two against each
+  // other for scoped requests (which no other plan test exercises).
+  for (const principal of principals) {
+    for (const action of actions) {
+      it(`matches isAllowed for ${principal.id}/${action} at scope acme`, async () => {
+        const plan = await kerberos.planResources({
+          principal,
+          resource: { kind: 'document', scope: 'acme' },
+          action,
+        });
+        const filter = wireFilter(plan);
+        for (const attr of attrGrid) {
+          const planned = evalFilter(filter, { id: 'r1', attr });
+          const actual = await kerberos.isAllowed({
+            principal,
+            resource: { id: 'r1', kind: 'document', scope: 'acme', attr },
+            action,
+          });
+          assert.strictEqual(
+            planned,
+            actual,
+            `scoped drift for ${principal.id}/${action} on ${JSON.stringify(attr)}: plan=${planned} isAllowed=${actual}`,
+          );
+        }
       });
     }
   }

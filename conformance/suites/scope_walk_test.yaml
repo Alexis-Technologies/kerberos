@@ -1,0 +1,227 @@
+---
+name: ScopeWalkConformance
+description: >-
+  Per-(action, role) scope-chain evaluation with scopePermissions =
+  OVERRIDE_PARENT (the default): the first scope that decides an action for a
+  role seals it, a failed condition falls through, principal policies walk the
+  PRINCIPAL scope chain while role policies ride the RESOURCE chain, and role
+  policies contribute synthetic denies per scope. Includes the cross-bucket
+  case where a resource allow reaching only a policied role cannot borrow
+  another role's allowlist.
+
+principals:
+  role_a:
+    id: pa
+    roles: ['A']
+  role_ab:
+    id: pab
+    roles: ['A', 'B']
+  role_rs:
+    id: prs
+    roles: ['RS']
+  ivy_acme:
+    id: ivy
+    roles: ['Z']
+    scope: acme
+  jane_acme:
+    id: jane
+    roles: ['Z']
+    scope: acme
+  jane_base:
+    id: jane
+    roles: ['Z']
+  rt_acme:
+    id: prt
+    roles: ['RT']
+    scope: acme
+  rt_base:
+    id: prt2
+    roles: ['RT']
+  ra_rb:
+    id: pab2
+    roles: ['RA', 'RB']
+  ra_only:
+    id: pra
+    roles: ['RA']
+  rb_only:
+    id: prb
+    roles: ['RB']
+
+resources:
+  sc_acme:
+    id: s1
+    kind: sc
+    scope: acme
+  sc_acme_open:
+    id: s1
+    kind: sc
+    scope: acme
+    attr:
+      ok: true
+  sc_acme_closed:
+    id: s1
+    kind: sc
+    scope: acme
+    attr:
+      ok: false
+  sc_gap:
+    id: s1
+    kind: sc
+    scope: acme.eu
+  sc_base:
+    id: s1
+    kind: sc
+  narrow2_closed:
+    id: n1
+    kind: narrow2
+    attr:
+      ok: false
+  narrow2_open:
+    id: n1
+    kind: narrow2
+    attr:
+      ok: true
+  k_base:
+    id: k1
+    kind: k
+  k_acme:
+    id: k1
+    kind: k
+    scope: acme
+  y_doc:
+    id: y1
+    kind: y
+
+tests:
+  - name: a deny at the specific scope seals the role; an allow seals against a base deny
+    description: >-
+      acme denies edit for A and allows view for A; the base policy says the
+      opposite. The first scope to decide each (action, role) wins.
+    input:
+      principals: [role_a]
+      resources: [sc_acme]
+      actions: [edit, view]
+    expected:
+      - principal: role_a
+        resource: sc_acme
+        actions: { edit: EFFECT_DENY, view: EFFECT_ALLOW }
+
+  - name: a failed condition is no decision — the walk falls through
+    input:
+      principals: [role_a]
+      resources: [sc_acme_closed, sc_acme_open]
+      actions: [share]
+    expected:
+      - principal: role_a
+        resources: [sc_acme_closed, sc_acme_open]
+        actions: { share: EFFECT_ALLOW }
+
+  - name: the walk is per role — another role can win at the base scope
+    description: >-
+      A is denied edit at acme (sealed); B has nothing at acme and falls
+      through to the base allow. Across roles the allow wins.
+    input:
+      principals: [role_ab]
+      resources: [sc_acme]
+      actions: [edit]
+    expected:
+      - principal: role_ab
+        resource: sc_acme
+        actions: { edit: EFFECT_ALLOW }
+
+  - name: a scope gap behaves like its nearest ancestor
+    input:
+      principals: [role_a]
+      resources: [sc_gap]
+      actions: [edit, view]
+    expected:
+      - principal: role_a
+        resource: sc_gap
+        actions: { edit: EFFECT_DENY, view: EFFECT_ALLOW }
+
+  - name: scoped role policies contribute synthetic denies at each scope
+    description: >-
+      RS@acme allowlists only view, RS@base only edit. At the acme resource
+      scope every action dies at some scope of the walk — view survives acme
+      but hits the base deny row, edit dies at acme — and at the base scope
+      only edit survives. Allowlists do NOT union across scopes.
+    input:
+      principals: [role_rs]
+      resources: [sc_acme, sc_base]
+      actions: [view, edit, share]
+    expected:
+      - principal: role_rs
+        resource: sc_acme
+        actions: { view: EFFECT_DENY, edit: EFFECT_DENY, share: EFFECT_DENY }
+      - principal: role_rs
+        resource: sc_base
+        actions: { view: EFFECT_DENY, edit: EFFECT_ALLOW, share: EFFECT_DENY }
+
+  - name: principal policies fall through a failed condition on the principal chain
+    description: >-
+      ivy@acme allows `grant` only when R.attr.ok; the base policy allows it
+      unconditionally. With ok=false the scoped rule decides nothing and the
+      base allow applies.
+    input:
+      principals: [ivy_acme]
+      resources: [narrow2_closed, narrow2_open]
+      actions: [grant]
+    expected:
+      - principal: ivy_acme
+        resources: [narrow2_closed, narrow2_open]
+        actions: { grant: EFFECT_ALLOW }
+
+  - name: principal policies follow the PRINCIPAL scope
+    description: >-
+      jane@acme denies ping. The scoped policy applies when the PRINCIPAL
+      carries the scope, not when the resource does.
+    input:
+      principals: [jane_acme, jane_base]
+      resources: [k_base, k_acme]
+      actions: [ping]
+    expected:
+      - principal: jane_acme
+        resource: k_base
+        actions: { ping: EFFECT_DENY }
+      - principal: jane_base
+        resource: k_acme
+        actions: { ping: EFFECT_ALLOW }
+
+  - name: role policies follow the RESOURCE scope
+    description: >-
+      RT@acme allowlists only `other`; RT@base allowlists ping. Cerbos's docs
+      say role-policy scope is the principal's, but its rule table (and a live
+      PDP) match it against the RESOURCE scope chain — see DIVERGENCES.md.
+    input:
+      principals: [rt_acme]
+      resources: [k_base]
+      actions: [ping]
+    expected:
+      - principal: rt_acme
+        resource: k_base
+        actions: { ping: EFFECT_ALLOW }
+
+  - name: role policies follow the RESOURCE scope (deny side)
+    input:
+      principals: [rt_base]
+      resources: [k_acme]
+      actions: [ping]
+    expected:
+      - principal: rt_base
+        resource: k_acme
+        actions: { ping: EFFECT_DENY }
+
+  - name: an allow reaching only a policied role cannot borrow another role's allowlist
+    description: >-
+      The resource allows ping to RA only; RA's role policy does not allowlist
+      ping (synthetic deny in RA's bucket), and RB's allowlist is useless
+      because no resource rule reaches RB. Strictly per-role — holding both
+      roles is still a deny.
+    input:
+      principals: [ra_rb, ra_only, rb_only]
+      resources: [y_doc]
+      actions: [ping]
+    expected:
+      - principals: [ra_rb, ra_only, rb_only]
+        resource: y_doc
+        actions: { ping: EFFECT_DENY }

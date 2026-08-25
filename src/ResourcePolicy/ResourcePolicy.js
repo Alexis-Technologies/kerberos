@@ -1,52 +1,10 @@
 const { parseResourcePolicyShape } = require('./validation');
 const { cloneShapeTree, deepFreeze } = require('../freeze.js');
+const { compileMatcher } = require('../matching.js');
+const { evaluateDecisionLayer } = require('../decision.js');
 
-const { ALL_ACTIONS, ALL_ROLES, Effect } = require('../schemas');
+const { ALL_ROLES, Effect } = require('../schemas');
 const { parseConditions, parseConstants, parseOutputs, parseVariables } = require('../policyParsers.js');
-
-/**
- * Does `rule` apply to the principal role `role`?
- *
- * Cerbos resolves conflicts per principal role, so every rule has to be
- * attributed to the roles it was written for. A rule reaches `role` either
- * directly through `roles`, or through a derived role that is active for this
- * request AND lists `role` among its `parentRoles` — derived roles do not form
- * a dimension of their own, they collapse into the principal-role dimension
- * that activated them.
- *
- * `derivedRoles` is a Map of active-role name → `parentRoles` when the engine
- * supplies it. A plain Set (or a missing entry) means the parent roles are
- * unknown — for a relation-backed derived role there may genuinely be none —
- * and the rule is then treated as reaching every role, which is the
- * non-narrowing reading.
- *
- * @param {Record<string, unknown>} rule
- * @param {string} role
- * @param {Set<string>|Map<string, string[]>} derivedRoles
- * @returns {boolean}
- */
-function ruleCoversRole(rule, role, derivedRoles) {
-  if (Array.isArray(rule.roles)) {
-    for (const ruleRole of rule.roles) {
-      if (ruleRole === ALL_ROLES || ruleRole === role) return true;
-    }
-  }
-  if (Array.isArray(rule.derivedRoles)) {
-    for (const name of rule.derivedRoles) {
-      if (!derivedRoles.has(name)) continue;
-      const parentRoles = derivedRoles.get?.(name);
-      if (!Array.isArray(parentRoles) || parentRoles.length === 0) return true;
-      // Literal membership, deliberately without a `*` wildcard: this must
-      // mirror `DerivedRoles.#parentRolesMatch` (which gates activation the
-      // same way) and the planner's `intersects`, or the runtime and the query
-      // planner would disagree about which role a derived rule belongs to.
-      for (const parentRole of parentRoles) {
-        if (parentRole === role) return true;
-      }
-    }
-  }
-  return false;
-}
 
 /**
  * Represents a resource policy and evaluates actions for requests.
@@ -107,12 +65,15 @@ class ResourcePolicy {
           condition: ResourcePolicy.parseConditions(rule.condition, options),
           output: ResourcePolicy.parseOutputs(rule.output, options),
         };
-        // `rule.actions` is static per policy but scanned on every check()
-        // call (once per rule per requested action); precomputing the Set
-        // once turns the repeated `includes` linear scans into O(1) lookups.
-        // Non-enumerable so the runtime-only field never leaks into
+        // Rule name fields are static per policy but matched on every check()
+        // call — precompile them into glob-aware matchers (Cerbos semantics:
+        // bare `*` matches everything, other `*` stay within a `:` segment).
+        // Non-enumerable so the runtime-only fields never leak into
         // JSON.stringify / deepEqual / spreads of `.rules` / `.shape`.
-        Object.defineProperty(parsedRule, 'actionsSet', { value: new Set(rule.actions) });
+        Object.defineProperty(parsedRule, 'actionsMatcher', { value: compileMatcher(rule.actions) });
+        if (Array.isArray(rule.roles)) {
+          Object.defineProperty(parsedRule, 'rolesMatcher', { value: compileMatcher(rule.roles) });
+        }
         rules.push(parsedRule);
       }
       this.#shape.resourcePolicy.rules = rules;
@@ -154,24 +115,39 @@ class ResourcePolicy {
   }
 
   /**
-   * Evaluates a request and returns action effects, outputs and metadata.
-   * Effects are always canonical `EFFECT_ALLOW`/`EFFECT_DENY` strings — the
-   * `effectAsBoolean` response format is applied at the response boundary.
+   * The policy's `metaSrcBase` — `resource.<kind>.v<version>[/scope]`.
+   */
+  get srcBase() {
+    const prefix = `resource.${this.kind}.v${this.version}`;
+    return this.scope ? `${prefix}/${this.scope}` : prefix;
+  }
+
+  /**
+   * Evaluates every rule for the requested actions and reports which ones
+   * FIRED (action matched, principal reached through roles/derivedRoles,
+   * condition held), without resolving conflicts — resolution is the decision
+   * walk's job (`src/decision.js`), where this policy is one scope of a chain.
+   *
+   * Outputs are built here for every evaluated rule, exactly as before.
    *
    * @param {Record<string, unknown>} req
-   * @param {Set<string>} derivedRoles
-   * @returns {{ effects: Map<string, string>, outputs: Map<string, unknown>, meta: Record<string, unknown> }}
+   * @param {Map<string, string[]|null>|Set<string>} derivedRoles - active derived
+   *   roles; a Map carries each role's `parentRoles` for bucket attribution.
+   * @returns {{
+   *   srcBase: string,
+   *   scope: string,
+   *   derivedRoles: Map<string, string[]|null>|Set<string>,
+   *   outputs: Map<string, unknown>,
+   *   actions: Map<string, { firedAllows: Array<{rule: object, src: string}>, firedDenies: Array<{rule: object, src: string}>, conditionFailed: boolean }>,
+   * }}
    */
-  check(req, derivedRoles) {
-    const effects = new Map();
+  evaluateRules(req, derivedRoles) {
     const outputs = new Map();
-    const metaSrcPrefix = `resource.${this.kind}.v${this.version}`;
-    const metaSrcBase = this.scope ? `${metaSrcPrefix}/${this.scope}` : metaSrcPrefix;
-    // `.keys()` reads the same for a Set of names and the engine's
-    // name → parentRoles Map.
-    const meta = { actions: {}, effectiveDerivedRoles: [...derivedRoles.keys()] };
+    const actions = new Map();
+    const metaSrcBase = this.srcBase;
+    const result = { srcBase: metaSrcBase, scope: this.scope ?? '', derivedRoles, outputs, actions };
 
-    if (!req.actions?.length) return { effects, outputs, meta };
+    if (!req.actions?.length) return result;
 
     // Skip the request copies when the policy declares neither constants nor
     // variables (the common case): conditions then read `C`/`V` as undefined
@@ -183,47 +159,24 @@ class ResourcePolicy {
     const reqWithVariables =
       variables === undefined ? reqWithConstants : { ...reqWithConstants, variables, V: variables };
 
-    // Principal roles are looked up once per rule/action; a Set turns the inner
-    // `roles.includes(role)` scans into O(1) membership checks.
-    const principalRoles = new Set(reqWithVariables.P.roles);
-
-    // Conflict resolution runs once per principal role (Cerbos semantics), so
-    // the roles are the buckets. A principal with no roles at all is not
-    // representable in Cerbos and is rejected by every validation backend here,
-    // but the engine runs without a backend by default — give it one anonymous
-    // bucket so wildcard (`*`) rules keep behaving as they always have instead
-    // of silently denying.
-    const roleBuckets = principalRoles.size > 0 ? [...principalRoles] : [null];
-
+    const principalRoles = reqWithVariables.P.roles ?? [];
     const rules = this.rules;
 
     for (const action of reqWithVariables.actions) {
-      // Rules that actually fired, kept as `{ rule, src }` so conflict
-      // resolution can attribute each one to the roles it was written for.
-      // Only fired rules are collected, so the common shapes stay cheap.
-      const firedAllows = [];
-      const firedDenies = [];
-      // Decision-trace input: did a rule that targeted this action fail only
-      // on its condition?
-      let conditionFailed = false;
-      meta.actions[action] = { matchedPolicy: metaSrcBase };
+      const perAction = { firedAllows: [], firedDenies: [], conditionFailed: false };
+      actions.set(action, perAction);
 
       for (let i = 0; i < rules.length; i++) {
         const rule = rules[i];
-        // Checking if the rule applies to the action
-        if (!rule.actionsSet.has(ALL_ACTIONS) && !rule.actionsSet.has(action)) continue;
+        if (!rule.actionsMatcher.matches(action)) continue;
 
-        // Checking if the roles match (`*` is the wildcard role and matches any principal)
-        let rolesMatch = false;
-        if (Array.isArray(rule.roles)) {
-          for (const role of rule.roles) {
-            if (role === ALL_ROLES || principalRoles.has(role)) {
-              rolesMatch = true;
-              break;
-            }
-          }
+        // Does the rule reach this principal at all? (Bucket attribution — WHICH
+        // role it reaches through — happens in the decision walk.)
+        let rolesMatch = rule.rolesMatcher ? rule.rolesMatcher.matchesAny(principalRoles) : false;
+        // The wildcard role also reaches a principal with no roles at all.
+        if (!rolesMatch && rule.rolesMatcher && principalRoles.length === 0 && rule.rolesMatcher.matches(ALL_ROLES)) {
+          rolesMatch = true;
         }
-
         let derivedRolesMatch = false;
         if (!rolesMatch && Array.isArray(rule.derivedRoles)) {
           for (const role of rule.derivedRoles) {
@@ -233,7 +186,6 @@ class ResourcePolicy {
             }
           }
         }
-
         if (!rolesMatch && !derivedRolesMatch) continue;
 
         // Checking the condition
@@ -248,62 +200,48 @@ class ResourcePolicy {
           if (output) outputs.set(output.src, output);
         }
 
-        if (isConditionFulfilled) {
-          if (rule.effect === Effect.Deny) firedDenies.push({ rule, src: metaSrc });
-          else if (rule.effect === Effect.Allow) firedAllows.push({ rule, src: metaSrc });
-        } else {
-          conditionFailed = true;
+        if (!isConditionFulfilled) {
+          perAction.conditionFailed = true;
+          continue;
         }
-      }
 
-      // Conflict resolution (Cerbos >= 0.41): deny overrides allow WITHIN a
-      // role, allow overrides deny ACROSS roles. The action is allowed as soon
-      // as one principal role allows it with nothing denying it for that same
-      // role — deliberate anti-lockout behaviour, so that holding an extra,
-      // less privileged role can never take away access granted by another.
-      // A deny therefore only bites when it covers the very role carrying the
-      // allow, which a wildcard (`roles: ['*']`) always does.
-      // `matchedRule` keeps the established convention of naming the LAST rule
-      // that decided the outcome.
-      let winningAllowSrc = null;
-      if (firedAllows.length > 0) {
-        if (firedDenies.length === 0) {
-          winningAllowSrc = firedAllows[firedAllows.length - 1].src;
-        } else {
-          for (const role of roleBuckets) {
-            if (firedDenies.some((entry) => ruleCoversRole(entry.rule, role, derivedRoles))) continue;
-            for (let i = firedAllows.length - 1; i >= 0; i--) {
-              if (ruleCoversRole(firedAllows[i].rule, role, derivedRoles)) {
-                winningAllowSrc = firedAllows[i].src;
-                break;
-              }
-            }
-            if (winningAllowSrc !== null) break;
-          }
-        }
+        if (rule.effect === Effect.Deny) perAction.firedDenies.push({ rule, src: metaSrc });
+        else if (rule.effect === Effect.Allow) perAction.firedAllows.push({ rule, src: metaSrc });
       }
-
-      if (winningAllowSrc !== null) {
-        meta.actions[action].matchedRule = winningAllowSrc;
-        if (this.scope) meta.actions[action].matchedScope = this.scope;
-        effects.set(action, Effect.Allow);
-        continue;
-      }
-
-      if (firedDenies.length > 0) {
-        meta.actions[action].matchedRule = firedDenies[firedDenies.length - 1].src;
-        if (this.scope) meta.actions[action].matchedScope = this.scope;
-      } else {
-        // Default deny — record WHY nothing matched for decision tracing:
-        // a rule targeted the action but its condition failed
-        // ('condition-not-met'), or no rule targeted the action / matched the
-        // principal's roles at all ('rule-miss').
-        meta.actions[action].reason = conditionFailed ? 'condition-not-met' : 'rule-miss';
-      }
-
-      effects.set(action, Effect.Deny);
     }
 
+    return result;
+  }
+
+  /**
+   * Evaluates a request against THIS policy alone and returns action effects,
+   * outputs and metadata — a single-scope instance of the shared decision
+   * walk, so class-level and engine-level semantics can never drift. Effects
+   * are always canonical `EFFECT_ALLOW`/`EFFECT_DENY` strings.
+   *
+   * @param {Record<string, unknown>} req
+   * @param {Map<string, string[]|null>|Set<string>} derivedRoles
+   * @returns {{ effects: Map<string, string>, outputs: Map<string, unknown>, meta: Record<string, unknown> }}
+   */
+  check(req, derivedRoles) {
+    if (!req.actions?.length) {
+      return {
+        effects: new Map(),
+        outputs: new Map(),
+        meta: { actions: {}, effectiveDerivedRoles: [...derivedRoles.keys()] },
+      };
+    }
+    const { effects, outputs, meta } = evaluateDecisionLayer({
+      req,
+      scopes: [{ scope: this.scope ?? '', resource: { policy: this, derivedRoles }, rows: new Map() }],
+    });
+    // Single-policy convention: every action names the policy it was checked
+    // against, even undecided ones (the engine-level walk reserves that for
+    // deciding policies).
+    for (const action of req.actions) {
+      meta.actions[action] = { matchedPolicy: this.srcBase, ...meta.actions[action] };
+      if (meta.actions[action].matchedScope === '') delete meta.actions[action].matchedScope;
+    }
     return { effects, outputs, meta };
   }
 }

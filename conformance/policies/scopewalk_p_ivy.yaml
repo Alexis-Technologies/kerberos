@@ -1,0 +1,9 @@
+apiVersion: api.cerbos.dev/v1
+principalPolicy:
+  principal: ivy
+  version: default
+  rules:
+    - resource: narrow2
+      actions:
+        - action: grant
+          effect: EFFECT_ALLOW
