@@ -46,6 +46,9 @@ await kerberos.isAllowed({
 | Consistency | in-process state + your cache ([honest limitations](#consistency-honest-limitations)) | per-PDP policy sync                | Zanzibar consistency (zookies) |
 | Best when | JS/TS stack, zero-infra, browser/edge                                                 | polyglot stack, central governance | relationship graphs at scale, strict consistency |
 
+> [!NOTE]
+> Compatibility with Cerbos is checked in CI by a [conformance suite](./conformance/) that runs one corpus against both engines — every decision and every query plan is compared to a real Cerbos PDP. Features Kerberos deliberately does not implement (CEL, attribute schemas, `scopePermissions`, `auxData`) are catalogued in [DIVERGENCES.md](./conformance/DIVERGENCES.md).
+
 ### When NOT to use Kerberos.js
 
 - **Polyglot backends** — if Go/Python/Java services need the same decisions, a central PDP (Cerbos) beats reimplementing policies per language.
@@ -61,7 +64,8 @@ await kerberos.isAllowed({
 | **Dynamic policies** | [Cache-agnostic storage](#caching--storing-policies) with a safe, eval-free `$expr` codec (jsep AST allowlist) |
 | **ReBAC** | [Relation-backed derived roles](#rebac-relations) + a built-in Zanzibar-lite resolver (`@alexify/kerberos/relations`) |
 | **Observability** | [Audit logs](#options) (console / structured / Pino), [OpenTelemetry](#opentelemetry) traces + metrics, [decision metadata](#decision-metadata-includemeta) |
-| **DX** | [Pluggable validation](#schema-validation) (Zod / JSON Schema + Ajv / TypeBox), [testing DSL](#testing) (`/tests`), hand-maintained TypeScript types, [browser build](#browser-usage) |
+| **DX** | [Pluggable validation](#schema-validation) (Zod / JSON Schema + Ajv / TypeBox), [testing DSL](#testing) (`/tests`), [typed authoring](#typescript) via an optional app schema, [browser build](#browser-usage), [live playground](https://kerberosjs.vercel.app/playground) |
+| **Compatibility** | A [conformance suite](./conformance/) runs one corpus — written in Cerbos's own policy and test formats — against both Kerberos and a real Cerbos PDP in CI; known gaps are listed in [DIVERGENCES.md](./conformance/DIVERGENCES.md) |
 
 > **Version 3.x** — see the [CHANGELOG](./CHANGELOG.md) for everything that changed since `2.0.0`: ReBAC with the built-in Zanzibar-lite resolver (`3.0.0`), OpenTelemetry, the Node/browser runtime split, and Cerbos-compatible query plans via `planResources` (`3.1.0`).
 
@@ -75,6 +79,8 @@ await kerberos.isAllowed({
 - [Scopes and Policy Versions](#scopes-and-policy-versions)
 - [API Reference](#api-reference)
   - [`new Kerberos(...)`](#new-kerberospolicies-derivedroles-options) · [`isAllowed`](#kerberosisallowedargs--promiseboolean) · [`checkResources`](#kerberoscheckresourcesargs-effectasboolean--false--promisecheckresourcesresponse) · [`planResources`](#kerberosplanresourcesargs--promiseplanresourcesresponse) · [Errors](#errors) · [Exports](#exports)
+- [TypeScript](#typescript)
+  - [Declaring a schema](#declaring-a-schema) · [What it buys you](#what-it-buys-you) · [Schema helper types](#schema-helper-types)
 - [Configuration Options](#configuration-options)
   - [Options](#options) · [Pino logging](#using-pino-for-production-logging) · [Call ID generation](#call-id-generation)
 - [Outputs](#outputs)
@@ -208,6 +214,29 @@ const kerberos = new Kerberos(
 
 `ResourcePolicy` is the workhorse policy type, selected by `resource.kind`. Rules are matched by action, then by `roles` or `derivedRoles`, and may also use `conditions`, `variables`, `constants`, `outputs`, versions, and scopes — see the [Quick Start](#quick-start) for a complete example.
 
+#### Conflict resolution
+
+Conflicts are resolved **per principal role**, matching Cerbos: `EFFECT_DENY` overrides `EFFECT_ALLOW` **within** a role, and an `EFFECT_ALLOW` from **any** role wins across roles. Rule order never decides the outcome.
+
+This is deliberate anti-lockout behaviour — picking up an extra, less privileged role can never take away access another role grants:
+
+```javascript
+rules: [
+  { actions: ['close'], effect: Effect.Allow, roles: ['SUPPORT'] },
+  { actions: ['close'], effect: Effect.Deny, roles: ['AUDITOR'] },
+];
+// principal roles ['SUPPORT', 'AUDITOR'] -> EFFECT_ALLOW
+```
+
+A deny that is meant to hold regardless has to cover the role carrying the allow — either with the `'*'` wildcard or by naming it:
+
+```javascript
+{ actions: ['close'], effect: Effect.Deny, roles: ['*'] }                 // always denies
+{ actions: ['close'], effect: Effect.Deny, roles: ['SUPPORT', 'AUDITOR'] } // denies both roles
+```
+
+Derived roles do not form a dimension of their own: a rule reached through `derivedRoles` counts for the principal roles listed in that definition's `parentRoles`.
+
 ### PrincipalPolicy
 
 `PrincipalPolicy` follows the Cerbos-style model for principal-specific overrides. It is bound to a single principal and targets `resource + action` directly instead of `roles` / `derivedRoles`.
@@ -250,7 +279,21 @@ const sallyPrincipalPolicy = {
 
 ### RolePolicy
 
-`RolePolicy` follows the Cerbos-style role-centric model. It is bound to a single role, targets `resource + allowActions`, and behaves as an allowlist for matching resources. If a matching role policy exists for the current resource and the action is not listed in `allowActions`, Kerberos returns `EFFECT_DENY` for that role layer.
+`RolePolicy` follows the Cerbos-style role-centric model. It is bound to a single role, targets `resource + allowActions`, and acts as a **narrowing filter over the [`ResourcePolicy`](#resourcepolicy)** — it never grants on its own. Three consequences worth internalising:
+
+- **A role policy cannot allow what the resource policy withholds.** The resource policy is always what grants; a role policy only takes away. With no matching `ResourcePolicy` at all, nothing is allowed.
+- **Multiple role policies union.** A principal may do what **any** of its roles permits. Holding an extra role can widen access, never narrow it.
+- **A role with no applicable role policy is unrestricted.** If any of the principal's roles has no role policy targeting this resource kind, the filter does not apply at all.
+
+```javascript
+// resourcePolicy `report` allows view + edit + delete for roles: ['*']
+rolePolicy READER: allowActions: ['view']
+rolePolicy WRITER: allowActions: ['edit']
+
+roles: ['READER']            -> view                    (filtered to the allowlist)
+roles: ['READER', 'WRITER']  -> view, edit              (union, not intersection)
+roles: ['READER', 'PLAIN']   -> view, edit, delete      (PLAIN is unconstrained)
+```
 
 ```javascript
 const userRolePolicy = {
@@ -281,18 +324,17 @@ const userRolePolicy = {
 };
 ```
 
-`RolePolicy` also supports `parentRoles`. When present, the child role can only keep actions that are also allowed by each locally defined parent role policy. Missing parent role policies are treated as external IdP roles and do not impose extra constraints inside Kerberos.
+`RolePolicy` also supports `parentRoles`. Within a single role, the child keeps only actions that are **also** allowed by each locally defined parent role policy (intersection along the inheritance chain — distinct from the union *across* the principal's roles). Missing parent role policies are treated as external IdP roles and do not impose extra constraints inside Kerberos.
 
 ### Mixed Policy Evaluation
 
 When mixed policy types are present, Kerberos resolves each action in this order:
 
 1. Find the matching `PrincipalPolicy` for the request principal.
-2. If it returns an explicit `EFFECT_ALLOW` or `EFFECT_DENY`, use that result.
-3. Otherwise, evaluate all matching `RolePolicy` entries for the principal roles.
-4. If multiple role policies apply to the same action, `EFFECT_DENY` wins over `EFFECT_ALLOW`.
-5. If the role layer is not applicable for that action, fall back to the matching `ResourcePolicy`. Before its rules are matched, the imported **derived roles are resolved**: condition-backed definitions evaluate synchronously, and relation-backed definitions (the `relation:` field) resolve through the configured [`relations` resolver](#rebac-relations) (ReBAC) — `list`-first with parallel `check` fallback, one shared memo per request. The resulting `effectiveDerivedRoles` then participate in rule matching alongside plain `roles`.
-6. If nothing matches, return `EFFECT_DENY`.
+2. If it returns an explicit `EFFECT_ALLOW` or `EFFECT_DENY`, use that result — role policies do not narrow a principal-policy override.
+3. Otherwise, evaluate the matching `ResourcePolicy`. Before its rules are matched, the imported **derived roles are resolved**: condition-backed definitions evaluate synchronously, and relation-backed definitions (the `relation:` field) resolve through the configured [`relations` resolver](#rebac-relations) (ReBAC) — `list`-first with parallel `check` fallback, one shared memo per request. The resulting `effectiveDerivedRoles` then participate in rule matching alongside plain `roles`. Conflicts resolve **per principal role**: `EFFECT_DENY` overrides `EFFECT_ALLOW` within a role, an `EFFECT_ALLOW` from any role wins across roles.
+4. Apply the `RolePolicy` layer as a **filter** on that result: if every principal role is constrained by an applicable role policy, an `EFFECT_ALLOW` survives only when at least one of those roles allowlists the action (union across roles, `parentRoles` intersection within a role).
+5. If nothing matches, return `EFFECT_DENY`.
 
 The decision is computed **per action** — different actions in the same request may be resolved by different policy layers. Each lookup (principal / role / resource) walks the [scope search chain](#scopes-and-policy-versions) and `policyVersion`, and checks in-memory policies first, then the optional `cache`.
 
@@ -300,11 +342,7 @@ The decision is computed **per action** — different actions in the same reques
 flowchart TD
     A([Request: principal · resource · action]) --> P{{"PrincipalPolicy<br/>(by principal.id)"}}
     P -->|"EFFECT_ALLOW / EFFECT_DENY"| DONE([Action effect resolved])
-    P -->|no matching rule| R{{"RolePolicy layer<br/>(one per principal.roles[])"}}
-
-    R -->|"EFFECT_DENY (wins over Allow)"| DONE
-    R -->|"EFFECT_ALLOW"| DONE
-    R -->|role layer not applicable| DR
+    P -->|no matching rule| DR
 
     subgraph DR ["Derived-roles resolution (importDerivedRoles)"]
         direction TB
@@ -314,12 +352,16 @@ flowchart TD
 
     EDR --> RES{{"ResourcePolicy<br/>(by resource.kind — rules match roles / derivedRoles)"}}
 
-    RES -->|"EFFECT_ALLOW / EFFECT_DENY"| DONE
+    RES -->|"EFFECT_ALLOW (per-role conflict resolution)"| RP{{"RolePolicy filter<br/>(union across principal.roles[])"}}
+    RES -->|"EFFECT_DENY"| DONE
     RES -->|no rule matched| DEF([Default: EFFECT_DENY])
     DEF --> DONE
+
+    RP -->|"allowlisted by some role, or a role is unconstrained"| DONE
+    RP -->|"every role constrained and none allowlists it"| DEF
 ```
 
-> **Within the role layer:** every `RolePolicy` matching a `principal.roles[]` entry is evaluated; `EFFECT_DENY` wins over `EFFECT_ALLOW`. When a role declares `parentRoles`, the child keeps only the actions that are **also** allowed by each locally defined parent role policy (intersection).
+> **Within the role layer:** the principal may do what **any** of its roles allowlists (union). A role with no applicable role policy is unrestricted, which disables the filter entirely. When a role declares `parentRoles`, the child keeps only the actions that are **also** allowed by each locally defined parent role policy (intersection along the chain).
 
 This keeps Kerberos.js aligned with the Cerbos-style principal override model described in the [Cerbos principal policies documentation](https://docs.cerbos.dev/cerbos/latest/policies/principal_policies) while extending the runtime with role-centric policy evaluation similar to [Cerbos role policies](https://docs.cerbos.dev/cerbos/latest/policies/role_policies).
 
@@ -349,6 +391,22 @@ Scope behavior follows the Cerbos-style model:
 - Example search chain for `scope: 'acme.corp'`: `acme.corp -> acme -> ''`
 
 When both policy types are loaded, Kerberos first resolves principal overrides using the principal scope/version chain and then falls back to resource policy lookup when the principal policy is not applicable for a given action.
+
+### How the scope chain is evaluated
+
+Matching Cerbos's `SCOPE_PERMISSIONS_OVERRIDE_PARENT` (its default), the chain is not a lookup for one policy — every policy found along it participates, and evaluation is **per action, per principal role**:
+
+- The first scope whose policy produces a decision (allow or deny) for an action and a role **seals** it; policies further up cannot change it.
+- A rule whose condition fails decides nothing — the walk **falls through** to the parent scope for that action.
+- The walk runs per principal role, so a deny sealing one role at a specific scope does not stop another role from winning an allow at the base scope (allow from any role wins across roles).
+- A scope with no policy at all is simply skipped (Cerbos's `lenientScopeSearch`; Kerberos has no strict mode).
+
+Which scope drives which policy type: **resource policies and role policies** walk the *resource's* scope chain; **principal policies** walk the *principal's*. (Cerbos's docs describe role-policy scope as the principal's, but its engine — and a live PDP — match it against the resource's; see [DIVERGENCES.md](./conformance/DIVERGENCES.md).)
+
+### Wildcards
+
+Name fields glob, exactly as in Cerbos: a bare `*` matches anything; in any other pattern `*` matches within a single `:`-delimited segment (`view:*` matches `view:public` but neither the bare `view` nor `view:a:b`), and `**` crosses segments. Globs work in resource-policy `actions` and `roles`, principal-policy `resource` and `action`, role-policy `resource` and `allowActions`, and derived-role `parentRoles`. `rules[].derivedRoles` references are exact names — Cerbos's schema rejects globs there too.
+
 
 Example:
 
@@ -473,7 +531,7 @@ All error classes are exported from the main entry. Evaluation-phase errors foll
 | Export | Purpose |
 | ------ | ------- |
 | `Kerberos` | Main authorization engine. |
-| `Effect` | `{ Allow: 'EFFECT_ALLOW', Deny: 'EFFECT_DENY' }`. |
+| `Effect` | `{ Allow: 'EFFECT_ALLOW', Deny: 'EFFECT_DENY' }` — a frozen const object, [not an `enum`](#typescript). |
 | `ResourcePolicy`, `PrincipalPolicy`, `RolePolicy`, `DerivedRoles` | Policy classes (rarely constructed directly). |
 | `Conditions`, `Variables`, `Constants`, `Outputs` | DSL building blocks. |
 | `createSafeExprCodec`, `serializePolicy`, `deserializePolicy` | Safe AST codec for [dynamic/stored policies](#caching--storing-policies). |
@@ -499,6 +557,110 @@ Subpath **`@alexify/kerberos/tests`** (dev/test only — not loaded by the main 
 | `KerberosTest`, `KerberosTests` | Cerbos-style declarative test runner. |
 | `PrincipalMock`, `PrincipalsMock`, `ResourceMock`, `ResourcesMock` | Named fixtures for test suites. |
 | `*ZodSchemas`, `*JsonSchemas`, `*TypeBoxSchemas` | Schema builders for the test harness. |
+
+## TypeScript
+
+Kerberos.js ships hand-maintained types. By default every position is open — `kind` and `action` are `string`, `attr` is `Record<string, unknown>` — which is what you want for policies loaded from a store at runtime.
+
+When your resource kinds are known at compile time, declare them once and the whole surface narrows to them.
+
+### Declaring a schema
+
+```typescript
+import { Kerberos, Effect, type KerberosPolicy } from '@alexify/kerberos';
+
+type AppSchema = {
+  principal: {
+    roles: 'admin' | 'user';
+    attr: { department: string; clearance: number };
+  };
+  resources: {
+    document: { actions: 'view' | 'edit' | 'delete'; attr: { ownerId: string; status: 'draft' | 'published' } };
+    invoice: { actions: 'view' | 'approve'; attr: { amount: number } };
+  };
+};
+
+const kerberos = new Kerberos<AppSchema>(policies, derivedRoles);
+```
+
+Both keys are optional — declare only `resources` if you do not want to enumerate roles.
+
+### What it buys you
+
+The resource kind drives everything else. `action`, `attr`, and the condition callbacks all narrow to the kind you named:
+
+```typescript
+await kerberos.isAllowed({
+  principal: { id: 'u1', roles: ['admin'], attr: { department: 'eng', clearance: 3 } },
+  resource: { kind: 'document', id: 'd1', attr: { ownerId: 'u1', status: 'draft' } },
+  action: 'edit', // ✅ autocompleted from `document`'s actions
+});
+
+await kerberos.isAllowed({
+  principal: { id: 'u1', roles: ['admin'] },
+  resource: { kind: 'document', id: 'd1' },
+  action: 'approve', // ❌ 'approve' belongs to `invoice`, not `document`
+});
+```
+
+Policy documents are checked the same way — `resource:` discriminates the rules, so a typo in an action or a role is a compile error rather than a silent `EFFECT_DENY` at 3am:
+
+```typescript
+const policy: KerberosPolicy<AppSchema> = {
+  resourcePolicy: {
+    version: 'default',
+    resource: 'document',
+    rules: [
+      { actions: ['view', 'edit'], effect: Effect.Allow, roles: ['admin'] },
+      {
+        actions: ['edit'],
+        effect: Effect.Allow,
+        roles: ['user'],
+        // R.attr is { ownerId: string; status: 'draft' | 'published' }
+        condition: { match: ({ R, P }) => R.attr?.ownerId === P.id && R.attr?.status === 'draft' },
+      },
+    ],
+  },
+};
+```
+
+`checkResources` keeps each batch entry typed independently, so a mixed batch still catches a wrong action per kind:
+
+```typescript
+const { results } = await kerberos.checkResources({
+  principal: { id: 'u1', roles: ['user'] },
+  resources: [
+    { resource: { kind: 'document', id: 'd1' }, actions: ['view', 'edit'] },
+    { resource: { kind: 'invoice', id: 'i1' }, actions: ['approve'] },
+  ],
+});
+```
+
+The second argument now selects the effect representation through overloads: `checkResources(args)` resolves `results[].actions` to `Effect`, and `checkResources(args, true)` to `boolean` — previously both were typed as the `Effect | boolean` union.
+
+### Schema helper types
+
+Exported so you can build your own typed wrappers (an Express middleware, a React hook) over the same schema:
+
+| Type | Resolves to |
+| ---- | ----------- |
+| `ResourceKindOf<S>` | Union of declared resource kinds. |
+| `ActionOf<S, K>` | Actions for kind `K`; every action across all kinds when `K` is omitted. |
+| `ResourceAttrOf<S, K>` | Attribute bag of kind `K`. |
+| `PrincipalRoleOf<S>` / `PrincipalAttrOf<S>` | Declared principal roles / attributes. |
+| `RequestPrincipal<S>`, `RequestResource<S, K>`, `BaseRequest<S, K>` | Request shapes. |
+| `PolicyEvalRequest<S, K>` | The `{ P, R, V, C }` envelope a condition/variable/output callback receives. |
+| `CheckResourcesArgs<S>`, `CheckResourcesResponse<S, E>`, `PlanResourcesArgs<S, K>`, `PlanResourcesResponse<S>` | Method arguments and responses. |
+| `AnySchema` | The permissive default used when no schema is supplied. |
+
+> [!NOTE]
+> Typing is **compile-time only** — there is no runtime cost and no runtime enforcement. A schema constrains the policies and requests you write in TypeScript; it does not validate policies loaded from a cache at runtime. For that, use [schema validation](#schema-validation).
+
+`Effect` and `PlanKind` are const objects rather than TypeScript `enum`s, so the raw wire strings that a stored policy or a serialized plan actually carries stay assignable:
+
+```typescript
+const rule = { actions: ['view'], effect: 'EFFECT_ALLOW', roles: ['user'] }; // ✅ no `Effect.Allow` needed
+```
 
 ## Configuration Options
 
@@ -814,15 +976,15 @@ Kerberos.js can resolve policies dynamically from a remote store (Redis, MongoDB
 
 ### How it works (fallback layer)
 
-Static policies passed to the constructor stay in memory and are always checked first. The `cache` is only consulted on a **miss**:
+Static policies passed to the constructor stay in memory; the `cache` is a fallback source. Resolution collects the **whole policy chain** along the scope search chain, with per-scope precedence:
 
-1. Resolve the policy by `kind` / `id` / `role` + `policyVersion` + scope chain in memory.
-2. On a miss, and only if a `cache` is configured, call `await cache.get(key)` for each scope in the chain.
-3. On a hit, the JSON document is handled according to the `codec` option (see below).
+1. For each scope in the chain (most specific → base), look the policy up in memory first, then — only on a miss at that scope, and only if a `cache` is configured — call `await cache.get(key)`.
+2. On a hit, the JSON document is handled according to the `codec` option (see below).
+3. Every policy found participates in [per-action scope evaluation](#scopes-and-policy-versions) — a more specific policy decides first, and actions it does not decide fall through to less specific ones.
 4. If nothing matches, the action falls back to `EFFECT_DENY` (unchanged behavior).
 
-> [!WARNING]
-> The whole scope chain is walked **in memory first** — source precedence beats scope specificity. A static base-scope (`''`) policy therefore permanently shadows a *more specific* cached policy for the same `(kind/id/role, version)`: in a hybrid deployment (static org-wide defaults in code + per-tenant overrides in the store) the cached tenant override — including a tightening Deny — silently never loads. Don't combine a static policy and cached policies for the same id/version across scopes; keep each (id, version) fully static or fully cache-backed.
+> [!NOTE]
+> Precedence is **per scope**: an in-memory policy wins at its own scope, but no longer shadows a *more specific* cached policy at a deeper scope. Hybrid deployments (static org-wide defaults in code + per-tenant overrides in the store) resolve the way scope specificity implies.
 
 Cache keys follow this layout:
 
@@ -1290,7 +1452,7 @@ flowchart TD
     NORM -->|residual tree| COND(["KIND_CONDITIONAL + condition<br/>(operators and/or/not/eq/…/in + opaque/relation)"])
 ```
 
-Every layer keeps its runtime semantics: principal rules override (Deny wins), the role layer is an allowlist with implicit deny and `parentRoles` intersection, the resource layer is Deny-over-Allow with default deny — the parity is enforced by a property-style test suite ([`test/PlanParity.test.js`](./test/PlanParity.test.js)) that grid-samples unknown attributes and compares the filter against real `isAllowed` results.
+Every layer keeps its runtime semantics: principal rules override (Deny wins), the role layer is an allowlist with implicit deny and `parentRoles` intersection, the resource layer resolves conflicts per principal role (deny over allow within a role, allow over deny across roles) with default deny — the parity is enforced by a property-style test suite ([`test/PlanParity.test.js`](./test/PlanParity.test.js)) that grid-samples unknown attributes and compares the filter against real `isAllowed` results.
 
 ### Operators
 

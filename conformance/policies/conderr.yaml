@@ -1,0 +1,23 @@
+---
+# Condition-error semantics probe.
+#
+# `R.attr.missing.deep` is a runtime error in BOTH engines: a CEL "no such
+# key" in Cerbos, a TypeError in Kerberos. What each does with that error is
+# a recorded divergence — see DIVERGENCES.md.
+apiVersion: 'api.cerbos.dev/v1'
+resourcePolicy:
+  version: default
+  resource: conderr
+  rules:
+    - name: anyone-may-view
+      actions: ['view']
+      effect: EFFECT_ALLOW
+      roles: ['*']
+
+    - name: deny-with-erroring-condition
+      actions: ['view']
+      effect: EFFECT_DENY
+      roles: ['*']
+      condition:
+        match:
+          expr: R.attr.missing.deep == true

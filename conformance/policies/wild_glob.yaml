@@ -1,0 +1,20 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: default
+  resource: glob
+  rules:
+    - actions: ['view:*']
+      effect: EFFECT_ALLOW
+      roles: ['U1']
+    - actions: ['v*w']
+      effect: EFFECT_ALLOW
+      roles: ['U2']
+    - actions: ['*']
+      effect: EFFECT_ALLOW
+      roles: ['U4']
+    - actions: ['edit:*']
+      effect: EFFECT_DENY
+      roles: ['U4']
+    - actions: ['deep:*']
+      effect: EFFECT_ALLOW
+      roles: ['U5']

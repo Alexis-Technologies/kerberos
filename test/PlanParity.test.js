@@ -104,6 +104,22 @@ const policies = [
             roles: ['*'],
             condition: { match: { $expr: 'R.attr.banned === true' } },
           },
+          // Role-SCOPED deny. Conflict resolution is per principal role, so
+          // this must not veto an allow carried by a different role the
+          // principal also holds — unlike the wildcard deny above.
+          {
+            actions: ['view'],
+            effect: Effect.Deny,
+            roles: ['AUDITOR'],
+            condition: { match: { $expr: 'R.attr.classified === true' } },
+          },
+          // Deny reached through a derived role, which collapses into the
+          // principal role that activated it (AUDITOR here, via parentRoles).
+          {
+            actions: ['edit'],
+            effect: Effect.Deny,
+            derivedRoles: ['REVIEWER'],
+          },
         ],
       },
     },
@@ -154,6 +170,42 @@ const policies = [
     },
     codec,
   ),
+  // Scoped policy: the per-(action, role) walk must fall through a failed
+  // condition to the base policy, and a scoped deny must seal its role.
+  deserializePolicy(
+    {
+      resourcePolicy: {
+        resource: 'document',
+        version: 'default',
+        scope: 'acme',
+        rules: [
+          { actions: ['edit'], effect: Effect.Deny, roles: ['USER'] },
+          {
+            actions: ['view'],
+            effect: Effect.Allow,
+            roles: ['AUDITOR'],
+            condition: { match: { $expr: 'R.attr.public === true' } },
+          },
+          // Glob rule: matches `count` via a mid-segment wildcard.
+          { actions: ['c*t'], effect: Effect.Allow, roles: ['ADMIN'] },
+        ],
+      },
+    },
+    codec,
+  ),
+  // Scoped role policy at the RESOURCE scope: narrows CONTRACTOR to view-only
+  // at acme while the base policy also allowlists nothing else there.
+  deserializePolicy(
+    {
+      rolePolicy: {
+        role: 'CONTRACTOR',
+        version: 'default',
+        scope: 'acme',
+        rules: [{ resource: 'document', allowActions: ['view'] }],
+      },
+    },
+    codec,
+  ),
 ];
 
 const derivedRoles = [
@@ -162,6 +214,7 @@ const derivedRoles = [
       name: 'doc_roles',
       definitions: [
         { name: 'OWNER', parentRoles: ['USER'], condition: { match: { $expr: 'R.attr.ownerId === P.id' } } },
+        { name: 'REVIEWER', parentRoles: ['AUDITOR'], condition: { match: { $expr: 'R.attr.status === "OPEN"' } } },
       ],
     },
     codec,
@@ -174,6 +227,18 @@ const principals = [
   { id: 'u2', roles: ['USER'] },
   { id: 'boss', roles: ['USER'] },
   { id: 'c1', roles: ['CONTRACTOR'] },
+  // Multi-role principals: the shape that exercises cross-role conflict
+  // resolution. Without these the grid only ever fills one role bucket, and a
+  // planner that still used plain deny-overrides would pass unnoticed.
+  { id: 'u1', roles: ['USER', 'AUDITOR'] },
+  { id: 'm2', roles: ['AUDITOR'] },
+  { id: 'm3', roles: ['USER', 'ADMIN'] },
+  // Role-layer shapes. `c2` mixes a role that HAS a role policy with one that
+  // does not (the layer must abstain entirely); `c3` holds two policied roles
+  // (the layer must union them). Neither is observable with a single-role
+  // principal, which is how the intersection semantics went unnoticed.
+  { id: 'c2', roles: ['CONTRACTOR', 'USER'] },
+  { id: 'c3', roles: ['CONTRACTOR', 'STAFF'] },
 ];
 
 const actions = ['view', 'edit', 'count'];
@@ -220,6 +285,35 @@ describe('planResources ↔ isAllowed parity', () => {
     for (const action of actions) {
       it(`matches isAllowed for ${principal.id}/${action} across the attr grid`, async () => {
         await assertParity(principal, action, { principal, resource: { kind: 'document' }, action }, attrGrid);
+      });
+    }
+  }
+
+  // The scope walk is per (action, role) with condition fall-through — the
+  // planner folds it symbolically, and this sweep pins the two against each
+  // other for scoped requests (which no other plan test exercises).
+  for (const principal of principals) {
+    for (const action of actions) {
+      it(`matches isAllowed for ${principal.id}/${action} at scope acme`, async () => {
+        const plan = await kerberos.planResources({
+          principal,
+          resource: { kind: 'document', scope: 'acme' },
+          action,
+        });
+        const filter = wireFilter(plan);
+        for (const attr of attrGrid) {
+          const planned = evalFilter(filter, { id: 'r1', attr });
+          const actual = await kerberos.isAllowed({
+            principal,
+            resource: { id: 'r1', kind: 'document', scope: 'acme', attr },
+            action,
+          });
+          assert.strictEqual(
+            planned,
+            actual,
+            `scoped drift for ${principal.id}/${action} on ${JSON.stringify(attr)}: plan=${planned} isAllowed=${actual}`,
+          );
+        }
       });
     }
   }

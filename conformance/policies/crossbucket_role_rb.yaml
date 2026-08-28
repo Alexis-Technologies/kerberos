@@ -1,0 +1,6 @@
+apiVersion: api.cerbos.dev/v1
+rolePolicy:
+  role: RB
+  rules:
+    - resource: y
+      allowActions: ['ping']

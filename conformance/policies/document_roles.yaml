@@ -1,0 +1,16 @@
+---
+apiVersion: 'api.cerbos.dev/v1'
+derivedRoles:
+  name: document_roles
+  definitions:
+    - name: OWNER
+      parentRoles: ['USER']
+      condition:
+        match:
+          expr: R.attr.ownerId == P.id
+
+    - name: SAME_TEAM
+      parentRoles: ['USER']
+      condition:
+        match:
+          expr: R.attr.team == P.attr.team

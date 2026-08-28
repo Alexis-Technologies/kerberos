@@ -17,6 +17,115 @@ cross-request instance memo, audit-stream completeness (fail-closed denials,
 (~2.5× simple `isAllowed`), reverse-lookup truncation signaling
 (`onTruncated`), frozen policy shapes/tokens, and d.ts/export-parity guards.
 
+### Added
+
+- **Typed authoring.** `Kerberos` and every policy/request/response type are
+  now generic over an optional application schema naming resource kinds, their
+  actions and attribute bags, and the principal's roles and attributes. The
+  resource kind narrows the action, the attribute shapes and the `{ P, R, V, C }`
+  envelope handed to conditions; policy documents become discriminated unions
+  over `resource:`, so a rule naming another kind's action or an undeclared role
+  is a compile error. Purely type-level — every parameter defaults to the new
+  `AnySchema`, which reproduces the previous untyped surface exactly. New
+  helper types: `KerberosSchema`, `AnySchema`, `ResourceKindOf`, `ActionOf`,
+  `ResourceAttrOf`, `PrincipalRoleOf`, `PrincipalAttrOf`, `PolicyEvalRequest`,
+  `CheckResourcesArgs`/`Entry`/`Result`/`Response`. See the new "TypeScript"
+  guide.
+- **Cerbos conformance suite** (`conformance/`, not published to npm). One
+  corpus in Cerbos's own policy and `TestSuite` formats runs against Kerberos
+  always, and against a real Cerbos PDP in CI. Known semantic gaps are recorded
+  in `conformance/DIVERGENCES.md`. New `pnpm test:conformance`.
+- **In-browser playground** on the docs site — the real engine running
+  client-side, with no backend.
+
+### Changed
+
+- **BREAKING (semantics): resource-policy conflicts now resolve per principal
+  role, matching Cerbos.** `EFFECT_DENY` overrides `EFFECT_ALLOW` *within* a
+  role, but an `EFFECT_ALLOW` from *any* role wins *across* roles. Kerberos was
+  previously deny-overrides unconditionally, which returned `EFFECT_DENY` where
+  Cerbos ≥ 0.41 returns `EFFECT_ALLOW` — verified against a live Cerbos PDP and
+  now covered by the conformance suite.
+
+  **This is more permissive than before.** A `DENY` scoped to one role no longer
+  vetoes an `ALLOW` carried by a different role the principal also holds. Audit
+  any policy that relies on a role-scoped deny to revoke access: to keep the old
+  outcome the deny must cover the allowing role, either with `roles: ['*']` or
+  by naming it explicitly. Denies that already do are unaffected, as are
+  single-role principals and same-role conflicts.
+
+  Rules reached through `derivedRoles` count for the principal roles listed in
+  that definition's `parentRoles` — derived roles collapse into the role
+  dimension rather than forming one of their own. `planResources` follows the
+  same rule; `test/PlanParity.test.js` gained multi-role principals, which is
+  the shape that made the old behaviour invisible.
+- **BREAKING (semantics): the full Cerbos rule-table evaluation model.** A
+  differential sweep (2000+ decisions) against a live Cerbos 0.55.0 PDP,
+  cross-checked against Cerbos's documentation and v0.55.0 source, surfaced
+  and closed the remaining semantic gaps. All are pinned by the conformance
+  suites (57 cases, offline and against the live PDP — zero divergences):
+
+  - **Wildcards**: name matching now globs exactly like Cerbos — bare `*`
+    matches anything, any other `*` stays within a `:`-delimited segment
+    (`view:*` matches `view:public`, not `view` or `view:a:b`), `**` crosses
+    segments. Applies to resource-policy `actions` and `roles`,
+    principal-policy `resource` and `action`, role-policy `resource` and
+    `allowActions`, and derived-role `parentRoles` (`parentRoles: ['*']`
+    works now). Previously only a bare `*` in `actions`/`roles` matched — a
+    `DENY` on `view:*` silently failed to deny (fail-open, fixed).
+  - **Scoped policies evaluate per action, per role** (Cerbos
+    `SCOPE_PERMISSIONS_OVERRIDE_PARENT`): the first scope that decides an
+    (action, role) seals it, a failed condition falls through to the parent
+    scope, and an action undecided at the specific scope is decided by a less
+    specific policy. Previously the first policy found decided ALL actions.
+    Applies to principal, resource and role policies alike.
+  - **Role policies are synthetic deny rows in the per-role walk**, at their
+    own scope: an allow must come from a resource rule reaching the SAME
+    principal role — another role's allowlist cannot revive it (the
+    cross-bucket case). Role policies also follow the RESOURCE scope chain
+    and resource `policyVersion` (Cerbos's docs say principal scope; its
+    engine and a live PDP say resource — recorded in DIVERGENCES.md).
+  - **Cache-backed scope resolution is per scope** (memory first, then cache,
+    at each scope): a static base-scope policy no longer shadows a more
+    specific cached policy — the documented hybrid-deployment caveat is
+    retired.
+
+  Internals: the resource/role layers collapsed into one shared decision walk
+  (`src/decision.js`) used by `ResourcePolicy.check`, both engine drivers and
+  (symbolically) the query planner; glob matchers (`src/matching.js`) are
+  precompiled per rule.
+- **BREAKING (semantics): role policies are now a narrowing filter over the
+  resource policy, not a ranked layer that can grant.** Matching Cerbos, and
+  verified against a live PDP:
+
+  - a role policy **cannot allow what the resource policy withholds** — with no
+    matching `ResourcePolicy`, a `RolePolicy` alone now grants nothing;
+  - multiple role policies **union** instead of intersecting: a principal may do
+    what *any* of its roles allowlists, so holding an extra role can widen
+    access but never narrow it;
+  - a role with **no role policy at all is unrestricted** (that role's bucket
+    passes the resource-layer result through unfiltered) — but holding a role
+    that *has* a role policy constrains it everywhere, including resource
+    kinds its rules never mention (where it permits nothing);
+  - a `PrincipalPolicy` override is never narrowed by the role layer.
+
+  `parentRoles` are unchanged — the child still keeps only what each locally
+  defined parent role policy allows (intersection *along the chain*, union
+  *across* roles). Deployments that relied on a `RolePolicy` to grant access on
+  its own must add the corresponding `ResourcePolicy` rules.
+
+- **BREAKING (types): `Effect` and `PlanKind` are const objects, not `enum`s.**
+  The runtime has always been a frozen plain object, so the `enum` declaration
+  mis-described it and made `effect: 'EFFECT_ALLOW'` in a plain JSON policy
+  literal a type error — exactly the form stored policies carry. `Effect.Allow`
+  and `PlanKind.Conditional` are unchanged; only `enum`-specific type usage
+  (e.g. `PlanKind.Conditional` as a *type*) needs updating.
+- **`checkResources` is now overloaded on `effectAsBoolean`**: the response's
+  effects are typed `Effect`, or `boolean` when the flag is passed, instead of
+  the `Effect | boolean` union in both cases.
+- `{ $expr }` descriptors are accepted by the types in `condition.match` and
+  `output` — stored policies always used them, but the types rejected them.
+
 ## [3.1.0] - 2026-07-21
 
 ### Added

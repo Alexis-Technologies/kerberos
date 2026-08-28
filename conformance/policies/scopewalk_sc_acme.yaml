@@ -1,0 +1,18 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: default
+  resource: sc
+  scope: acme
+  rules:
+    - actions: ['edit']
+      effect: EFFECT_DENY
+      roles: ['A']
+    - actions: ['view']
+      effect: EFFECT_ALLOW
+      roles: ['A']
+    - actions: ['share']
+      effect: EFFECT_ALLOW
+      roles: ['A']
+      condition:
+        match:
+          expr: R.attr.ok == true

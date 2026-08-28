@@ -348,7 +348,9 @@ describe('Coverage: Conditions/Outputs/Variables/DerivedRoles branch edges', () 
     assert.equal(roles.size, 0);
 
     const candidates = derivedRoles.getRelationCandidates({ P: { id: 'sally', roles: ['OTHER'] }, R: {} });
-    assert.deepEqual(candidates, [{ name: 'REL_BACKED', relation: 'view' }]);
+    // `parentRoles` is null for an ungated relation-backed definition: conflict
+    // resolution reads it as standing for every principal role.
+    assert.deepEqual(candidates, [{ name: 'REL_BACKED', relation: 'view', parentRoles: null }]);
   });
 
   it('returns empty results for a DerivedRoles instance with no definitions', () => {

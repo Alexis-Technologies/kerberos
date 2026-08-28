@@ -1,0 +1,6 @@
+apiVersion: api.cerbos.dev/v1
+rolePolicy:
+  role: RA
+  rules:
+    - resource: y
+      allowActions: ['other']

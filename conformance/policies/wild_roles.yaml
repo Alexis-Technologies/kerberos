@@ -1,0 +1,9 @@
+apiVersion: api.cerbos.dev/v1
+derivedRoles:
+  name: glob_roles
+  definitions:
+    - name: STARRED
+      parentRoles: ['adm*']
+      condition:
+        match:
+          expr: 1 == 1

@@ -12,10 +12,13 @@ const { createLimiter, settleAll, withTimeout } = require('./async.js');
 const { createSafeExprCodec } = require('./caching/codec.js');
 const { PlanKind, countLeaves, toDebugString, toFilter } = require('./planning/nodes.js');
 const { buildResourcePlan } = require('./planning/planner.js');
+const { evaluateDecisionLayer } = require('./decision.js');
 const { createAjvAdapter, parseWithValidation, registerAjvKeywords } = require('./validation');
 // Platform runtime: bundlers swap this for `./runtime/browser.js` via the
 // package.json `browser` field map when targeting the browser.
 const { generateCallId, getNow } = require('./runtime/node.js');
+
+const EMPTY_ROWS = new Map();
 
 function createEmptyPolicyResult() {
   return { effects: new Map(), outputs: new Map(), meta: { actions: {}, effectiveDerivedRoles: [] } };
@@ -657,21 +660,29 @@ class Kerberos {
     return resolved;
   }
 
+  // Returns active derived-role name → `parentRoles` (null when ungated), which
+  // resource-policy conflict resolution needs to attribute a rule to the
+  // principal roles it was written for.
   async #getImportedDerivedRoles(policy, req, relationsMemo, trace, lookups, otel) {
-    const importedRoles = new Set();
+    const importedRoles = new Map();
     const relationCandidates = [];
     for (const name of policy.importDerivedRoles) {
       const role = await this.#resolveDerivedRolesSetByName(name, lookups, trace);
       if (!role) continue;
-      const derivedRoles = role.get(req);
-      if (derivedRoles) for (const derivedRole of derivedRoles) importedRoles.add(derivedRole);
+      const derivedRoles = role.getActivated(req);
+      if (derivedRoles) {
+        for (const [derivedRole, parentRoles] of derivedRoles) importedRoles.set(derivedRole, parentRoles);
+      }
       for (const candidate of role.getRelationCandidates(req)) relationCandidates.push(candidate);
     }
 
     if (relationCandidates.length) {
       if (this.#relations) {
         const granted = await this.#resolveRelationCandidates(relationCandidates, req, relationsMemo, trace, otel);
-        for (const name of granted) importedRoles.add(name);
+        if (granted.length) {
+          const parentRolesByName = new Map(relationCandidates.map((c) => [c.name, c.parentRoles]));
+          for (const name of granted) importedRoles.set(name, parentRolesByName.get(name) ?? null);
+        }
       } else if (trace) {
         // Relation-backed definitions without a configured `relations`
         // resolver can never activate — surface that in the decision trace
@@ -936,94 +947,63 @@ class Kerberos {
    * Single-shot `isAllowed` passes no memo and takes the allocation-free fast
    * path below — memo bookkeeping would be pure overhead there.
    */
-  async #resolvePolicy(source, map, id, version, scope, Constructor, trace, lookups) {
+  /**
+   * Resolves the FULL policy chain for one source along the scope search
+   * chain — one entry per scope where a policy exists, most specific first.
+   *
+   * Precedence is per scope: at each scope the in-memory map wins, falling
+   * back to the cache. (This also retires the old caveat where a static
+   * base-scope policy permanently shadowed a more specific cached one — the
+   * walk no longer stops at the first hit.)
+   */
+  async #resolvePolicyChain(source, map, id, version, scope, Constructor, trace, lookups) {
     if (!lookups) {
-      // Fast path: no memo bookkeeping, and — because `?.` short-circuits
-      // argument evaluation — no entry objects at all unless tracing is on.
-      const scopeSearchChain = this.#getScopeChain(scope);
-
-      for (const searchScope of scopeSearchChain) {
-        const policy = map.get(`${id}.${version}.${searchScope}`);
-        if (policy) {
-          trace?.push({ source, id, version, scopesSearched: scopeSearchChain, matchedScope: searchScope });
-          return policy;
-        }
-      }
-
-      if (this.#cache.enabled) {
-        for (const searchScope of scopeSearchChain) {
-          const policy = await this.#resolveFromCache(
-            `${this.#cacheKeyPrefix}${source}:${id}:${version}:${searchScope}`,
-            (shape) => new Constructor(shape, this.#policyOptions()),
-          );
-          if (policy) {
-            trace?.push({
-              source,
-              id,
-              version,
-              scopesSearched: scopeSearchChain,
-              matchedScope: searchScope,
-              origin: 'cache',
-            });
-            return policy;
-          }
-        }
-      }
-
-      trace?.push({ source, id, version, scopesSearched: scopeSearchChain, matchedScope: null });
-      return null;
+      const { chain, entry } = await this.#resolvePolicyChainUncached(source, map, id, version, scope, Constructor);
+      trace?.push(entry);
+      return chain;
     }
 
     const normalizedScope = Kerberos.normalizeScope(scope);
     const memoKey = `${source}:${id}:${version}:${normalizedScope}`;
     let promise = lookups.get(memoKey);
     if (!promise) {
-      promise = this.#resolvePolicyUncached(source, map, id, version, normalizedScope, Constructor);
+      promise = this.#resolvePolicyChainUncached(source, map, id, version, normalizedScope, Constructor);
       lookups.set(memoKey, promise);
     }
-    const { policy, entry } = await promise;
+    const { chain, entry } = await promise;
     trace?.push(entry);
-    return policy;
+    return chain;
   }
 
-  async #resolvePolicyUncached(source, map, id, version, scope, Constructor) {
+  async #resolvePolicyChainUncached(source, map, id, version, scope, Constructor) {
     const scopeSearchChain = this.#getScopeChain(scope);
+    const chain = [];
+    let firstOrigin = null;
 
     for (const searchScope of scopeSearchChain) {
-      const policy = map.get(`${id}.${version}.${searchScope}`);
-      if (policy) {
-        return { policy, entry: { source, id, version, scopesSearched: scopeSearchChain, matchedScope: searchScope } };
-      }
-    }
-
-    if (this.#cache.enabled) {
-      for (const searchScope of scopeSearchChain) {
-        const policy = await this.#resolveFromCache(
+      let policy = map.get(`${id}.${version}.${searchScope}`) ?? null;
+      let origin = 'memory';
+      if (!policy && this.#cache.enabled) {
+        policy = await this.#resolveFromCache(
           `${this.#cacheKeyPrefix}${source}:${id}:${version}:${searchScope}`,
           (shape) => new Constructor(shape, this.#policyOptions()),
         );
-        if (policy) {
-          return {
-            policy,
-            entry: {
-              source,
-              id,
-              version,
-              scopesSearched: scopeSearchChain,
-              matchedScope: searchScope,
-              origin: 'cache',
-            },
-          };
-        }
+        origin = 'cache';
+      }
+      if (policy) {
+        chain.push({ policy, scope: searchScope });
+        firstOrigin ??= origin;
       }
     }
 
-    return { policy: null, entry: { source, id, version, scopesSearched: scopeSearchChain, matchedScope: null } };
+    const entry = { source, id, version, scopesSearched: scopeSearchChain, matchedScope: chain[0]?.scope ?? null };
+    if (firstOrigin === 'cache') entry.origin = 'cache';
+    return { chain, entry };
   }
 
-  #getResourcePolicy(req, trace, lookups) {
+  #getResourcePolicyChain(req, trace, lookups) {
     const version = req.R.policyVersion ?? DEFAULT_VERSION;
-    return this.#resolvePolicy(
+    return this.#resolvePolicyChain(
       'resource',
       this.#resourcePolicies,
       req.R.kind,
@@ -1035,9 +1015,9 @@ class Kerberos {
     );
   }
 
-  #getPrincipalPolicy(req, trace, lookups) {
+  #getPrincipalPolicyChain(req, trace, lookups) {
     const version = req.P.policyVersion ?? DEFAULT_VERSION;
-    return this.#resolvePolicy(
+    return this.#resolvePolicyChain(
       'principal',
       this.#principalPolicies,
       req.P.id,
@@ -1049,183 +1029,135 @@ class Kerberos {
     );
   }
 
-  #getRolePolicyByName(role, req, trace, lookups) {
-    const version = req.P.policyVersion ?? DEFAULT_VERSION;
-    return this.#resolvePolicy('role', this.#rolePolicies, role, version, req.P.scope, RolePolicy, trace, lookups);
+  // Role policies ride the RESOURCE pass of the rule table — Cerbos matches
+  // their scope and policyVersion against the resource's, not the
+  // principal's (its own docs say principal scope; the 0.55 source and a live
+  // PDP say resource — recorded in conformance/DIVERGENCES.md).
+  #getRolePolicyChain(role, req, trace, lookups) {
+    const version = req.R.policyVersion ?? DEFAULT_VERSION;
+    return this.#resolvePolicyChain('role', this.#rolePolicies, role, version, req.R.scope, RolePolicy, trace, lookups);
   }
 
-  async #getRolePolicies(req, trace, lookups) {
+  /**
+   * Resolves the role-policy rows for the decision walk: for every unique
+   * principal role (and every transitive `parentRoles` ancestor of its
+   * policies), the policies found along the RESOURCE scope chain, grouped by
+   * the scope they were found at.
+   *
+   * A parent's policy attaches its rows to the CHILD's bucket, which is what
+   * makes `parentRoles` an intersection along the inheritance chain while
+   * buckets stay independent (union across the principal's roles).
+   *
+   * @returns {Promise<{ rowsByScope: Map<string, Map<string|null, object[]>>, roleChains: Map<string, Array<{policy: object, scope: string}>> }>}
+   */
+  async #getRoleRows(req, trace, lookups) {
     const uniqueRoles = [];
     const seenRoles = new Set();
-    for (const role of req.P.roles) {
+    for (const role of req.P.roles ?? []) {
       if (seenRoles.has(role)) continue;
       seenRoles.add(role);
       uniqueRoles.push(role);
     }
 
-    // Role lookups have no short-circuit (every role's policy is needed
-    // before evaluation starts), so on the cache path they resolve as one
-    // settled wave instead of sequential round trips — the same rationale as
-    // #planPolicySources' three-chain wave. Per-role trace buffers keep
-    // meta.resolution deterministic regardless of completion order. The
-    // in-memory path stays sequential (each lookup is already a sync Map hit).
+    const rowsByScope = new Map();
+    const roleChains = new Map();
+    if (!uniqueRoles.length) return { rowsByScope, roleChains };
+
+    const chains = new Map();
+
+    // Role lookups have no short-circuit (every bucket's rows are needed
+    // before the walk starts), so on the cache path they resolve as one
+    // settled wave. Per-role trace buffers keep meta.resolution deterministic
+    // regardless of completion order; parent lookups stay untraced.
     if (this.#cache.enabled && uniqueRoles.length > 1) {
       const traces = trace ? uniqueRoles.map(() => []) : null;
       const resolved = await settleAll(
-        uniqueRoles.map((role, i) => this.#getRolePolicyByName(role, req, traces ? traces[i] : null, lookups)),
+        uniqueRoles.map((role, i) => this.#getRolePolicyChain(role, req, traces ? traces[i] : null, lookups)),
       );
       if (traces) for (const buffer of traces) for (const entry of buffer) trace.push(entry);
-      const policies = [];
-      for (const policy of resolved) if (policy) policies.push(policy);
-      return policies;
-    }
-
-    const policies = [];
-    for (const role of uniqueRoles) {
-      const policy = await this.#getRolePolicyByName(role, req, trace, lookups);
-      if (policy) policies.push(policy);
-    }
-
-    return policies;
-  }
-
-  async #evaluateRolePolicy(
-    policy,
-    req,
-    memo = new Map(),
-    stack = new Set(),
-    actionsKey = req.actions.join(','),
-    lookups = null,
-  ) {
-    const policyKey = `${policy.role}.${policy.version}.${policy.scope ?? ''}|${actionsKey}`;
-    if (memo.has(policyKey)) return memo.get(policyKey);
-    if (stack.has(policyKey)) throw new Error(`Circular role policy inheritance detected for role "${policy.role}"`);
-
-    stack.add(policyKey);
-
-    const result = policy.check(req);
-
-    for (const parentRole of policy.parentRoles) {
-      const parentPolicy = await this.#getRolePolicyByName(parentRole, req, null, lookups);
-      if (!parentPolicy) continue;
-
-      const parentResult = await this.#evaluateRolePolicy(parentPolicy, req, memo, stack, actionsKey, lookups);
-      Kerberos.#applyParentRoleResult(result, parentResult, req);
-    }
-
-    stack.delete(policyKey);
-    memo.set(policyKey, result);
-    return result;
-  }
-
-  // parentRoles inheritance: a child's allowed action survives only when
-  // every locally-defined parent also allows it. Shared by the async and sync
-  // role evaluators so the semantics live in exactly one place.
-  static #applyParentRoleResult(result, parentResult, req) {
-    for (const [src, output] of parentResult.outputs.entries()) result.outputs.set(src, output);
-
-    for (const action of req.actions) {
-      if (!result.effects.has(action)) continue;
-      if (result.effects.get(action) === Effect.Deny) continue;
-
-      if (!parentResult.effects.has(action) || parentResult.effects.get(action) !== Effect.Allow) {
-        result.effects.set(action, Effect.Deny);
-        if (parentResult.meta.actions[action]) result.meta.actions[action] = parentResult.meta.actions[action];
+      for (let i = 0; i < uniqueRoles.length; i++) chains.set(uniqueRoles[i], resolved[i]);
+    } else {
+      for (const role of uniqueRoles) {
+        chains.set(role, await this.#getRolePolicyChain(role, req, trace, lookups));
       }
     }
-  }
 
-  // Deny-wins merge of one role policy's result into the accumulated role
-  // layer. Shared by the async and sync role evaluators.
-  static #mergeRoleResultInto(effects, outputs, actionsMeta, result, req) {
-    for (const [src, output] of result.outputs.entries()) outputs.set(src, output);
-
-    for (const action of req.actions) {
-      if (!result.effects.has(action)) continue;
-
-      if (result.effects.get(action) === Effect.Deny) {
-        effects.set(action, Effect.Deny);
-        if (result.meta.actions[action]) actionsMeta[action] = result.meta.actions[action];
-        continue;
+    // Transitive parents (DFS, cycle → throw like the old evaluator did).
+    const ancestorsOf = new Map();
+    const resolveAncestors = async (role, path) => {
+      if (ancestorsOf.has(role)) return ancestorsOf.get(role);
+      const ancestors = new Set();
+      ancestorsOf.set(role, ancestors);
+      for (const { policy } of chains.get(role) ?? []) {
+        for (const parentRole of policy.parentRoles) {
+          if (path.has(parentRole)) {
+            throw new Error(`Circular role policy inheritance detected for role "${parentRole}"`);
+          }
+          ancestors.add(parentRole);
+          if (!chains.has(parentRole)) {
+            chains.set(parentRole, await this.#getRolePolicyChain(parentRole, req, null, lookups));
+          }
+          path.add(parentRole);
+          for (const transitive of await resolveAncestors(parentRole, path)) ancestors.add(transitive);
+          path.delete(parentRole);
+        }
       }
-
-      if (!effects.has(action)) {
-        effects.set(action, Effect.Allow);
-        if (result.meta.actions[action]) actionsMeta[action] = result.meta.actions[action];
-      }
-    }
-  }
-
-  async #evaluateRolePolicies(req, trace, lookups) {
-    const rolePolicies = await this.#getRolePolicies(req, trace, lookups);
-    if (!rolePolicies.length) return { ...createEmptyPolicyResult(), hadPolicies: false };
-
-    const effects = new Map();
-    const outputs = new Map();
-    const actionsMeta = {};
-    const memo = new Map();
-    const actionsKey = req.actions.join(',');
-
-    for (const policy of rolePolicies) {
-      const result = await this.#evaluateRolePolicy(policy, req, memo, new Set(), actionsKey, lookups);
-      Kerberos.#mergeRoleResultInto(effects, outputs, actionsMeta, result, req);
-    }
-
-    return {
-      effects,
-      outputs,
-      meta: {
-        actions: actionsMeta,
-        effectiveDerivedRoles: [],
-      },
-      hadPolicies: true,
+      return ancestors;
     };
+
+    for (const role of uniqueRoles) {
+      await resolveAncestors(role, new Set([role]));
+    }
+
+    for (const role of uniqueRoles) {
+      roleChains.set(role, chains.get(role));
+      for (const name of [role, ...ancestorsOf.get(role)]) {
+        for (const { policy, scope } of chains.get(name) ?? []) {
+          let atScope = rowsByScope.get(scope);
+          if (!atScope) rowsByScope.set(scope, (atScope = new Map()));
+          let bucket = atScope.get(role);
+          if (!bucket) atScope.set(role, (bucket = []));
+          bucket.push(policy);
+        }
+      }
+    }
+
+    return { rowsByScope, roleChains };
   }
 
   /**
-   * Resolves the transitive parentRoles closure for the query planner: every
-   * role reachable from the principal's role policies, mapped to its resolved
-   * policy (or null). Parent lookups are untraced — runtime parity with
-   * `#evaluateRolePolicy`, which resolves parents without a trace.
+   * Assembles the decision-walk input (`src/decision.js`): one entry per
+   * scope of the resource scope chain carrying that scope's resource policy
+   * (with its OWN imported derived roles — imports are per policy, not
+   * inherited) and the role-policy rows found at that scope.
    */
-  async #resolveRolePolicyClosure(rolePolicies, req, lookups) {
-    const closure = new Map();
-    let frontier = [];
-    const queued = new Set();
-    for (const policy of rolePolicies) {
-      closure.set(policy.role, policy);
-      for (const parentRole of policy.parentRoles) {
-        if (!queued.has(parentRole)) {
-          queued.add(parentRole);
-          frontier.push(parentRole);
-        }
+  async #getDecisionScopes(req, trace, relationsMemo, lookups, otel) {
+    const { rowsByScope } = await this.#getRoleRows(req, trace, lookups);
+    const resourceChain = await this.#getResourcePolicyChain(req, trace, lookups);
+
+    const chainByScope = new Map();
+    for (const entry of resourceChain) chainByScope.set(entry.scope, entry);
+
+    const scopes = [];
+    for (const scope of this.#getScopeChain(req.R.scope)) {
+      const chainEntry = chainByScope.get(scope) ?? null;
+      const rows = rowsByScope.get(scope) ?? EMPTY_ROWS;
+      if (!chainEntry && rows.size === 0) continue;
+      let resource = null;
+      if (chainEntry) {
+        const derivedRoles = await this.#getImportedDerivedRoles(
+          chainEntry.policy,
+          req,
+          relationsMemo,
+          trace,
+          lookups,
+          otel,
+        );
+        resource = { policy: chainEntry.policy, derivedRoles };
       }
+      scopes.push({ scope, resource, rows });
     }
-    // Level-batched BFS (the RelationResolver #subjectClosure pattern): each
-    // frontier resolves as one settled wave, so a 50-role closure over a
-    // remote cache pays O(depth) round-trip waves instead of O(roles)
-    // sequential ones. The closure map doubles as the visited set, so
-    // parentRoles cycles terminate here and are reported by the planner.
-    while (frontier.length) {
-      const unresolved = frontier.filter((role) => !closure.has(role));
-      if (!unresolved.length) break;
-      const resolved = await settleAll(unresolved.map((role) => this.#getRolePolicyByName(role, req, null, lookups)));
-      const next = [];
-      for (let i = 0; i < unresolved.length; i++) {
-        const policy = resolved[i] ?? null;
-        closure.set(unresolved[i], policy);
-        if (policy) {
-          for (const parentRole of policy.parentRoles) {
-            if (!closure.has(parentRole) && !queued.has(parentRole)) {
-              queued.add(parentRole);
-              next.push(parentRole);
-            }
-          }
-        }
-      }
-      frontier = next;
-    }
-    return closure;
+    return scopes;
   }
 
   async #resolveDerivedRolesSets(policy, lookups, trace) {
@@ -1237,26 +1169,24 @@ class Kerberos {
     return sets;
   }
 
-  // The two dependent planning chains (roles → parent closure; resource →
-  // derived-roles sets) — split out so #planPolicySources can run all three
-  // sources as one concurrent allSettled wave.
-  async #planRoleSources(req, trace, lookups) {
-    const rolePolicies = await this.#getRolePolicies(req, trace, lookups);
-    const rolePolicyClosure = await this.#resolveRolePolicyClosure(rolePolicies, req, lookups);
-    return { rolePolicies, rolePolicyClosure };
-  }
-
+  // Resource chain with each policy's RAW derived-roles sets (the planner
+  // activates them symbolically) — split out so #planPolicySources can run the
+  // three sources as one concurrent allSettled wave.
   async #planResourceSources(req, trace, lookups) {
-    const resourcePolicy = await this.#getResourcePolicy(req, trace, lookups);
-    const derivedRolesSets = resourcePolicy ? await this.#resolveDerivedRolesSets(resourcePolicy, lookups, trace) : [];
-    return { resourcePolicy, derivedRolesSets };
+    const resourceChain = await this.#getResourcePolicyChain(req, trace, lookups);
+    const chain = [];
+    for (const { policy, scope } of resourceChain) {
+      const derivedRolesSets = await this.#resolveDerivedRolesSets(policy, lookups, trace);
+      chain.push({ policy, scope, derivedRolesSets });
+    }
+    return chain;
   }
 
   /**
    * Resolves every policy source the planner needs (async, cache-aware); the
    * planner itself (`buildResourcePlan`) is pure and synchronous.
    *
-   * The three independent chains (principal / role+closure / resource+derived
+   * The three independent chains (principal / role rows / resource+derived
    * roles) resolve concurrently: in-memory lookups stay synchronous-fast, but
    * with a cache-backed store this turns up to three sequential round-trip
    * waves into one. `Promise.allSettled` follows the engine's parallelism
@@ -1272,8 +1202,8 @@ class Kerberos {
     const resourceTrace = trace ? [] : null;
 
     const settled = await Promise.allSettled([
-      this.#getPrincipalPolicy(req, principalTrace, lookups),
-      this.#planRoleSources(req, roleTrace, lookups),
+      this.#getPrincipalPolicyChain(req, principalTrace, lookups),
+      this.#getRoleRows(req, roleTrace, lookups),
       this.#planResourceSources(req, resourceTrace, lookups),
     ]);
 
@@ -1289,10 +1219,25 @@ class Kerberos {
       }
     }
 
-    const principalPolicy = settled[0].value;
-    const { rolePolicies, rolePolicyClosure } = settled[1].value;
-    const { resourcePolicy, derivedRolesSets } = settled[2].value;
-    return { principalPolicy, rolePolicies, rolePolicyClosure, resourcePolicy, derivedRolesSets };
+    const principalChain = settled[0].value;
+    const { rowsByScope, roleChains } = settled[1].value;
+    const resourceChain = settled[2].value;
+
+    const chainByScope = new Map();
+    for (const entry of resourceChain) chainByScope.set(entry.scope, entry);
+    const scopes = [];
+    for (const scope of this.#getScopeChain(resource.scope)) {
+      const chainEntry = chainByScope.get(scope) ?? null;
+      const rows = rowsByScope.get(scope) ?? EMPTY_ROWS;
+      if (!chainEntry && rows.size === 0) continue;
+      scopes.push({
+        scope,
+        resource: chainEntry ? { policy: chainEntry.policy, derivedRolesSets: chainEntry.derivedRolesSets } : null,
+        rows,
+      });
+    }
+
+    return { principalChain, scopes, roleChains, resourceChain };
   }
 
   /**
@@ -1312,50 +1257,59 @@ class Kerberos {
     // itself stays gated on the per-request flag at the call sites.
     const trace = req.includeMeta || (this.#auditIncludeMeta && this.#logger.enabled) ? [] : null;
 
-    const principalPolicy = await this.#getPrincipalPolicy(req, trace, lookups);
-    const principalResult = principalPolicy ? principalPolicy.check(req) : createEmptyPolicyResult();
+    const principalChain = await this.#getPrincipalPolicyChain(req, trace, lookups);
+    const principalResult = Kerberos.#evaluatePrincipalChain(principalChain, req);
 
     const unresolvedActions = [];
     for (const action of req.actions) {
       if (!principalResult.effects.has(action)) unresolvedActions.push(action);
     }
-    let roleResult = createEmptyPolicyResult();
-    let resourceResult = createEmptyPolicyResult();
 
-    const roleUnresolvedActions = [];
+    let layerResult = null;
     if (unresolvedActions.length) {
-      const roleReq = unresolvedActions.length === req.actions.length ? req : { ...req, actions: unresolvedActions };
-      roleResult = await this.#evaluateRolePolicies(roleReq, trace, lookups);
-
-      for (const action of unresolvedActions) {
-        if (!roleResult.effects.has(action)) roleUnresolvedActions.push(action);
-      }
+      const layerReq = unresolvedActions.length === req.actions.length ? req : { ...req, actions: unresolvedActions };
+      const scopes = await this.#getDecisionScopes(layerReq, trace, relationsMemo, lookups, otel);
+      layerResult = evaluateDecisionLayer({ req: layerReq, scopes });
     }
 
-    if (roleUnresolvedActions.length) {
-      const resourcePolicy = await this.#getResourcePolicy(req, trace, lookups);
-      if (resourcePolicy) {
-        const resourceReq =
-          roleUnresolvedActions.length === req.actions.length ? req : { ...req, actions: roleUnresolvedActions };
-        const importedDerivedRoles = await this.#getImportedDerivedRoles(
-          resourcePolicy,
-          req,
-          relationsMemo,
-          trace,
-          lookups,
-          otel,
-        );
-        resourceResult = resourcePolicy.check(resourceReq, importedDerivedRoles);
-      }
-    }
-
-    return Kerberos.#mergeSourceResults(req, trace, principalResult, roleResult, resourceResult);
+    return Kerberos.#mergeSourceResults(req, trace, principalResult, layerResult);
   }
 
-  // Per-action precedence merge (principal > roles > resource > default DENY)
-  // plus the response meta/outputs assembly. Shared by the async and sync
-  // evaluation drivers so the layering semantics live in exactly one place.
-  static #mergeSourceResults(req, trace, principalResult, roleResult, resourceResult) {
+  /**
+   * Principal policies along the principal scope chain: per action, the first
+   * policy whose rules produce an explicit decision wins (a rule whose
+   * condition fails decides nothing — the walk falls through to the parent
+   * scope). An explicit result here is final: the resource/role layer is
+   * never consulted for that action.
+   */
+  static #evaluatePrincipalChain(chain, req) {
+    if (!chain.length) return createEmptyPolicyResult();
+
+    const effects = new Map();
+    const outputs = new Map();
+    const actionsMeta = {};
+    let remaining = req.actions;
+
+    for (const { policy } of chain) {
+      if (!remaining.length) break;
+      const result = policy.check(remaining === req.actions ? req : { ...req, actions: remaining });
+      for (const [src, output] of result.outputs.entries()) outputs.set(src, output);
+      const next = [];
+      for (const action of remaining) {
+        if (result.effects.has(action)) {
+          effects.set(action, result.effects.get(action));
+          if (result.meta.actions[action]) actionsMeta[action] = result.meta.actions[action];
+        } else {
+          next.push(action);
+        }
+      }
+      remaining = next;
+    }
+
+    return { effects, outputs, meta: { actions: actionsMeta, effectiveDerivedRoles: [] } };
+  }
+
+  static #mergeSourceResults(req, trace, principalResult, layerResult) {
     const effects = new Map();
     const actionsMeta = {};
     for (const action of req.actions) {
@@ -1365,15 +1319,9 @@ class Kerberos {
         continue;
       }
 
-      if (roleResult.effects.has(action)) {
-        effects.set(action, roleResult.effects.get(action));
-        if (roleResult.meta.actions[action]) actionsMeta[action] = roleResult.meta.actions[action];
-        continue;
-      }
-
-      if (resourceResult.effects.has(action)) {
-        effects.set(action, resourceResult.effects.get(action));
-        if (resourceResult.meta.actions[action]) actionsMeta[action] = resourceResult.meta.actions[action];
+      if (layerResult?.effects.has(action)) {
+        effects.set(action, layerResult.effects.get(action));
+        if (layerResult.meta.actions[action]) actionsMeta[action] = layerResult.meta.actions[action];
         continue;
       }
 
@@ -1385,17 +1333,13 @@ class Kerberos {
 
     const meta = {
       actions: actionsMeta,
-      effectiveDerivedRoles: resourceResult.meta.effectiveDerivedRoles ?? [],
+      effectiveDerivedRoles: layerResult?.meta.effectiveDerivedRoles ?? [],
     };
     if (trace) meta.resolution = trace;
 
     return {
       effects,
-      outputs: new Map([
-        ...principalResult.outputs.entries(),
-        ...roleResult.outputs.entries(),
-        ...resourceResult.outputs.entries(),
-      ]),
+      outputs: new Map([...principalResult.outputs.entries(), ...(layerResult?.outputs.entries() ?? [])]),
       meta,
     };
   }
@@ -1405,98 +1349,85 @@ class Kerberos {
   // resolver are configured (the zero-dependency in-memory baseline): every
   // lookup is a sync Map hit, so the interior skips promise allocation and
   // microtask hops entirely (~10 awaited frames per request otherwise). The
-  // layering/merge semantics are NOT duplicated: both drivers share
-  // #applyParentRoleResult / #mergeRoleResultInto / #mergeSourceResults, and
-  // test/SyncAsyncParity.test.js pins driver equivalence end-to-end.
+  // decision semantics are NOT duplicated: both drivers share
+  // #evaluatePrincipalChain / evaluateDecisionLayer / #mergeSourceResults,
+  // and test/SyncAsyncParity.test.js pins driver equivalence end-to-end.
   // -------------------------------------------------------------------------
 
-  #resolvePolicyFromMemory(source, map, id, version, scope, trace) {
+  #resolvePolicyChainFromMemory(source, map, id, version, scope, trace) {
     const scopeSearchChain = this.#getScopeChain(scope);
-
+    const chain = [];
     for (const searchScope of scopeSearchChain) {
       const policy = map.get(`${id}.${version}.${searchScope}`);
-      if (policy) {
-        trace?.push({ source, id, version, scopesSearched: scopeSearchChain, matchedScope: searchScope });
-        return policy;
-      }
+      if (policy) chain.push({ policy, scope: searchScope });
     }
-
-    trace?.push({ source, id, version, scopesSearched: scopeSearchChain, matchedScope: null });
-    return null;
+    trace?.push({ source, id, version, scopesSearched: scopeSearchChain, matchedScope: chain[0]?.scope ?? null });
+    return chain;
   }
 
-  #getRolePoliciesSync(req, trace) {
-    const version = req.P.policyVersion ?? DEFAULT_VERSION;
-    const policies = [];
+  #getRoleRowsSync(req, trace) {
+    const uniqueRoles = [];
     const seenRoles = new Set();
-    for (const role of req.P.roles) {
+    for (const role of req.P.roles ?? []) {
       if (seenRoles.has(role)) continue;
       seenRoles.add(role);
-      const policy = this.#resolvePolicyFromMemory('role', this.#rolePolicies, role, version, req.P.scope, trace);
-      if (policy) policies.push(policy);
+      uniqueRoles.push(role);
     }
-    return policies;
-  }
 
-  #evaluateRolePolicySync(policy, req, memo, stack, actionsKey) {
-    const policyKey = `${policy.role}.${policy.version}.${policy.scope ?? ''}|${actionsKey}`;
-    if (memo.has(policyKey)) return memo.get(policyKey);
-    if (stack.has(policyKey)) throw new Error(`Circular role policy inheritance detected for role "${policy.role}"`);
+    const rowsByScope = new Map();
+    if (!uniqueRoles.length) return rowsByScope;
 
-    stack.add(policyKey);
-
-    const result = policy.check(req);
-    const version = req.P.policyVersion ?? DEFAULT_VERSION;
-
-    for (const parentRole of policy.parentRoles) {
-      // Untraced, like the async evaluator's parent lookups.
-      const parentPolicy = this.#resolvePolicyFromMemory(
-        'role',
-        this.#rolePolicies,
-        parentRole,
-        version,
-        req.P.scope,
-        null,
+    const version = req.R.policyVersion ?? DEFAULT_VERSION;
+    const chains = new Map();
+    for (const role of uniqueRoles) {
+      chains.set(
+        role,
+        this.#resolvePolicyChainFromMemory('role', this.#rolePolicies, role, version, req.R.scope, trace),
       );
-      if (!parentPolicy) continue;
-
-      const parentResult = this.#evaluateRolePolicySync(parentPolicy, req, memo, stack, actionsKey);
-      Kerberos.#applyParentRoleResult(result, parentResult, req);
     }
 
-    stack.delete(policyKey);
-    memo.set(policyKey, result);
-    return result;
-  }
-
-  #evaluateRolePoliciesSync(req, trace) {
-    const rolePolicies = this.#getRolePoliciesSync(req, trace);
-    if (!rolePolicies.length) return { ...createEmptyPolicyResult(), hadPolicies: false };
-
-    const effects = new Map();
-    const outputs = new Map();
-    const actionsMeta = {};
-    const memo = new Map();
-    const actionsKey = req.actions.join(',');
-
-    for (const policy of rolePolicies) {
-      const result = this.#evaluateRolePolicySync(policy, req, memo, new Set(), actionsKey);
-      Kerberos.#mergeRoleResultInto(effects, outputs, actionsMeta, result, req);
-    }
-
-    return {
-      effects,
-      outputs,
-      meta: {
-        actions: actionsMeta,
-        effectiveDerivedRoles: [],
-      },
-      hadPolicies: true,
+    const ancestorsOf = new Map();
+    const resolveAncestors = (role, path) => {
+      if (ancestorsOf.has(role)) return ancestorsOf.get(role);
+      const ancestors = new Set();
+      ancestorsOf.set(role, ancestors);
+      for (const { policy } of chains.get(role) ?? []) {
+        for (const parentRole of policy.parentRoles) {
+          if (path.has(parentRole)) {
+            throw new Error(`Circular role policy inheritance detected for role "${parentRole}"`);
+          }
+          ancestors.add(parentRole);
+          if (!chains.has(parentRole)) {
+            chains.set(
+              parentRole,
+              this.#resolvePolicyChainFromMemory('role', this.#rolePolicies, parentRole, version, req.R.scope, null),
+            );
+          }
+          path.add(parentRole);
+          for (const transitive of resolveAncestors(parentRole, path)) ancestors.add(transitive);
+          path.delete(parentRole);
+        }
+      }
+      return ancestors;
     };
+    for (const role of uniqueRoles) resolveAncestors(role, new Set([role]));
+
+    for (const role of uniqueRoles) {
+      for (const name of [role, ...ancestorsOf.get(role)]) {
+        for (const { policy, scope } of chains.get(name) ?? []) {
+          let atScope = rowsByScope.get(scope);
+          if (!atScope) rowsByScope.set(scope, (atScope = new Map()));
+          let bucket = atScope.get(role);
+          if (!bucket) atScope.set(role, (bucket = []));
+          bucket.push(policy);
+        }
+      }
+    }
+    return rowsByScope;
   }
 
   #getImportedDerivedRolesSync(policy, req, trace) {
-    const importedRoles = new Set();
+    const importedRoles = new Map();
     const relationCandidates = [];
     for (const name of policy.importDerivedRoles) {
       const role = this.#derivedRoles.get(name);
@@ -1507,8 +1438,10 @@ class Kerberos {
         continue;
       }
       trace?.push({ source: 'derivedRoles', name, matched: true });
-      const derivedRoles = role.get(req);
-      if (derivedRoles) for (const derivedRole of derivedRoles) importedRoles.add(derivedRole);
+      const derivedRoles = role.getActivated(req);
+      if (derivedRoles) {
+        for (const [derivedRole, parentRoles] of derivedRoles) importedRoles.set(derivedRole, parentRoles);
+      }
       for (const candidate of role.getRelationCandidates(req)) relationCandidates.push(candidate);
     }
 
@@ -1530,10 +1463,37 @@ class Kerberos {
     return importedRoles;
   }
 
+  #getDecisionScopesSync(req, trace) {
+    const rowsByScope = this.#getRoleRowsSync(req, trace);
+    const resourceChain = this.#resolvePolicyChainFromMemory(
+      'resource',
+      this.#resourcePolicies,
+      req.R.kind,
+      req.R.policyVersion ?? DEFAULT_VERSION,
+      req.R.scope,
+      trace,
+    );
+
+    const chainByScope = new Map();
+    for (const entry of resourceChain) chainByScope.set(entry.scope, entry);
+
+    const scopes = [];
+    for (const scope of this.#getScopeChain(req.R.scope)) {
+      const chainEntry = chainByScope.get(scope) ?? null;
+      const rows = rowsByScope.get(scope) ?? EMPTY_ROWS;
+      if (!chainEntry && rows.size === 0) continue;
+      const resource = chainEntry
+        ? { policy: chainEntry.policy, derivedRoles: this.#getImportedDerivedRolesSync(chainEntry.policy, req, trace) }
+        : null;
+      scopes.push({ scope, resource, rows });
+    }
+    return scopes;
+  }
+
   #evaluatePolicySourcesSync(req) {
     const trace = req.includeMeta || (this.#auditIncludeMeta && this.#logger.enabled) ? [] : null;
 
-    const principalPolicy = this.#resolvePolicyFromMemory(
+    const principalChain = this.#resolvePolicyChainFromMemory(
       'principal',
       this.#principalPolicies,
       req.P.id,
@@ -1541,43 +1501,20 @@ class Kerberos {
       req.P.scope,
       trace,
     );
-    const principalResult = principalPolicy ? principalPolicy.check(req) : createEmptyPolicyResult();
+    const principalResult = Kerberos.#evaluatePrincipalChain(principalChain, req);
 
     const unresolvedActions = [];
     for (const action of req.actions) {
       if (!principalResult.effects.has(action)) unresolvedActions.push(action);
     }
-    let roleResult = createEmptyPolicyResult();
-    let resourceResult = createEmptyPolicyResult();
 
-    const roleUnresolvedActions = [];
+    let layerResult = null;
     if (unresolvedActions.length) {
-      const roleReq = unresolvedActions.length === req.actions.length ? req : { ...req, actions: unresolvedActions };
-      roleResult = this.#evaluateRolePoliciesSync(roleReq, trace);
-
-      for (const action of unresolvedActions) {
-        if (!roleResult.effects.has(action)) roleUnresolvedActions.push(action);
-      }
+      const layerReq = unresolvedActions.length === req.actions.length ? req : { ...req, actions: unresolvedActions };
+      layerResult = evaluateDecisionLayer({ req: layerReq, scopes: this.#getDecisionScopesSync(layerReq, trace) });
     }
 
-    if (roleUnresolvedActions.length) {
-      const resourcePolicy = this.#resolvePolicyFromMemory(
-        'resource',
-        this.#resourcePolicies,
-        req.R.kind,
-        req.R.policyVersion ?? DEFAULT_VERSION,
-        req.R.scope,
-        trace,
-      );
-      if (resourcePolicy) {
-        const resourceReq =
-          roleUnresolvedActions.length === req.actions.length ? req : { ...req, actions: roleUnresolvedActions };
-        const importedDerivedRoles = this.#getImportedDerivedRolesSync(resourcePolicy, req, trace);
-        resourceResult = resourcePolicy.check(resourceReq, importedDerivedRoles);
-      }
-    }
-
-    return Kerberos.#mergeSourceResults(req, trace, principalResult, roleResult, resourceResult);
+    return Kerberos.#mergeSourceResults(req, trace, principalResult, layerResult);
   }
 
   #buildResponseResource(resource) {
@@ -1935,7 +1872,8 @@ class Kerberos {
           principal: parsedArgs.principal,
           resource: parsedArgs.resource,
           actions,
-          ...sources,
+          principalChain: sources.principalChain,
+          scopes: sources.scopes,
           hasRelations: Boolean(this.#relations),
           trace,
         });
@@ -1966,17 +1904,19 @@ class Kerberos {
         );
 
         if (parsedArgs.includeMeta) {
+          // Chain semantics: `matchedScopes` reports the MOST SPECIFIC scope a
+          // policy was found at for each source (per-action decisions may still
+          // fall through to less specific scopes).
           const matchedScopes = {
-            principal: sources.principalPolicy ? (sources.principalPolicy.scope ?? '') : null,
-            resource: sources.resourcePolicy ? (sources.resourcePolicy.scope ?? '') : null,
+            principal: sources.principalChain[0]?.scope ?? null,
+            resource: sources.resourceChain[0]?.scope ?? null,
             roles: {},
           };
           const seenRoles = new Set();
           for (const role of parsedArgs.principal.roles) {
             if (seenRoles.has(role)) continue;
             seenRoles.add(role);
-            const policy = sources.rolePolicyClosure.get(role);
-            matchedScopes.roles[role] = policy ? (policy.scope ?? '') : null;
+            matchedScopes.roles[role] = sources.roleChains.get(role)?.[0]?.scope ?? null;
           }
           response.meta = { filterDebug: toDebugString(node), matchedScopes, resolution: trace };
         }

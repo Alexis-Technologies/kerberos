@@ -66,7 +66,7 @@ flowchart TD
     NORM -->|residual tree| COND(["KIND_CONDITIONAL + condition<br/>(operators and/or/not/eq/…/in + opaque/relation)"])
 ```
 
-Every layer keeps its runtime semantics: principal rules override (Deny wins), the role layer is an allowlist with implicit deny and `parentRoles` intersection, the resource layer is Deny-over-Allow with default deny — the parity is enforced by a property-style test suite ([`test/PlanParity.test.js`](https://github.com/Alexis-Technologies/kerberos/blob/main/test/PlanParity.test.js)) that grid-samples unknown attributes and compares the filter against real `isAllowed` results.
+Every layer keeps its runtime semantics: principal rules override (Deny wins), the role layer is an allowlist with implicit deny and `parentRoles` intersection, the resource layer resolves conflicts per principal role (deny over allow within a role, allow over deny across roles) with default deny — the parity is enforced by a property-style test suite ([`test/PlanParity.test.js`](https://github.com/Alexis-Technologies/kerberos/blob/main/test/PlanParity.test.js)) that grid-samples unknown attributes and compares the filter against real `isAllowed` results.
 
 ## Operators
 

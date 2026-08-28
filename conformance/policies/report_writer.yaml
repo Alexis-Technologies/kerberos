@@ -1,0 +1,7 @@
+---
+apiVersion: 'api.cerbos.dev/v1'
+rolePolicy:
+  role: WRITER
+  rules:
+    - resource: report
+      allowActions: ['edit']

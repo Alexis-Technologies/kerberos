@@ -1,0 +1,20 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: default
+  resource: sc
+  rules:
+    - actions: ['edit']
+      effect: EFFECT_ALLOW
+      roles: ['A']
+    - actions: ['view']
+      effect: EFFECT_DENY
+      roles: ['A']
+    - actions: ['share']
+      effect: EFFECT_ALLOW
+      roles: ['A']
+    - actions: ['edit']
+      effect: EFFECT_ALLOW
+      roles: ['B']
+    - actions: ['view', 'edit', 'share']
+      effect: EFFECT_ALLOW
+      roles: ['RS']

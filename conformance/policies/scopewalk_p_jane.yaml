@@ -1,0 +1,9 @@
+apiVersion: api.cerbos.dev/v1
+principalPolicy:
+  principal: jane
+  version: default
+  rules:
+    - resource: k
+      actions:
+        - action: ping
+          effect: EFFECT_ALLOW

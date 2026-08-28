@@ -16,14 +16,15 @@ node --test test/Kerberos.test.js          # run a single test file
 node --test --test-name-pattern="scope"    # filter tests by name
 pnpm test:types        # type-check test/types.test-d.ts against index.d.ts via tsd
 pnpm test:coverage     # c8 coverage over src/
-pnpm lint              # oxlint src test scripts bench
-pnpm format            # oxfmt src test scripts bench (format:check for CI)
+pnpm test:conformance  # Cerbos conformance corpus (node --test conformance/*.test.js)
+pnpm lint              # oxlint src test scripts bench conformance
+pnpm format            # oxfmt src test scripts bench conformance (format:check for CI)
 pnpm bench             # ops/sec benchmark harness (bench/bench.js)
 pnpm size              # bundle-size report (scripts/size.js; CI-enforced smoke)
 pnpm docs:dev          # VitePress dev server for docs/ (docs:build / docs:preview too)
 ```
 
-Linting/formatting is **oxlint/oxfmt** (`.oxlintrc.json`, `.oxfmtrc.json`; the `correctness` category is intentionally off) — their native bindings require Node ≥20.19, so CI (`.github/workflows/ci.yml`) runs `lint`/`format:check` in a single job pinned to Node 22, separate from the `test` job, which runs `test:coverage` + `test:types` across the Node 18/20/22 matrix, and a `docs` job (Node 22) that runs `docs:build`. Lint/format deliberately target `src test scripts bench` only, so `docs/` is not covered by them.
+Linting/formatting is **oxlint/oxfmt** (`.oxlintrc.json`, `.oxfmtrc.json`; the `correctness` category is intentionally off) — their native bindings require Node ≥20.19, so CI (`.github/workflows/ci.yml`) runs `lint`/`format:check` in a single job pinned to Node 22, separate from the `test` job, which runs `test:coverage` + `test:types` across the Node 18/20/22 matrix, a `docs` job (Node 22) that runs `docs:build`, and a `conformance` job (Node 22) that stands up a real Cerbos PDP in Docker and runs `test:conformance` against it. Lint/format deliberately target `src test scripts bench conformance` only, so `docs/` is not covered by them.
 
 Style: 2-space indent, single quotes, semicolons, 120-char lines (see `.editorconfig`, `.oxfmtrc.json`).
 
@@ -48,14 +49,15 @@ Every DSL concept (`Conditions`, `Constants`, `DerivedRoles`, `Outputs`, `Princi
 
 `Kerberos` is the sole runtime engine. Policies passed to the constructor are parsed (via `Kerberos.parsePolicy`) and stored in four private `Map`s keyed by scope-aware cache keys: `#resourcePolicies`, `#principalPolicies`, `#rolePolicies`, `#derivedRoles`.
 
-Policy/version/scope lookup (`#getResourcePolicy`, `#getPrincipalPolicy`, `#getRolePolicyByName`) walks the **scope search chain** (`Kerberos.getScopeSearchChain`, most-specific → base `''`) crossed with `policyVersion` (default `'default'`). In-memory `Map`s are checked first; on a miss, if a `cache` option was supplied, it falls back to `await cache.get(key)` (see Caching below).
+Policy/version/scope lookup (`#resolvePolicyChain` + wrappers, sync twin `#resolvePolicyChainFromMemory`) collects the **whole chain** along the scope search chain (`Kerberos.getScopeSearchChain`, most-specific → base `''`) crossed with `policyVersion` (default `'default'`) — at each scope the in-memory `Map` is checked first, then (if a `cache` option was supplied) `await cache.get(key)` (see Caching below).
 
-Per-action resolution order (`#evaluatePolicySources`), computed independently for every action in a request:
+Per-action resolution (`#evaluatePolicySources` / sync twin), matching Cerbos's rule-table semantics — verified against a live PDP by `conformance/`:
 
-1. `PrincipalPolicy` matching `principal.id` — explicit `Allow`/`Deny` wins immediately.
-2. Otherwise, all `RolePolicy` entries matching `principal.roles[]` are evaluated (`#evaluateRolePolicies`); `Deny` wins over `Allow` across roles. `parentRoles` intersect the child's allowed actions with each locally-defined parent role policy.
-3. Otherwise, fall back to `ResourcePolicy` matched by `resource.kind` (rules matched by `roles` / `derivedRoles`, evaluated via `Conditions`/`Variables`/`Constants`/`Outputs`).
-4. No match → `EFFECT_DENY`.
+1. **Principal chain** (principal scope chain, most specific first): the first `PrincipalPolicy` whose rule fires for an action decides it (deny beats allow within a policy; a failed condition decides nothing — falls through to the parent scope). An explicit decision is final and is never narrowed by the role layer.
+2. **Unified decision walk** (`src/decision.js`, `evaluateDecisionLayer`) for the remaining actions — per action, per principal role ("bucket"), walking the RESOURCE scope chain: at each scope a bucket sees the resource policy's fired rules that reach it (via `roles`/derived roles whose `parentRoles` cover the bucket) plus **synthetic deny rows** from role policies at that scope (a role policy denies every action it does not allowlist there, for ANY kind — so having a role policy constrains that role everywhere). Deny beats allow within a scope; the first deciding scope seals the bucket; across buckets an allow from any role wins (anti-lockout). Role policies never grant — the allow must come from a resource policy reaching the SAME bucket. `parentRoles` attach the parents' deny rows to the child's bucket (intersection along the chain, union across roles). Role policies ride the resource scope chain and resource policyVersion (Cerbos's docs say principal scope; its engine and a live PDP say resource — see `conformance/DIVERGENCES.md`).
+3. No decision anywhere → `EFFECT_DENY` (`policy-miss` under tracing).
+
+Name matching is Cerbos-glob everywhere (`src/matching.js`, precompiled per rule as non-enumerable `*Matcher` props): bare `*` matches anything, other `*` stay within a `:` segment, `**` crosses segments. Globs apply to resource-policy `actions`/`roles`, principal-policy `resource`/`action`, role-policy `resource`/`allowActions`, and derived-role `parentRoles`; `rules[].derivedRoles` refs are exact. `ResourcePolicy.check` is a single-scope instance of the same decision walk (class-level and engine-level semantics cannot drift); policy lookups collect the whole chain with per-scope memory-then-cache precedence (a static base-scope policy no longer shadows a more specific cached one).
 
 Public API is `isAllowed(args)` (single action → boolean), `checkResources(args, effectAsBoolean?)` (batch, multiple resources/actions → structured response with `kerberosCallId`, `outputs`, optional `meta`) and `planResources(args)` (query planning — see the Query planning section). Both share the `#runRequest` lifecycle wrapper (telemetry span + audit events + `onError` semantics) and the `#evaluatePolicySources` core; the three per-source lookups go through the single `#resolvePolicy` resolver (scope-chain memoized per instance). Internals always use canonical `EFFECT_*` strings — `effectAsBoolean` converts once at the response boundary. `checkResources` evaluates resources concurrently (`Promise.allSettled`); a rejected resource fail-closes to DENY for its actions without failing the batch. Error semantics: all logger/telemetry calls are internally guarded (can never affect decisions); evaluation errors follow the `onError: 'throw' | 'deny'` option; malformed arguments always throw `KerberosValidationError`; transient `cache.get` failures retry per `cacheRetry` then surface as `KerberosCacheError`; corrupt cache entries log as `KerberosCodecError` and count as a miss. Duplicate policy keys (and derived-roles names) throw at construction. With `includeMeta`, denied actions carry a `reason` and `meta.resolution` records every policy lookup. Shared DSL parsers live in `src/policyParsers.js`; wildcard/default tokens (`ALL_ACTIONS`, `ALL_ROLES`, `ALL_RESOURCES`, `DEFAULT_VERSION`, `BASE_SCOPE`) in `src/schemas/index.js` — use the semantically-matching constant.
 
@@ -95,6 +97,10 @@ Two layers, both SpiceDB-inspired (see the "borrow vs skip" notes in `README.md`
 ### Public exports
 
 The full package surface is assembled in `src/index.js` (main entry), `tests.js` (dev-only `/tests` subpath) and `relations.js` (`/relations` subpath) — check all three when adding a new export, and update `index.d.ts` / `tests.d.ts` / `relations.d.ts` in the repo root accordingly, since types are hand-maintained (not generated). Also update `docs/api/exports.md`, which mirrors those three tables for the docs site.
+
+### Cerbos conformance suite (`conformance/`)
+
+Not part of the published package (`files` in `package.json` is an explicit allowlist). One corpus written in **Cerbos's own formats** — policy documents under `policies/`, `TestSuite`-schema decision expectations and `QueryPlannerTestSuite`-shaped plan expectations under `suites/` — is executed against Kerberos always, and additionally against a real Cerbos PDP when `CERBOS_URL` is set (the CI `conformance` job does this via Docker). `lib/load.js` is a **structural** mapper, not a Cerbos importer: there is no CEL parser, and the corpus is restricted to expressions that are simultaneously valid CEL and valid Kerberos `$expr` so one string feeds both engines. Its governing invariant is that it **refuses to guess** — any construct outside the supported subset throws `ConformanceUnsupportedError` rather than being dropped, because a silently-skipped rule turns a real conformance failure into a false pass. Plan filters are compared after canonicalization (`lib/canonical.js`) since neither engine promises an operand order; plans containing Kerberos-only operators (`opaque`, `relation`) fail the scope check instead of being compared. Known semantic gaps live in `conformance/DIVERGENCES.md` — when the live leg disagrees, record it there rather than editing the expectation green.
 
 ### Documentation site (`docs/`)
 

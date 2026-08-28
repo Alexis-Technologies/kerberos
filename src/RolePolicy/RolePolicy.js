@@ -1,7 +1,8 @@
 const { parseRolePolicyShape } = require('./validation');
 const { cloneShapeTree, deepFreeze } = require('../freeze.js');
+const { compileMatcher } = require('../matching.js');
 
-const { ALL_ACTIONS, ALL_RESOURCES, Effect } = require('../schemas');
+const { Effect } = require('../schemas');
 const { parseConditions, parseConstants, parseOutputs, parseVariables } = require('../policyParsers.js');
 
 /**
@@ -47,9 +48,11 @@ class RolePolicy {
           condition: RolePolicy.parseConditions(rule.condition, options),
           output: RolePolicy.parseOutputs(rule.output, options),
         };
-        // See ResourcePolicy's `actionsSet` — same rationale (O(1) hot-path
-        // lookups), non-enumerable so it never leaks into serialized shapes.
-        Object.defineProperty(parsedRule, 'allowActionsSet', { value: new Set(rule.allowActions) });
+        // See ResourcePolicy's `actionsMatcher` — same rationale (precompiled
+        // glob-aware matchers, non-enumerable so they never leak into
+        // serialized shapes).
+        Object.defineProperty(parsedRule, 'allowActionsMatcher', { value: compileMatcher(rule.allowActions) });
+        Object.defineProperty(parsedRule, 'resourceMatcher', { value: compileMatcher([rule.resource]) });
         rules.push(parsedRule);
       }
       this.#shape.rolePolicy.rules = rules;
@@ -90,6 +93,66 @@ class RolePolicy {
   }
 
   /**
+   * The policy's `metaSrcBase` — `role.<role>.v<version>[/scope]`.
+   */
+  get srcBase() {
+    const prefix = `role.${this.role}.v${this.version}`;
+    return this.scope ? `${prefix}/${this.scope}` : prefix;
+  }
+
+  /**
+   * Per-action allowlist verdict for the decision walk (`src/decision.js`).
+   *
+   * A role policy contributes synthetic DENY rows at its scope for every
+   * requested action it does not allowlist for this resource kind — which is
+   * also what makes a role policy constrain its role for kinds its rules
+   * never mention (`allowed` is then simply empty). Rules match resource and
+   * actions through Cerbos-style globs; a rule whose condition fails does not
+   * allowlist (recorded in `conditionFailed` for decision tracing).
+   *
+   * @param {Record<string, unknown>} req
+   * @returns {{ srcBase: string, scope: string, allowed: Set<string>, conditionFailed: Set<string>, outputs: Map<string, unknown> }}
+   */
+  evaluateAllowlist(req) {
+    const allowed = new Set();
+    const conditionFailed = new Set();
+    const outputs = new Map();
+    const metaSrcBase = this.srcBase;
+    const verdict = { srcBase: metaSrcBase, scope: this.scope ?? '', allowed, conditionFailed, outputs };
+
+    if (!req.actions?.length) return verdict;
+
+    const constants = this.#shape.rolePolicy.constants?.get();
+    const reqWithConstants = constants === undefined ? req : { ...req, constants, C: constants };
+    const variables = this.#shape.rolePolicy.variables?.get(reqWithConstants);
+    const reqWithVariables =
+      variables === undefined ? reqWithConstants : { ...reqWithConstants, variables, V: variables };
+
+    const rules = this.rules;
+    for (const action of reqWithVariables.actions) {
+      for (let i = 0; i < rules.length; i++) {
+        const rule = rules[i];
+        if (!rule.resourceMatcher.matches(reqWithVariables.R.kind)) continue;
+        if (!rule.allowActionsMatcher.matches(action)) continue;
+
+        const isConditionFulfilled = rule.condition ? rule.condition.isFulfilled(reqWithVariables) : true;
+        const metaSrc = `${metaSrcBase}#${rule.name || `UNNAMED_RULE_${i + 1}`}`;
+        if (rule.output) {
+          const output = rule.output.build(reqWithVariables, isConditionFulfilled, metaSrc);
+          if (output) outputs.set(output.src, output);
+        }
+        if (isConditionFulfilled) {
+          allowed.add(action);
+          break;
+        }
+        conditionFailed.add(action);
+      }
+    }
+
+    return verdict;
+  }
+
+  /**
    * Evaluates a request. Effects are always canonical
    * `EFFECT_ALLOW`/`EFFECT_DENY` strings — the `effectAsBoolean` response
    * format is applied at the response boundary.
@@ -124,10 +187,10 @@ class RolePolicy {
 
       for (let i = 0; i < rules.length; i++) {
         const rule = rules[i];
-        if (rule.resource !== ALL_RESOURCES && rule.resource !== reqWithVariables.R.kind) continue;
+        if (!rule.resourceMatcher.matches(reqWithVariables.R.kind)) continue;
 
         matchedResource = true;
-        if (!rule.allowActionsSet.has(ALL_ACTIONS) && !rule.allowActionsSet.has(action)) continue;
+        if (!rule.allowActionsMatcher.matches(action)) continue;
 
         const isConditionFulfilled = rule.condition ? rule.condition.isFulfilled(reqWithVariables) : true;
         const metaSrc = `${metaSrcBase}#${rule.name || `UNNAMED_RULE_${i + 1}`}`;

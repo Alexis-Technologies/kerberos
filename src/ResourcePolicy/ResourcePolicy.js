@@ -1,7 +1,9 @@
 const { parseResourcePolicyShape } = require('./validation');
 const { cloneShapeTree, deepFreeze } = require('../freeze.js');
+const { compileMatcher } = require('../matching.js');
+const { evaluateDecisionLayer } = require('../decision.js');
 
-const { ALL_ACTIONS, ALL_ROLES, Effect } = require('../schemas');
+const { ALL_ROLES, Effect } = require('../schemas');
 const { parseConditions, parseConstants, parseOutputs, parseVariables } = require('../policyParsers.js');
 
 /**
@@ -63,12 +65,15 @@ class ResourcePolicy {
           condition: ResourcePolicy.parseConditions(rule.condition, options),
           output: ResourcePolicy.parseOutputs(rule.output, options),
         };
-        // `rule.actions` is static per policy but scanned on every check()
-        // call (once per rule per requested action); precomputing the Set
-        // once turns the repeated `includes` linear scans into O(1) lookups.
-        // Non-enumerable so the runtime-only field never leaks into
+        // Rule name fields are static per policy but matched on every check()
+        // call — precompile them into glob-aware matchers (Cerbos semantics:
+        // bare `*` matches everything, other `*` stay within a `:` segment).
+        // Non-enumerable so the runtime-only fields never leak into
         // JSON.stringify / deepEqual / spreads of `.rules` / `.shape`.
-        Object.defineProperty(parsedRule, 'actionsSet', { value: new Set(rule.actions) });
+        Object.defineProperty(parsedRule, 'actionsMatcher', { value: compileMatcher(rule.actions) });
+        if (Array.isArray(rule.roles)) {
+          Object.defineProperty(parsedRule, 'rolesMatcher', { value: compileMatcher(rule.roles) });
+        }
         rules.push(parsedRule);
       }
       this.#shape.resourcePolicy.rules = rules;
@@ -110,22 +115,39 @@ class ResourcePolicy {
   }
 
   /**
-   * Evaluates a request and returns action effects, outputs and metadata.
-   * Effects are always canonical `EFFECT_ALLOW`/`EFFECT_DENY` strings — the
-   * `effectAsBoolean` response format is applied at the response boundary.
+   * The policy's `metaSrcBase` — `resource.<kind>.v<version>[/scope]`.
+   */
+  get srcBase() {
+    const prefix = `resource.${this.kind}.v${this.version}`;
+    return this.scope ? `${prefix}/${this.scope}` : prefix;
+  }
+
+  /**
+   * Evaluates every rule for the requested actions and reports which ones
+   * FIRED (action matched, principal reached through roles/derivedRoles,
+   * condition held), without resolving conflicts — resolution is the decision
+   * walk's job (`src/decision.js`), where this policy is one scope of a chain.
+   *
+   * Outputs are built here for every evaluated rule, exactly as before.
    *
    * @param {Record<string, unknown>} req
-   * @param {Set<string>} derivedRoles
-   * @returns {{ effects: Map<string, string>, outputs: Map<string, unknown>, meta: Record<string, unknown> }}
+   * @param {Map<string, string[]|null>|Set<string>} derivedRoles - active derived
+   *   roles; a Map carries each role's `parentRoles` for bucket attribution.
+   * @returns {{
+   *   srcBase: string,
+   *   scope: string,
+   *   derivedRoles: Map<string, string[]|null>|Set<string>,
+   *   outputs: Map<string, unknown>,
+   *   actions: Map<string, { firedAllows: Array<{rule: object, src: string}>, firedDenies: Array<{rule: object, src: string}>, conditionFailed: boolean }>,
+   * }}
    */
-  check(req, derivedRoles) {
-    const effects = new Map();
+  evaluateRules(req, derivedRoles) {
     const outputs = new Map();
-    const metaSrcPrefix = `resource.${this.kind}.v${this.version}`;
-    const metaSrcBase = this.scope ? `${metaSrcPrefix}/${this.scope}` : metaSrcPrefix;
-    const meta = { actions: {}, effectiveDerivedRoles: [...derivedRoles.values()] };
+    const actions = new Map();
+    const metaSrcBase = this.srcBase;
+    const result = { srcBase: metaSrcBase, scope: this.scope ?? '', derivedRoles, outputs, actions };
 
-    if (!req.actions?.length) return { effects, outputs, meta };
+    if (!req.actions?.length) return result;
 
     // Skip the request copies when the policy declares neither constants nor
     // variables (the common case): conditions then read `C`/`V` as undefined
@@ -137,42 +159,24 @@ class ResourcePolicy {
     const reqWithVariables =
       variables === undefined ? reqWithConstants : { ...reqWithConstants, variables, V: variables };
 
-    // Principal roles are looked up once per rule/action; a Set turns the inner
-    // `roles.includes(role)` scans into O(1) membership checks.
-    const principalRoles = new Set(reqWithVariables.P.roles);
-
+    const principalRoles = reqWithVariables.P.roles ?? [];
     const rules = this.rules;
 
     for (const action of reqWithVariables.actions) {
-      // Track effects with two flags instead of building an array and running
-      // `includes` twice; Deny still wins over Allow.
-      let hasDeny = false;
-      let hasAllow = false;
-      // Record the rule that determines the final effect: a Deny rule pins the
-      // matched rule (Deny wins), otherwise the latest fulfilled Allow rule.
-      let matchedRuleSrc = null;
-      let matchedRuleIsDeny = false;
-      // Decision-trace input: did a rule that targeted this action fail only
-      // on its condition?
-      let conditionFailed = false;
-      meta.actions[action] = { matchedPolicy: metaSrcBase };
+      const perAction = { firedAllows: [], firedDenies: [], conditionFailed: false };
+      actions.set(action, perAction);
 
       for (let i = 0; i < rules.length; i++) {
         const rule = rules[i];
-        // Checking if the rule applies to the action
-        if (!rule.actionsSet.has(ALL_ACTIONS) && !rule.actionsSet.has(action)) continue;
+        if (!rule.actionsMatcher.matches(action)) continue;
 
-        // Checking if the roles match (`*` is the wildcard role and matches any principal)
-        let rolesMatch = false;
-        if (Array.isArray(rule.roles)) {
-          for (const role of rule.roles) {
-            if (role === ALL_ROLES || principalRoles.has(role)) {
-              rolesMatch = true;
-              break;
-            }
-          }
+        // Does the rule reach this principal at all? (Bucket attribution — WHICH
+        // role it reaches through — happens in the decision walk.)
+        let rolesMatch = rule.rolesMatcher ? rule.rolesMatcher.matchesAny(principalRoles) : false;
+        // The wildcard role also reaches a principal with no roles at all.
+        if (!rolesMatch && rule.rolesMatcher && principalRoles.length === 0 && rule.rolesMatcher.matches(ALL_ROLES)) {
+          rolesMatch = true;
         }
-
         let derivedRolesMatch = false;
         if (!rolesMatch && Array.isArray(rule.derivedRoles)) {
           for (const role of rule.derivedRoles) {
@@ -182,7 +186,6 @@ class ResourcePolicy {
             }
           }
         }
-
         if (!rolesMatch && !derivedRolesMatch) continue;
 
         // Checking the condition
@@ -197,35 +200,48 @@ class ResourcePolicy {
           if (output) outputs.set(output.src, output);
         }
 
-        if (isConditionFulfilled) {
-          if (rule.effect === Effect.Deny) {
-            hasDeny = true;
-            matchedRuleSrc = metaSrc;
-            matchedRuleIsDeny = true;
-          } else if (rule.effect === Effect.Allow) {
-            hasAllow = true;
-            if (!matchedRuleIsDeny) matchedRuleSrc = metaSrc;
-          }
-        } else {
-          conditionFailed = true;
+        if (!isConditionFulfilled) {
+          perAction.conditionFailed = true;
+          continue;
         }
-      }
 
-      if (matchedRuleSrc !== null) {
-        meta.actions[action].matchedRule = matchedRuleSrc;
-        if (this.scope) meta.actions[action].matchedScope = this.scope;
-      } else {
-        // Default deny — record WHY nothing matched for decision tracing:
-        // a rule targeted the action but its condition failed
-        // ('condition-not-met'), or no rule targeted the action / matched the
-        // principal's roles at all ('rule-miss').
-        meta.actions[action].reason = conditionFailed ? 'condition-not-met' : 'rule-miss';
+        if (rule.effect === Effect.Deny) perAction.firedDenies.push({ rule, src: metaSrc });
+        else if (rule.effect === Effect.Allow) perAction.firedAllows.push({ rule, src: metaSrc });
       }
-
-      // Deny wins; otherwise Allow; otherwise default Deny.
-      effects.set(action, hasDeny ? Effect.Deny : hasAllow ? Effect.Allow : Effect.Deny);
     }
 
+    return result;
+  }
+
+  /**
+   * Evaluates a request against THIS policy alone and returns action effects,
+   * outputs and metadata — a single-scope instance of the shared decision
+   * walk, so class-level and engine-level semantics can never drift. Effects
+   * are always canonical `EFFECT_ALLOW`/`EFFECT_DENY` strings.
+   *
+   * @param {Record<string, unknown>} req
+   * @param {Map<string, string[]|null>|Set<string>} derivedRoles
+   * @returns {{ effects: Map<string, string>, outputs: Map<string, unknown>, meta: Record<string, unknown> }}
+   */
+  check(req, derivedRoles) {
+    if (!req.actions?.length) {
+      return {
+        effects: new Map(),
+        outputs: new Map(),
+        meta: { actions: {}, effectiveDerivedRoles: [...derivedRoles.keys()] },
+      };
+    }
+    const { effects, outputs, meta } = evaluateDecisionLayer({
+      req,
+      scopes: [{ scope: this.scope ?? '', resource: { policy: this, derivedRoles }, rows: new Map() }],
+    });
+    // Single-policy convention: every action names the policy it was checked
+    // against, even undecided ones (the engine-level walk reserves that for
+    // deciding policies).
+    for (const action of req.actions) {
+      meta.actions[action] = { matchedPolicy: this.srcBase, ...meta.actions[action] };
+      if (meta.actions[action].matchedScope === '') delete meta.actions[action].matchedScope;
+    }
     return { effects, outputs, meta };
   }
 }
