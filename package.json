@@ -21,6 +21,10 @@
     "./relations": {
       "types": "./relations.d.ts",
       "default": "./relations.js"
+    },
+    "./cerbos": {
+      "types": "./cerbos.d.ts",
+      "default": "./cerbos.js"
     }
   },
   "directories": {
@@ -121,6 +125,8 @@
     "tests.d.ts",
     "relations.js",
     "relations.d.ts",
+    "cerbos.js",
+    "cerbos.d.ts",
     "src/",
     "LICENSE",
     "README.md",

@@ -87,6 +87,8 @@ await kerberos.isAllowed({
 - [Decision metadata (includeMeta)](#decision-metadata-includemeta)
 - [Caching / Storing Policies](#caching--storing-policies)
   - [How it works](#how-it-works-fallback-layer) · [`codec` modes](#codec-option--three-modes) · [Dynamic policy format](#dynamic-policy-format) · [Safe builtins](#allowed-safe-builtins) · [Serialization mechanism](#serialization-mechanism-security--performance)
+- [Importing Cerbos Policies](#importing-cerbos-policies)
+  - [What is translated](#what-is-translated) · [CEL → `$expr`](#the-cel--expr-translation) · [How this is verified](#how-the-importer-is-verified)
 - [ReBAC (Relations)](#rebac-relations)
   - [Relation-backed derived roles](#relation-backed-derived-roles) · [Zanzibar-lite resolver](#the-built-in-zanzibar-lite-resolver) · [Dynamic tuples](#dynamic-tuples-cache-backed) · [Consistency](#consistency-honest-limitations)
 - [Query Plans (planResources)](#query-plans-planresources)
@@ -112,10 +114,11 @@ Zero runtime dependencies. Measured with `pnpm size` (esbuild browser bundle, fu
 
 | Entry | min | min+gzip |
 | ----- | ---:| --------:|
-| `@alexify/kerberos` (main entry, query planner included) | 105.7 KB | **28.6 KB** |
+| `@alexify/kerberos` (main entry, query planner included) | 109.3 KB | **30.1 KB** |
 | `@alexify/kerberos/relations` (opt-in ReBAC resolver) | 60.5 KB | 16.3 KB |
+| `@alexify/kerberos/cerbos` (opt-in [Cerbos importer](#importing-cerbos-policies)) | 33.3 KB | 10.7 KB |
 
-The `/relations` and `/tests` subpaths are only bundled if you import them. Optional tooling (`jsep`, `zod`, `ajv`, `@sinclair/typebox`, `@opentelemetry/api`) is never included — you install what you use.
+The `/relations`, `/tests` and `/cerbos` subpaths are only bundled if you import them. Optional tooling (`jsep`, `zod`, `ajv`, `@sinclair/typebox`, `@opentelemetry/api`) is never included — you install what you use.
 
 ### Browser usage
 
@@ -557,6 +560,15 @@ Subpath **`@alexify/kerberos/tests`** (dev/test only — not loaded by the main 
 | `KerberosTest`, `KerberosTests` | Cerbos-style declarative test runner. |
 | `PrincipalMock`, `PrincipalsMock`, `ResourceMock`, `ResourcesMock` | Named fixtures for test suites. |
 | `*ZodSchemas`, `*JsonSchemas`, `*TypeBoxSchemas` | Schema builders for the test harness. |
+
+Subpath **`@alexify/kerberos/cerbos`** (the [Cerbos policy importer](#importing-cerbos-policies) — kept out of the main entry):
+
+| Export | Purpose |
+| ------ | ------- |
+| `importCerbosPolicies` | Cerbos YAML/JSON documents → `{ policies, derivedRoles }` serialized Kerberos documents. |
+| `celToExpr` | Translates one CEL expression into a `$expr`-compatible JavaScript expression string. |
+| `parseYamlDocuments` | The zero-dependency YAML-subset parser, standalone. |
+| `KerberosImportError` | Typed error for unsupported constructs (carries `line` for YAML errors). |
 
 ## TypeScript
 
@@ -1229,6 +1241,57 @@ To skip deserialization entirely (e.g. your cached documents are already plain J
 ```javascript
 const kerberos = new Kerberos([], [], { cache }); // values passed as-is to policy constructors
 ```
+
+## Importing Cerbos Policies
+
+The **`@alexify/kerberos/cerbos`** subpath turns an existing **Cerbos policy repository** — YAML/JSON policy documents with CEL conditions — into Kerberos policies you can evaluate in-process, still with **zero dependencies**: the subpath ships its own parser for the YAML subset Cerbos policies are written in and its own CEL parser + translator.
+
+```javascript
+import { importCerbosPolicies } from '@alexify/kerberos/cerbos';
+import { Kerberos, createSafeExprCodec, deserializePolicy } from '@alexify/kerberos';
+
+// The importer emits SERIALIZED documents ({ $expr } conditions), so the
+// standard dynamic-policy codec setup applies (see "Caching / Storing Policies"):
+const codec = createSafeExprCodec({ jsep });
+
+const { policies, derivedRoles } = importCerbosPolicies(yamlTexts); // strings, parsed objects, or arrays
+
+const kerberos = new Kerberos(
+  policies.map((doc) => deserializePolicy(doc, codec)),
+  derivedRoles.map((doc) => deserializePolicy(doc, codec)),
+);
+```
+
+Because the output is plain JSON with `{ $expr }` descriptors, it is also exactly what the [cache layer](#caching--storing-policies) stores — import a Cerbos repo once and publish the results to Redis/keyv instead of constructing an engine directly.
+
+**The governing invariant: refuse to guess.** Every Cerbos construct is either translated with faithful semantics or rejected with a `KerberosImportError` naming the construct and its location — nothing is dropped or approximated silently, because a skipped rule or a mistranslated condition would change authorization decisions without a trace. The single opt-in exception: `importCerbosPolicies(input, { drop: ['schemas'] })` discards validation-only `schemas` blocks instead of throwing on them.
+
+### What is translated
+
+All four document kinds (`resourcePolicy`, `principalPolicy`, `rolePolicy` — Cerbos role policies have no version, so `default` is assumed — and `derivedRoles`), including scopes, `importDerivedRoles`, nested `all`/`any`/`none` condition combinators, `variables.local` / `constants.local`, and `output.expr` / `output.when`. Policies with `disabled: true` are skipped, matching Cerbos's own loader; `scopePermissions: SCOPE_PERMISSIONS_OVERRIDE_PARENT` (the Cerbos default, and exactly what Kerberos implements) is accepted. Always rejected: `schemas` (unless dropped), `exportVariables`/`exportConstants` and `variables.import`, `REQUIRE_PARENTAL_CONSENT_FOR_ALLOWS`, script conditions, and unknown keys at any level.
+
+### The CEL → `$expr` translation
+
+`celToExpr` (exported standalone) parses real CEL — full expression grammar with precedence, ternary, raw/triple-quoted strings, hex/uint literals, comments — and emits JavaScript for the [safe interpreter](#serialization-mechanism-security--performance). Highlights:
+
+| CEL | JavaScript (`$expr`) |
+| --- | ------------------- |
+| `request.principal` / `request.resource` (or `P` / `R` / `V` / `C` shorthand) | `P` / `R` / `V` / `C` |
+| `==` / `!=` | `===` / `!==` |
+| `x in list` | `list.includes(x)` (a *map* receiver errors at evaluation — fail-loud) |
+| `has(R.attr.x)` | `typeof R.attr.x !== "undefined"` (an explicit `null` is *present*, as in CEL) |
+| `size(x)` / `x.size()` | `x.length` |
+| `timestamp(x)` / `now()` | `Date.parse(x)` / `Date.now()` — timestamps are epoch-ms numbers, so `<`, `==`, `-` work numerically |
+| `duration("72h3m")` | constant-folded milliseconds |
+| `t.getFullYear()` … | `new Date(t).getUTCFullYear()` … (CEL defaults to UTC; `getDayOfMonth()` gets the `- 1`) |
+| `x.replace(a, b)` | `x.split(a).join(b)` (CEL replaces every occurrence) |
+| `7 / 2` (int literals) | `Math.trunc(7 / 2)` (CEL integer division truncates) |
+
+Rejected by design, each with a named error: comprehension macros (`exists`/`all`/`filter`/`map`/`exists_one` — the interpreter has no lambdas), `matches()` (RE2), Cerbos extension functions (`hasIntersection`, `hierarchy`, `spiffeID`, …), `globals`, `runtime`, `request.auxData`, bytes literals, message construction, and any identifier the translator does not recognize. Documented deviations: `lowerAscii`/`upperAscii` map to full-Unicode case folding, and `/` with non-literal operands keeps JS numeric semantics (Cerbos attributes arrive as JSON numbers — CEL doubles — where the two agree).
+
+### How the importer is verified
+
+The whole [Cerbos conformance corpus](conformance/README.md) — real Cerbos policy YAML whose expected decisions are pinned against a live Cerbos PDP in CI — additionally runs **through the public importer** (`conformance/importer.test.js`): YAML parsed by this parser, CEL translated by this translator, and every decision and query-plan expectation must still hold. The YAML parser is separately verified differentially against the reference `yaml` package over the same corpus.
 
 ## ReBAC (Relations)
 

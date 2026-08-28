@@ -19,6 +19,20 @@ cross-request instance memo, audit-stream completeness (fail-closed denials,
 
 ### Added
 
+- **Cerbos policy importer** — the new **`@alexify/kerberos/cerbos`** subpath
+  turns an existing Cerbos policy repository into Kerberos policies, with zero
+  dependencies: `importCerbosPolicies` (YAML/JSON documents → serialized
+  `{ $expr }` documents for `deserializePolicy`), `celToExpr` (a real CEL
+  parser + translator to the safe-interpreter subset), `parseYamlDocuments`
+  (a YAML-subset parser verified differentially against the reference `yaml`
+  package), and `KerberosImportError`. The importer refuses to guess:
+  unsupported Cerbos constructs (macros, `matches()`, extension functions,
+  `exportVariables`, `REQUIRE_PARENTAL_CONSENT_FOR_ALLOWS`, unknown keys, …)
+  throw named errors instead of being dropped — the only opt-out is
+  `drop: ['schemas']`. Verified end-to-end by running the whole conformance
+  corpus through the importer (`conformance/importer.test.js`): every
+  PDP-pinned decision and query-plan expectation holds for importer-loaded
+  policies. See the new "Importing Cerbos Policies" guide.
 - **Typed authoring.** `Kerberos` and every policy/request/response type are
   now generic over an optional application schema naming resource kinds, their
   actions and attribute bags, and the principal's roles and attributes. The

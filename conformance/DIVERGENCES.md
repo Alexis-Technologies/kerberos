@@ -12,7 +12,7 @@ Each entry says how it is enforced: **corpus** (a test would fail if it changed)
 | **Kerberos**    | JavaScript expressions — either live functions, or `{ $expr }` strings parsed by jsep and walked by an eval-free allowlist interpreter.       |
 | **Enforcement** | loader — anything outside the shared subset throws `ConformanceUnsupportedError`.                                                             |
 
-This is the largest and most deliberate difference. The conformance corpus is restricted to the intersection (see [README](./README.md#the-shared-expression-subset)); it is not evidence that arbitrary Cerbos policies port over. A CEL→`$expr` importer is tracked separately as a product item, not a bug.
+This is the largest and most deliberate difference. The conformance corpus is restricted to the intersection (see [README](./README.md#the-shared-expression-subset)); it is not evidence that arbitrary Cerbos policies port over. The `@alexify/kerberos/cerbos` subpath ships a real CEL→`$expr` importer for the translatable subset (macros, `matches()` and extension functions still throw — see the "Importing Cerbos policies" guide), and `importer.test.js` re-runs this whole suite through it.
 
 ## Not implemented
 

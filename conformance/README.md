@@ -41,7 +41,8 @@ docker run --rm -v "$PWD/conformance/policies:/policies:ro" \
 | `policies/*.yaml`    | The shared corpus, in Cerbos policy format (`apiVersion: api.cerbos.dev/v1`). Served verbatim to a real PDP.                   |
 | `suites/*_test.yaml` | Decision expectations, in Cerbos's [`TestSuite`](https://api.cerbos.dev/latest/cerbos/policy/v1/TestSuite.schema.json) format. |
 | `suites/*_plan.yaml` | Query-plan expectations, shaped after Cerbos's internal `QueryPlannerTestSuite` golden files.                                  |
-| `lib/load.js`        | Maps Cerbos policy documents onto Kerberos policies.                                                                           |
+| `importer.test.js`   | Re-runs every suite against an engine built via the public `/cerbos` importer (real YAML parsing + CEL translation).           |
+| `lib/load.js`        | Maps Cerbos policy documents onto Kerberos policies (test-harness structural mapper, not the importer).                        |
 | `lib/suite.js`       | Expands suite fixtures into flat cases.                                                                                        |
 | `lib/canonical.js`   | Canonicalizes plan filters before comparison.                                                                                  |
 | `lib/pdp.js`         | Live-PDP HTTP client.                                                                                                          |
@@ -49,7 +50,7 @@ docker run --rm -v "$PWD/conformance/policies:/policies:ro" \
 
 ## The shared expression subset
 
-Cerbos conditions are **CEL**; Kerberos conditions are JavaScript expressions parsed by jsep and walked by an allowlist interpreter. There is no CEL parser here — a Cerbos importer is a much larger piece of work and belongs in the package, not in a test harness.
+Cerbos conditions are **CEL**; Kerberos conditions are JavaScript expressions parsed by jsep and walked by an allowlist interpreter. There is deliberately no CEL parser in this harness — the real importer lives in the package, on the [`@alexify/kerberos/cerbos` subpath](../docs/guide/cerbos-import.md), and `importer.test.js` re-runs every suite through it so the two loading paths cannot drift.
 
 Instead the corpus is restricted to expressions that are **simultaneously valid CEL and valid Kerberos `$expr`**, so one source string feeds both engines unchanged:
 

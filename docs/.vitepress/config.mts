@@ -191,6 +191,7 @@ export default withMermaid(
             items: [
               { text: 'Caching & dynamic policies', link: '/guide/caching' },
               { text: 'Serialization & security', link: '/guide/serialization' },
+              { text: 'Cerbos policy import', link: '/guide/cerbos-import' },
               { text: 'ReBAC (Relations)', link: '/guide/rebac' },
               { text: 'Built-in resolver', link: '/guide/relations-resolver' },
               { text: 'Query plans', link: '/guide/query-plans' },

@@ -40,6 +40,17 @@ Opt-in ReBAC — kept out of the main entry so non-ReBAC bundles do not grow:
 | `RelationSchema` | Compiles the relation-schema DSL standalone (validated schemas reusable across resolvers). |
 | `Relations*Schemas`, parse helpers | Schema builders / parsers for the resolver's shapes (three validation backends). |
 
+## `@alexify/kerberos/cerbos`
+
+The [Cerbos policy importer](/guide/cerbos-import) — kept out of the main entry so bundles that never import Cerbos policies do not grow:
+
+| Export | Purpose |
+| ------ | ------- |
+| `importCerbosPolicies` | Cerbos YAML/JSON documents → `{ policies, derivedRoles }` serialized Kerberos documents. |
+| `celToExpr` | Translates one CEL expression into a `$expr`-compatible JavaScript expression string. |
+| `parseYamlDocuments` | The zero-dependency YAML-subset parser, standalone. |
+| `KerberosImportError` | Typed error for unsupported constructs (carries `line` for YAML errors). |
+
 ## `@alexify/kerberos/tests`
 
 Dev/test only — not loaded by the main entry:
