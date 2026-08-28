@@ -37,7 +37,14 @@ _Enforcement: documented._
 
 ### Role-policy scope: Cerbos's docs and engine disagree — we follow the engine
 
-Cerbos's role-policies page calls the `scope` field an "optional **principal** scope", but its rule table places role-policy rows in the resource pass, matched against the **resource** scope chain and the resource `policyVersion` — and a live 0.55.0 PDP confirms the source (a role policy scoped `acme` applies when the _resource_ carries `scope: acme`, not when the principal does). Kerberos follows the observable engine behaviour.
+Cerbos's role-policies page calls the `scope` field an "optional **principal** scope", but its rule table places role-policy rows in the resource pass (`PolicyKind: KIND_RESOURCE`), matched against the **resource** scope chain and the resource `policyVersion`. A live 0.55.0 PDP confirms the source. With `RT@acme` allowlisting only `other` and `RT@base` allowlisting `ping`:
+
+| request                                    | Cerbos                                                    |
+| ------------------------------------------ | --------------------------------------------------------- |
+| `principal.scope: acme`, resource unscoped | `ping` = `ALLOW` — the acme role policy did **not** apply |
+| principal unscoped, `resource.scope: acme` | `ping` = `DENY` — the acme role policy **did** apply      |
+
+Kerberos follows the observable engine behaviour.
 
 _Enforcement: corpus (`suites/scope_walk_test.yaml`, both directions)._
 
@@ -47,11 +54,20 @@ Cerbos compiles patterns with gobwas/glob (`:` separator; a bare `*` is rewritte
 
 _Enforcement: corpus + `test/Matching.test.js`._
 
-### Condition runtime errors
+### Condition runtime errors — Cerbos skips the rule, Kerberos fails closed
 
-Cerbos treats a condition that throws as _not satisfied_ and carries on (its `strictEvaluation` flag turns such errors into denials; note Cerbos's own conditions page claims 0.55 fails closed on DENY-rule errors, which its engine page and source contradict). Kerberos has a different granularity: the request-level `onError: 'throw' | 'deny'` option — there is no per-rule skip-on-error mode.
+Verified on 0.55.0 with a DENY rule whose condition raises at runtime (`R.attr.missing.deep`, a CEL "no such key" and a JS `TypeError` respectively), over a resource policy that otherwise allows the action:
 
-_Enforcement: documented._
+|              | default config                                | `strictEvaluation: true` |
+| ------------ | --------------------------------------------- | ------------------------ |
+| **Cerbos**   | `EFFECT_ALLOW` — the erroring rule is skipped | `EFFECT_DENY`            |
+| **Kerberos** | `EFFECT_DENY`                                 | n/a                      |
+
+Cerbos's engine page documents this and warns about it in as many words: the expression is _"treated as not satisfied and the evaluation carries on"_, so _"an `EFFECT_DENY` rule could be silently skipped"_. Its **conditions page contradicts this**, claiming that from v0.55 a DENY rule whose condition errors fails closed — the engine page and the v0.55.0 source are right, and the observed behaviour matches them.
+
+Kerberos has no per-rule skip-on-error mode. The error surfaces through the request-level `onError` option (`'throw'` propagates it, `'deny'` fails closed), and inside a `checkResources` batch a rejected resource is isolated to a fail-closed `EFFECT_DENY` carrying `reason: 'evaluation-error'`. The divergence is therefore in the safe direction, but it is a real difference in decisions.
+
+_Enforcement: corpus (`suites/conderr_test.yaml`, recorded via `cerbosActions`)._
 
 ### Plan operators
 
