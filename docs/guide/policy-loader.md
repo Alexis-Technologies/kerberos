@@ -41,7 +41,7 @@ const { policies, derivedRoles, version } = loadPolicyBundle('./dist/policies.bu
 const kerberos = new Kerberos(policies, derivedRoles);
 ```
 
-`loadPolicyBundle` recomputes the hash on load (`verify: false` opts out) and accepts either a file path or an already-parsed object — so the same verification works for a bundle fetched from S3 or a database. `createPolicyBundle(content, { createdAt: null })` produces byte-reproducible output for content-addressed storage.
+The same artifact is one command away: `npx kerberos bundle ./policies --out dist/policies.bundle.json` (add `--reproducible` for byte-stable output). `loadPolicyBundle` recomputes the hash on load (`verify: false` opts out) and accepts either a file path or an already-parsed object — so the same verification works for a bundle fetched from S3 or a database. `createPolicyBundle(content, { createdAt: null })` produces byte-reproducible output for content-addressed storage.
 
 Bundles hold **serialized** documents only (`{ $expr }` descriptors) — trying to bundle deserialized policies (live functions) throws instead of silently producing a hollow artifact.
 

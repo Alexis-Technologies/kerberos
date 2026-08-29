@@ -19,6 +19,16 @@ cross-request instance memo, audit-stream completeness (fail-closed denials,
 
 ### Added
 
+- **Policy-testing CLI.** The package now ships a `kerberos` binary:
+  `kerberos test <policiesDir> <testsDir>` runs Cerbos-`TestSuite`-format
+  suites (`*_test.yaml`/`*_test.json`, named fixtures + expected effects)
+  against a policy directory — policies load through the `/loader` subpath
+  (Kerberos JSON + Cerbos YAML/JSON), `{ $expr }` conditions resolve jsep
+  from the caller's project, `--schemas reject|warn` wires `_schemas/` into
+  attribute-schema enforcement, `--json` emits a machine-readable report,
+  and unsupported expectation features fail the run instead of silently
+  passing. `kerberos bundle <dir> --out <file> [--reproducible]` bakes a
+  hash-stamped policy bundle.
 - **File/directory policy loader + versioned bundles** — the new Node-only
   **`@alexify/kerberos/loader`** subpath: `loadPolicyDirectory` /
   `loadPolicyFile` read policy-as-code repositories (Kerberos serialized

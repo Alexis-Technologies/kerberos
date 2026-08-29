@@ -1,0 +1,57 @@
+name: DocumentSuite
+principals:
+  owner:
+    id: u1
+    roles: ['USER']
+  editor:
+    id: e1
+    roles: ['EDITOR']
+  reader:
+    id: r1
+    roles: ['READER']
+resources:
+  own_doc:
+    kind: document
+    id: d1
+    attr:
+      ownerId: u1
+      status: READY
+  other_doc:
+    kind: document
+    id: d2
+    attr:
+      ownerId: someone-else
+      status: DRAFT
+tests:
+  - name: owners can view their documents
+    input:
+      actions: ['view']
+    expected:
+      - principal: owner
+        resource: own_doc
+        actions:
+          view: EFFECT_ALLOW
+      - principal: owner
+        resource: other_doc
+        actions:
+          view: EFFECT_DENY
+  - name: editors publish only READY documents
+    input:
+      actions: ['publish']
+    expected:
+      - principal: editor
+        resource: own_doc
+        actions:
+          publish: EFFECT_ALLOW
+      - principal: editor
+        resource: other_doc
+        actions:
+          publish: EFFECT_DENY
+  - name: readers never publish
+    input:
+      actions: ['publish', 'view']
+    expected:
+      - principal: reader
+        resource: own_doc
+        actions:
+          publish: EFFECT_DENY

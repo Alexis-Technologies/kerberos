@@ -3,6 +3,9 @@
   "version": "3.1.0",
   "description": "Fast, zero-dependency in-process authorization engine for Node.js and browsers — ABAC, RBAC and ReBAC (Zanzibar-style relations) with Cerbos-like policies, caveats, OpenTelemetry and pluggable validation/caching",
   "main": "index.js",
+  "bin": {
+    "kerberos": "bin/kerberos.js"
+  },
   "browser": {
     "./index.js": "./browser.js",
     "./src/runtime/node.js": "./src/runtime/browser.js",
@@ -43,9 +46,9 @@
     "test:types": "tsd",
     "test:conformance": "node --test conformance/*.test.js",
     "bench": "node bench/bench.js",
-    "lint": "oxlint src test scripts bench conformance",
-    "format": "oxfmt src test scripts bench conformance",
-    "format:check": "oxfmt --check src test scripts bench conformance",
+    "lint": "oxlint src test scripts bench conformance bin",
+    "format": "oxfmt src test scripts bench conformance bin",
+    "format:check": "oxfmt --check src test scripts bench conformance bin",
     "size": "node scripts/size.js",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
@@ -136,6 +139,7 @@
     "cerbos.d.ts",
     "loader.js",
     "loader.d.ts",
+    "bin/",
     "src/",
     "LICENSE",
     "README.md",

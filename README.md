@@ -95,6 +95,7 @@ await kerberos.isAllowed({
 - [Query Plans (planResources)](#query-plans-planresources)
   - [How a plan is composed](#how-a-plan-is-composed) · [Operators](#operators) · [Writing plannable policies](#writing-plannable-policies) · [Translating a plan](#translating-a-plan)
 - [Testing](#testing)
+  - [CLI](#policy-testing-from-the-command-line)
 - [Schema Validation](#schema-validation)
   - [Zod](#using-zod) · [JSON Schema + Ajv](#using-json-schema--ajv) · [TypeBox + Ajv](#using-typebox--ajv) · [Explicit Builders](#using-explicit-builders) · [Attribute schemas](#attribute-schemas-cerbos-schemas)
 - [OpenTelemetry](#opentelemetry)
@@ -1702,6 +1703,25 @@ describe('KerberosTests', () => {
   });
 });
 ```
+
+### Policy testing from the command line
+
+The package ships a `kerberos` CLI, so a **pure policy repository** — no engineering glue, no hand-written test harness — can test itself in CI:
+
+```bash
+npx kerberos test ./policies ./tests
+```
+
+- Policies load exactly like [`loadPolicyDirectory`](#loading-policies-from-files): Kerberos JSON and Cerbos YAML/JSON mix freely, `{ $expr }` conditions resolve `jsep` (+ the documented plugins) from **your** project.
+- Test suites are **Cerbos's own [`TestSuite`](https://api.cerbos.dev/latest/cerbos/policy/v1/TestSuite.schema.json) format** (`*_test.yaml` / `*_test.json`): named principal/resource fixtures plus expected effects per action — reviewable, engine-agnostic artifacts.
+- `--schemas reject|warn` wires `_schemas/` into [attribute-schema enforcement](#attribute-schemas-cerbos-schemas); `--json` prints a machine-readable report; the exit code is `1` on any failing case (`2` for usage/config errors).
+- The runner refuses to guess: an expectation feature it does not check (e.g. `outputs`) fails the run instead of silently passing.
+
+```bash
+npx kerberos bundle ./policies --out dist/policies.bundle.json --reproducible
+```
+
+bakes the repo into a [hash-stamped bundle](#loading-policies-from-files) for GitOps pipelines.
 
 ### Testing with Outputs
 

@@ -125,3 +125,23 @@ describe('Outputs functionality', () => {
   });
 });
 ```
+
+## Policy testing from the command line
+
+The package ships a `kerberos` CLI, so a **pure policy repository** — no engineering glue, no hand-written test harness — can test itself in CI:
+
+```bash
+npx kerberos test ./policies ./tests
+```
+
+- Policies load exactly like [`loadPolicyDirectory`](/guide/policy-loader): Kerberos JSON and Cerbos YAML/JSON mix freely, `{ $expr }` conditions resolve `jsep` (+ the documented plugins) from **your** project.
+- Test suites are **Cerbos's own [`TestSuite`](https://api.cerbos.dev/latest/cerbos/policy/v1/TestSuite.schema.json) format** (`*_test.yaml` / `*_test.json`): named principal/resource fixtures plus expected effects per action — reviewable, engine-agnostic artifacts.
+- `--schemas reject|warn` wires `_schemas/` into [attribute-schema enforcement](/guide/schema-validation#attribute-schemas-cerbos-schemas); `--json` prints a machine-readable report; the exit code is `1` on any failing case (`2` for usage/config errors).
+- The runner refuses to guess: an expectation feature it does not check (e.g. `outputs`) fails the run instead of silently passing.
+
+```bash
+npx kerberos bundle ./policies --out dist/policies.bundle.json --reproducible
+```
+
+bakes the repo into a [hash-stamped bundle](/guide/policy-loader) for GitOps pipelines.
+
