@@ -45,7 +45,7 @@ Bundle size for the browser, measured the same way as the table above (`pnpm siz
 
 | Library | min+gzip |
 | ------- | --------:|
-| `@alexify/kerberos` (main entry) | 31.4 KB |
+| `@alexify/kerberos` (main entry) | 31.9 KB |
 | `@casl/ability` | 6.6 KB |
 | `casbin` | 33.9 KB — does not bundle for the browser (Node builtins); measured as a Node bundle |
 
