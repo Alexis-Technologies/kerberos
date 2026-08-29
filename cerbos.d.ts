@@ -38,9 +38,10 @@ export type CerbosImportInput = string | Record<string, unknown> | ReadonlyArray
 
 export interface CerbosImportOptions {
   /**
-   * Unsupported-but-droppable Cerbos features to discard instead of throwing
-   * on. Only `'schemas'` (validation-only attribute schema references) is
-   * droppable — everything else the importer cannot translate always throws.
+   * Features to discard instead of importing. `'schemas'` blocks translate by
+   * default (enforced via the engine's `schemas` option); drop them when you
+   * have no schema definitions to wire. Everything the importer cannot
+   * translate faithfully still always throws.
    */
   drop?: ReadonlyArray<'schemas'>;
 }

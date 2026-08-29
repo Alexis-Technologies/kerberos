@@ -32,7 +32,7 @@ Because the importer's output is plain JSON with `{ $expr }` descriptors, it is 
 
 The importer never drops or approximates anything. Every Cerbos construct is either translated with faithful semantics or rejected with a `KerberosImportError` naming the construct and its location (`document.resourcePolicy.rules[2]: …`). A silently-skipped rule or a mistranslated condition would change authorization decisions without a trace — the importer treats that as the one unacceptable outcome.
 
-The single, explicitly-opt-in exception: `importCerbosPolicies(input, { drop: ['schemas'] })` discards `schemas` blocks (attribute-schema references, a validation-only feature Kerberos [does not implement](https://github.com/Alexis-Technologies/kerberos/blob/main/conformance/DIVERGENCES.md)) instead of throwing on them.
+The single, explicitly-opt-in exception: `importCerbosPolicies(input, { drop: ['schemas'] })` discards `schemas` blocks (attribute-schema references, enforced through the [`schemas` engine option](/guide/schema-validation#attribute-schemas-cerbos-schemas)) when you have no schema definitions to wire.
 
 ## API
 
@@ -57,7 +57,7 @@ The single, explicitly-opt-in exception: `importCerbosPolicies(input, { drop: ['
 | `variables.local` (CEL strings), `constants.local` (literal JSON) | `variables` / `constants` with `{ $expr }` / literals |
 | `output.expr`, `output.when.ruleActivated` / `conditionNotMet` | `{ $expr }` output descriptors |
 
-Always rejected (Kerberos does not implement them): `schemas` (droppable), `exportVariables` / `exportConstants` and `variables.import`, `scopePermissions: REQUIRE_PARENTAL_CONSENT_FOR_ALLOWS`, script conditions, unknown keys at any level.
+`schemas:` blocks translate verbatim — wire their definitions into the [`schemas` engine option](/guide/schema-validation#attribute-schemas-cerbos-schemas) to enforce them, or discard them with `drop: ['schemas']`. Always rejected (Kerberos does not implement them): `exportVariables` / `exportConstants` and `variables.import`, `scopePermissions: REQUIRE_PARENTAL_CONSENT_FOR_ALLOWS`, script conditions, unknown keys at any level.
 
 ## The CEL → `$expr` translation
 

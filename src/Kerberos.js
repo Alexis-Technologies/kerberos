@@ -8,6 +8,7 @@ const { createLoggerWriter } = require('./logging.js');
 const { createTelemetryWriter } = require('./telemetry.js');
 const { createCacheReader } = require('./caching/cache.js');
 const { KerberosCodecError, KerberosRelationsError, KerberosValidationError } = require('./errors.js');
+const { createAttributeSchemaRegistry, validateRequestAttributes } = require('./attributeSchemas.js');
 const { createLimiter, settleAll, withTimeout } = require('./async.js');
 const { createSafeExprCodec } = require('./caching/codec.js');
 const { PlanKind, countLeaves, toDebugString, toFilter } = require('./planning/nodes.js');
@@ -242,6 +243,8 @@ class Kerberos {
 
   #onError = 'throw';
 
+  #schemas = null;
+
   // `cacheRetry.onExhausted`: 'throw' (default, fail-closed) or 'miss' — after
   // the reader exhausts its retries, count the read as a cache miss so the
   // scope-chain walk continues to lower-precedence static sources instead of
@@ -337,6 +340,7 @@ class Kerberos {
       relations,
       relationsTimeoutMs,
       maxConcurrency,
+      schemas,
       z,
       ajv,
       typebox,
@@ -353,6 +357,7 @@ class Kerberos {
       relations: null,
       relationsTimeoutMs: 0,
       maxConcurrency: null,
+      schemas: null,
       z: null,
       ajv: null,
       typebox: null,
@@ -412,6 +417,11 @@ class Kerberos {
     this.#typebox = typebox ?? null;
 
     if (this.#ajv) registerAjvKeywords(this.#ajv);
+
+    // Attribute-schema enforcement (Cerbos `schemas` parity): compiled once
+    // here; null when unset or `enforcement: 'none'` — the evaluation drivers
+    // skip the whole feature on a single falsy check.
+    this.#schemas = createAttributeSchemaRegistry(schemas, this.#ajv);
 
     // Backend dispatch happens ONCE (priority mirrors resolveValidationAdapter:
     // Zod → TypeBox+Ajv → JSON Schema+Ajv), then every validator wires through
@@ -1131,9 +1141,9 @@ class Kerberos {
    * (with its OWN imported derived roles — imports are per policy, not
    * inherited) and the role-policy rows found at that scope.
    */
-  async #getDecisionScopes(req, trace, relationsMemo, lookups, otel) {
+  async #getDecisionScopes(req, trace, relationsMemo, lookups, otel, precomputedResourceChain = null) {
     const { rowsByScope } = await this.#getRoleRows(req, trace, lookups);
-    const resourceChain = await this.#getResourcePolicyChain(req, trace, lookups);
+    const resourceChain = precomputedResourceChain ?? (await this.#getResourcePolicyChain(req, trace, lookups));
 
     const chainByScope = new Map();
     for (const entry of resourceChain) chainByScope.set(entry.scope, entry);
@@ -1257,6 +1267,20 @@ class Kerberos {
     // itself stays gated on the per-request flag at the call sites.
     const trace = req.includeMeta || (this.#auditIncludeMeta && this.#logger.enabled) ? [] : null;
 
+    // Attribute-schema enforcement runs FIRST: under `reject`, a request
+    // whose attributes fail validation is denied outright — a principal
+    // policy cannot rescue it. The resolved resource chain is threaded into
+    // #getDecisionScopes so enforcement never adds a second chain lookup.
+    let validationErrors = null;
+    let resourceChain = null;
+    if (this.#schemas) {
+      resourceChain = await this.#getResourcePolicyChain(req, trace, lookups);
+      validationErrors = validateRequestAttributes(this.#schemas, resourceChain, req);
+      if (validationErrors.length && this.#schemas.enforcement === 'reject') {
+        return Kerberos.#invalidAttributesResult(req, trace, validationErrors);
+      }
+    }
+
     const principalChain = await this.#getPrincipalPolicyChain(req, trace, lookups);
     const principalResult = Kerberos.#evaluatePrincipalChain(principalChain, req);
 
@@ -1268,11 +1292,30 @@ class Kerberos {
     let layerResult = null;
     if (unresolvedActions.length) {
       const layerReq = unresolvedActions.length === req.actions.length ? req : { ...req, actions: unresolvedActions };
-      const scopes = await this.#getDecisionScopes(layerReq, trace, relationsMemo, lookups, otel);
+      const scopes = await this.#getDecisionScopes(layerReq, trace, relationsMemo, lookups, otel, resourceChain);
       layerResult = evaluateDecisionLayer({ req: layerReq, scopes });
     }
 
-    return Kerberos.#mergeSourceResults(req, trace, principalResult, layerResult);
+    const merged = Kerberos.#mergeSourceResults(req, trace, principalResult, layerResult);
+    if (validationErrors?.length) merged.validationErrors = validationErrors;
+    return merged;
+  }
+
+  /**
+   * The fail-closed result of `schemas.enforcement: 'reject'` on invalid
+   * attributes: every action denies with `reason: 'invalid-attributes'`, and
+   * the failures ride the result as Cerbos-shaped `validationErrors`.
+   */
+  static #invalidAttributesResult(req, trace, validationErrors) {
+    const effects = new Map();
+    const actionsMeta = {};
+    for (const action of req.actions) {
+      effects.set(action, Effect.Deny);
+      actionsMeta[action] = { reason: 'invalid-attributes' };
+    }
+    const meta = { actions: actionsMeta, effectiveDerivedRoles: [] };
+    if (trace) meta.resolution = trace;
+    return { effects, outputs: new Map(), meta, validationErrors };
   }
 
   /**
@@ -1463,16 +1506,18 @@ class Kerberos {
     return importedRoles;
   }
 
-  #getDecisionScopesSync(req, trace) {
+  #getDecisionScopesSync(req, trace, precomputedResourceChain = null) {
     const rowsByScope = this.#getRoleRowsSync(req, trace);
-    const resourceChain = this.#resolvePolicyChainFromMemory(
-      'resource',
-      this.#resourcePolicies,
-      req.R.kind,
-      req.R.policyVersion ?? DEFAULT_VERSION,
-      req.R.scope,
-      trace,
-    );
+    const resourceChain =
+      precomputedResourceChain ??
+      this.#resolvePolicyChainFromMemory(
+        'resource',
+        this.#resourcePolicies,
+        req.R.kind,
+        req.R.policyVersion ?? DEFAULT_VERSION,
+        req.R.scope,
+        trace,
+      );
 
     const chainByScope = new Map();
     for (const entry of resourceChain) chainByScope.set(entry.scope, entry);
@@ -1493,6 +1538,23 @@ class Kerberos {
   #evaluatePolicySourcesSync(req) {
     const trace = req.includeMeta || (this.#auditIncludeMeta && this.#logger.enabled) ? [] : null;
 
+    let validationErrors = null;
+    let resourceChain = null;
+    if (this.#schemas) {
+      resourceChain = this.#resolvePolicyChainFromMemory(
+        'resource',
+        this.#resourcePolicies,
+        req.R.kind,
+        req.R.policyVersion ?? DEFAULT_VERSION,
+        req.R.scope,
+        trace,
+      );
+      validationErrors = validateRequestAttributes(this.#schemas, resourceChain, req);
+      if (validationErrors.length && this.#schemas.enforcement === 'reject') {
+        return Kerberos.#invalidAttributesResult(req, trace, validationErrors);
+      }
+    }
+
     const principalChain = this.#resolvePolicyChainFromMemory(
       'principal',
       this.#principalPolicies,
@@ -1511,10 +1573,15 @@ class Kerberos {
     let layerResult = null;
     if (unresolvedActions.length) {
       const layerReq = unresolvedActions.length === req.actions.length ? req : { ...req, actions: unresolvedActions };
-      layerResult = evaluateDecisionLayer({ req: layerReq, scopes: this.#getDecisionScopesSync(layerReq, trace) });
+      layerResult = evaluateDecisionLayer({
+        req: layerReq,
+        scopes: this.#getDecisionScopesSync(layerReq, trace, resourceChain),
+      });
     }
 
-    return Kerberos.#mergeSourceResults(req, trace, principalResult, layerResult);
+    const merged = Kerberos.#mergeSourceResults(req, trace, principalResult, layerResult);
+    if (validationErrors?.length) merged.validationErrors = validationErrors;
+    return merged;
   }
 
   #buildResponseResource(resource) {
@@ -1610,13 +1677,14 @@ class Kerberos {
         // driver skips the interior async frames entirely. Otherwise:
         // single-shot call, no lookups memo — #resolvePolicy's fast path
         // skips the memo bookkeeping (batching is checkResources' job).
-        const { effects, outputs, meta } =
+        const evaluated =
           !this.#cache.enabled && !this.#relations
             ? this.#evaluatePolicySourcesSync(req)
             : await this.#evaluatePolicySources(req, relationsMemo, null, otel);
+        const { effects } = evaluated;
         const isAllowed = effects.get(parsedArgs.action) === Effect.Allow || effects.get(ALL_ACTIONS) === Effect.Allow;
 
-        const input = [{ req, result: { effects, outputs, meta } }];
+        const input = [{ req, result: evaluated }];
         this.#log(input, reqKind, callId);
         this.#telemetry.recordDecisions(otel, input, reqKind);
 
@@ -1752,15 +1820,19 @@ class Kerberos {
             continue;
           }
 
-          const { effects, outputs, meta } = settled[i].value;
+          const { effects, outputs, meta, validationErrors } = settled[i].value;
           const result = {
             resource: this.#buildResponseResource(resource),
             actions: this.#effectsToResponse(effects, effectAsBoolean),
             outputs: [...outputs.values()],
           };
+          // Cerbos parity: attribute-validation failures ride the result
+          // unconditionally — they are facts about the request, not optional
+          // debugging metadata, so they are NOT gated on includeMeta.
+          if (validationErrors?.length) result.validationErrors = validationErrors;
           if (req.includeMeta) result.meta = meta;
           results.push(result);
-          inputForLog.push({ req, result: { effects, outputs, meta } });
+          inputForLog.push({ req, result: { effects, outputs, meta, validationErrors } });
         }
 
         this.#log(inputForLog, reqKind, callId);

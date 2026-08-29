@@ -19,6 +19,17 @@ cross-request instance memo, audit-stream completeness (fail-closed denials,
 
 ### Added
 
+- **Attribute schema enforcement** (Cerbos `schemas` parity). Resource
+  policies now accept a `schemas:` block (`principalSchema` /
+  `resourceSchema` refs with `ignoreWhen.actions` globs), enforced through
+  the new `schemas` engine option: `definitions` maps refs to validators
+  (JSON Schema via `ajv`, Zod, or plain functions), `enforcement` picks
+  `reject` (deny + Cerbos-shaped `validationErrors` on the result) / `warn`
+  (report only) / `none`. Unset ⇒ schema refs stay inert, matching Cerbos's
+  default. Failures always reach `checkResources` results and the audit log;
+  denied actions carry `reason: 'invalid-attributes'` under `includeMeta`.
+  The Cerbos importer now translates `schemas:` blocks verbatim instead of
+  requiring `drop: ['schemas']`.
 - **Cerbos policy importer** — the new **`@alexify/kerberos/cerbos`** subpath
   turns an existing Cerbos policy repository into Kerberos policies, with zero
   dependencies: `importCerbosPolicies` (YAML/JSON documents → serialized

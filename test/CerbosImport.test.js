@@ -235,24 +235,35 @@ resourcePolicy:
     });
   });
 
-  it('drops schemas only when explicitly asked to', () => {
+  it('translates schemas blocks by default and drops them on request', () => {
     const withSchemas = `
 apiVersion: api.cerbos.dev/v1
 resourcePolicy:
   version: default
   resource: doc
   schemas:
+    principalSchema:
+      ref: cerbos:///principal.json
     resourceSchema:
       ref: cerbos:///doc.json
+      ignoreWhen:
+        actions: ['create']
   rules:
     - actions: ['view']
       effect: EFFECT_ALLOW
       roles: ['USER']
 `;
-    assert.throws(() => importCerbosPolicies(withSchemas), /attribute schema enforcement/);
-    const { policies } = importCerbosPolicies(withSchemas, { drop: ['schemas'] });
-    assert.equal(policies.length, 1);
-    assert.equal('schemas' in policies[0].resourcePolicy, false);
+    const { policies } = importCerbosPolicies(withSchemas);
+    assert.deepEqual(policies[0].resourcePolicy.schemas, {
+      principalSchema: { ref: 'cerbos:///principal.json' },
+      resourceSchema: { ref: 'cerbos:///doc.json', ignoreWhen: { actions: ['create'] } },
+    });
+    const dropped = importCerbosPolicies(withSchemas, { drop: ['schemas'] });
+    assert.equal('schemas' in dropped.policies[0].resourcePolicy, false);
+    assert.throws(
+      () => importCerbosPolicies(withSchemas.replace('ref: cerbos:///doc.json', 'mystery: 1')),
+      /unrecognized key/,
+    );
   });
 });
 

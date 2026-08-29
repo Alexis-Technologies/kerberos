@@ -95,7 +95,7 @@ await kerberos.isAllowed({
   - [How a plan is composed](#how-a-plan-is-composed) · [Operators](#operators) · [Writing plannable policies](#writing-plannable-policies) · [Translating a plan](#translating-a-plan)
 - [Testing](#testing)
 - [Schema Validation](#schema-validation)
-  - [Zod](#using-zod) · [JSON Schema + Ajv](#using-json-schema--ajv) · [TypeBox + Ajv](#using-typebox--ajv) · [Explicit Builders](#using-explicit-builders)
+  - [Zod](#using-zod) · [JSON Schema + Ajv](#using-json-schema--ajv) · [TypeBox + Ajv](#using-typebox--ajv) · [Explicit Builders](#using-explicit-builders) · [Attribute schemas](#attribute-schemas-cerbos-schemas)
 - [OpenTelemetry](#opentelemetry)
 - [Benchmarks](#benchmarks)
 - [Changelog](#changelog) · [License](#license) · [Used by](#used-by)
@@ -720,6 +720,7 @@ const kerberos = new Kerberos(policies, derivedRoles, {
 - **`audit`** (`{ includeMeta?: boolean }`): Engine-level audit enrichment. With `{ includeMeta: true }` and a logger attached, decision tracing runs for **every** request, so audit entries always carry `meta.resolution` and the `policy-miss` reason — audit completeness stops depending on each call site remembering the per-request `includeMeta` flag. The response stays gated on the request flag.
 - **`maxConcurrency`** (`number`, unbounded by default): Caps how many resources of a `checkResources` batch evaluate at once. Without it a 10k-resource batch launches 10k concurrent evaluation chains (each issuing its own cache reads) — memory spikes, event-loop saturation and a thundering herd on the cache backend. The built-in `RelationResolver` accepts the same option for its `lookupResources` candidate-verification fan-out.
 - **`codec`** (PolicyCodec): How cached policy documents are transformed before construction: `{ jsep }` enables the built-in safe `$expr` evaluator, `{ deserialize }` plugs in your own logic, and when omitted cached values are passed to policy constructors **as-is** — see [`codec` option — three modes](#codec-option--three-modes).
+- **`schemas`** (`{ enforcement?, definitions? }`): **Attribute schema enforcement** — Cerbos [`schemas`](https://docs.cerbos.dev/cerbos/latest/policies/schemas) parity. Resource policies declare `schemas.principalSchema` / `resourceSchema` refs (with optional `ignoreWhen.actions` globs); this option maps the refs to validators and picks the level: `'reject'` (default when set) denies requests whose attributes fail validation, `'warn'` reports without changing decisions, `'none'` disables (the Cerbos default when unconfigured). Failures are returned as Cerbos-shaped `validationErrors` (`{ path, message, source }`) on `checkResources` results — regardless of `includeMeta` — and reach the audit log. A definition may be a JSON Schema object (compiled with the `ajv` option), a Zod schema, or a validator function. See [Attribute schemas](#attribute-schemas-cerbos-schemas).
 - **`relations`** (KerberosRelationsResolver): ReBAC resolver used by relation-backed derived roles — any object with a `check(args, opts)` method (and an optional batched `list`). See [ReBAC (Relations)](#rebac-relations).
 - **`z`**: Enables validation using the built-in Zod schema builders.
 - **`ajv`**: Enables validation using the built-in JSON Schema builders compiled with Ajv.
@@ -1268,7 +1269,7 @@ Because the output is plain JSON with `{ $expr }` descriptors, it is also exactl
 
 ### What is translated
 
-All four document kinds (`resourcePolicy`, `principalPolicy`, `rolePolicy` — Cerbos role policies have no version, so `default` is assumed — and `derivedRoles`), including scopes, `importDerivedRoles`, nested `all`/`any`/`none` condition combinators, `variables.local` / `constants.local`, and `output.expr` / `output.when`. Policies with `disabled: true` are skipped, matching Cerbos's own loader; `scopePermissions: SCOPE_PERMISSIONS_OVERRIDE_PARENT` (the Cerbos default, and exactly what Kerberos implements) is accepted. Always rejected: `schemas` (unless dropped), `exportVariables`/`exportConstants` and `variables.import`, `REQUIRE_PARENTAL_CONSENT_FOR_ALLOWS`, script conditions, and unknown keys at any level.
+All four document kinds (`resourcePolicy`, `principalPolicy`, `rolePolicy` — Cerbos role policies have no version, so `default` is assumed — and `derivedRoles`), including scopes, `importDerivedRoles`, nested `all`/`any`/`none` condition combinators, `variables.local` / `constants.local`, and `output.expr` / `output.when`. Policies with `disabled: true` are skipped, matching Cerbos's own loader; `scopePermissions: SCOPE_PERMISSIONS_OVERRIDE_PARENT` (the Cerbos default, and exactly what Kerberos implements) is accepted. `schemas:` blocks translate verbatim (wire their definitions into the [`schemas` engine option](#attribute-schemas-cerbos-schemas) to enforce them; `drop: ['schemas']` discards them instead). Always rejected: `exportVariables`/`exportConstants` and `variables.import`, `REQUIRE_PARENTAL_CONSENT_FOR_ALLOWS`, script conditions, and unknown keys at any level.
 
 ### The CEL → `$expr` translation
 
@@ -1808,6 +1809,48 @@ Kerberos policies can contain JavaScript functions in:
 - outputs
 
 When using Ajv or TypeBox, Kerberos.js registers custom Ajv keywords so those function-bearing fields can still be validated at runtime. This keeps the DSL usable even though plain JSON Schema doesn't natively understand JavaScript functions.
+
+### Attribute schemas (Cerbos `schemas`)
+
+Conditions read `P.attr` / `R.attr` — and garbage attributes silently flow into them (an undefined comparison quietly denies or allows). Cerbos guards this with per-kind attribute schemas; Kerberos implements the same model:
+
+```javascript
+const kerberos = new Kerberos(
+  [{
+    resourcePolicy: {
+      version: 'default',
+      resource: 'expense',
+      schemas: {
+        principalSchema: { ref: 'principal.json' },
+        resourceSchema: { ref: 'expense.json', ignoreWhen: { actions: ['create'] } },
+      },
+      rules: [/* ... */],
+    },
+  }],
+  [],
+  {
+    ajv: new Ajv({ allErrors: true }),
+    schemas: {
+      enforcement: 'reject', // 'reject' | 'warn' | 'none'
+      definitions: {
+        'expense.json': { type: 'object', required: ['amount'], properties: { amount: { type: 'number' } } },
+        'principal.json': z.object({ department: z.string() }), // Zod works too
+      },
+    },
+  },
+);
+```
+
+Semantics (mirroring Cerbos):
+
+- **`reject`** — a request whose attributes fail validation is denied for **every** action (a principal policy cannot rescue it), with the failures reported as `validationErrors: [{ path, message, source: 'SOURCE_PRINCIPAL' | 'SOURCE_RESOURCE' }]` on the `checkResources` result and `reason: 'invalid-attributes'` under `includeMeta`.
+- **`warn`** — `validationErrors` are reported (response + audit log) but decisions are unaffected.
+- **`none`** / option absent — schema references in policies are inert, matching Cerbos's own default.
+- **`ignoreWhen.actions`** (Cerbos globs) skips validation only when **every** requested action matches — one non-matching action in the batch entry re-enables it.
+- With scoped policies, the **most specific** policy in the resource scope chain that declares `schemas` wins.
+- A policy referencing a ref missing from `definitions` throws `KerberosValidationError` (always — a configuration error never reads as valid *or* invalid).
+
+Definitions may be plain JSON Schema objects (compiled with the engine's `ajv` option), Zod-like schemas (anything with `safeParse`), or validator functions returning error messages. The [Cerbos importer](#importing-cerbos-policies) translates `schemas:` blocks verbatim, so an imported policy repo enforces the same rules once you wire its schema files into `definitions`.
 
 ## OpenTelemetry
 

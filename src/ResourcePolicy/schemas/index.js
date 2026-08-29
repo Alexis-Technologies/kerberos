@@ -46,6 +46,20 @@ class ResourcePolicyZodSchemas extends ZodSchemas {
       });
   }
 
+  static buildAttributeSchemaRefShape(z) {
+    return z.object({
+      ref: z.string().min(1),
+      ignoreWhen: z.object({ actions: z.array(z.string()).nonempty() }).optional(),
+    });
+  }
+
+  static buildAttributeSchemasShape(z) {
+    return z.object({
+      principalSchema: ResourcePolicyZodSchemas.buildAttributeSchemaRefShape(z).optional(),
+      resourceSchema: ResourcePolicyZodSchemas.buildAttributeSchemaRefShape(z).optional(),
+    });
+  }
+
   static buildResourcePolicyShape(z) {
     return z.object({
       version: z.string(),
@@ -55,6 +69,7 @@ class ResourcePolicyZodSchemas extends ZodSchemas {
       variables: z.union([VariablesZodSchemas.buildShape(z), z.instanceof(Variables)]).optional(),
       constants: z.union([ConstantsZodSchemas.buildShape(z), z.instanceof(Constants)]).optional(),
       importDerivedRoles: z.array(z.string()).optional(),
+      schemas: ResourcePolicyZodSchemas.buildAttributeSchemasShape(z).optional(),
     });
   }
 
@@ -100,6 +115,25 @@ class ResourcePolicyJsonSchemas extends JsonSchemas {
     };
   }
 
+  static buildAttributeSchemaRefShape() {
+    return JsonSchemas.buildObjectShape(
+      {
+        ref: { type: 'string', minLength: 1 },
+        ignoreWhen: JsonSchemas.buildObjectShape({ actions: JsonSchemas.buildNonEmptyArrayShape({ type: 'string' }) }, [
+          'actions',
+        ]),
+      },
+      ['ref'],
+    );
+  }
+
+  static buildAttributeSchemasShape() {
+    return JsonSchemas.buildObjectShape({
+      principalSchema: ResourcePolicyJsonSchemas.buildAttributeSchemaRefShape(),
+      resourceSchema: ResourcePolicyJsonSchemas.buildAttributeSchemaRefShape(),
+    });
+  }
+
   static buildResourcePolicyShape() {
     return JsonSchemas.buildObjectShape(
       {
@@ -117,6 +151,7 @@ class ResourcePolicyJsonSchemas extends JsonSchemas {
           type: 'array',
           items: { type: 'string' },
         },
+        schemas: ResourcePolicyJsonSchemas.buildAttributeSchemasShape(),
       },
       ['version', 'resource', 'rules'],
     );
@@ -167,6 +202,20 @@ class ResourcePolicyTypeBoxSchemas extends TypeBoxSchemas {
     ]);
   }
 
+  static buildAttributeSchemaRefShape(t) {
+    return t.Object({
+      ref: t.String({ minLength: 1 }),
+      ignoreWhen: t.Optional(t.Object({ actions: TypeBoxSchemas.buildNonEmptyArrayShape(t, t.String()) })),
+    });
+  }
+
+  static buildAttributeSchemasShape(t) {
+    return t.Object({
+      principalSchema: t.Optional(ResourcePolicyTypeBoxSchemas.buildAttributeSchemaRefShape(t)),
+      resourceSchema: t.Optional(ResourcePolicyTypeBoxSchemas.buildAttributeSchemaRefShape(t)),
+    });
+  }
+
   static buildResourcePolicyShape(t) {
     return t.Object({
       version: t.String(),
@@ -180,6 +229,7 @@ class ResourcePolicyTypeBoxSchemas extends TypeBoxSchemas {
         t.Union([ConstantsTypeBoxSchemas.buildShape(t), TypeBoxSchemas.buildInstanceOfShape(t, Constants)]),
       ),
       importDerivedRoles: t.Optional(t.Array(t.String())),
+      schemas: t.Optional(ResourcePolicyTypeBoxSchemas.buildAttributeSchemasShape(t)),
     });
   }
 

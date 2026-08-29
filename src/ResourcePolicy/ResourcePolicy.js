@@ -39,6 +39,8 @@ class ResourcePolicy {
 
   #shape = null;
 
+  #attributeSchemas = null;
+
   /**
    * @param {unknown} shape
    * @param {object} [options]
@@ -78,6 +80,21 @@ class ResourcePolicy {
       }
       this.#shape.resourcePolicy.rules = rules;
     }
+    // Attribute-schema bindings (Cerbos `schemas` parity): keep the compiled
+    // ignoreWhen matchers OFF the frozen shape (runtime-only state, like the
+    // rule matchers) — the engine reads them through `attributeSchemas`.
+    if (this.#shape.resourcePolicy.schemas) {
+      const bindings = {};
+      for (const key of ['principalSchema', 'resourceSchema']) {
+        const schemaRef = this.#shape.resourcePolicy.schemas[key];
+        if (!schemaRef) continue;
+        bindings[key] = {
+          ref: schemaRef.ref,
+          ignoreMatcher: schemaRef.ignoreWhen?.actions ? compileMatcher(schemaRef.ignoreWhen.actions) : null,
+        };
+      }
+      this.#attributeSchemas = Object.freeze(bindings);
+    }
     // Post-construction hardening: the parsed shape IS live evaluation state
     // (stored in the engine's policy Maps), and the constructor-time
     // duplicate/deny integrity guards would be bypassable by mutating
@@ -104,6 +121,15 @@ class ResourcePolicy {
 
   get importDerivedRoles() {
     return this.#shape.resourcePolicy.importDerivedRoles ?? [];
+  }
+
+  /**
+   * Attribute-schema bindings declared by this policy (`schemas:` block),
+   * with precompiled `ignoreWhen.actions` matchers — `null` when the policy
+   * declares none. Consumed by the engine's `schemas` enforcement option.
+   */
+  get attributeSchemas() {
+    return this.#attributeSchemas;
   }
 
   get rules() {

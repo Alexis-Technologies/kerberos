@@ -25,11 +25,14 @@ const IGNORED_TOP_LEVEL = new Set(['apiVersion', 'description', 'metadata', 'dis
 // Cerbos features Kerberos deliberately does not implement. Named explicitly
 // so the error message is actionable and doubles as documentation of the gap.
 const KNOWN_UNSUPPORTED = {
-  schemas: 'attribute schema enforcement (`schemas`)',
   exportVariables: 'exported variable sets (`exportVariables`)',
   exportConstants: 'exported constant sets (`exportConstants`)',
 };
 
+// Features that may be discarded with `drop: [...]` instead of imported —
+// `schemas` blocks translate by default (the engine's `schemas` option
+// enforces them), but a caller who has no schema definitions to wire may
+// deliberately drop them.
 const DROPPABLE = new Set(['schemas']);
 
 const EFFECTS = new Set(['EFFECT_ALLOW', 'EFFECT_DENY']);
@@ -141,6 +144,30 @@ function shared(body, where) {
   return { ...(variables && { variables }), ...(constants && { constants }) };
 }
 
+/** Cerbos `schemas: { principalSchema/resourceSchema: { ref, ignoreWhen } }` — passed through verbatim. */
+function translateSchemas(schemas, where) {
+  if (!schemas || typeof schemas !== 'object') unsupported('malformed schemas block', where);
+  assertKeys(schemas, new Set(['principalSchema', 'resourceSchema']), where, new Set());
+  const out = {};
+  for (const key of ['principalSchema', 'resourceSchema']) {
+    const ref = schemas[key];
+    if (ref === undefined) continue;
+    if (!ref || typeof ref !== 'object') unsupported(`malformed ${key}`, where);
+    assertKeys(ref, new Set(['ref', 'ignoreWhen']), `${where}.${key}`, new Set());
+    if (typeof ref.ref !== 'string' || ref.ref === '') unsupported(`${key} without a \`ref\``, where);
+    const entry = { ref: ref.ref };
+    if (ref.ignoreWhen !== undefined) {
+      assertKeys(ref.ignoreWhen, new Set(['actions']), `${where}.${key}.ignoreWhen`, new Set());
+      if (!Array.isArray(ref.ignoreWhen.actions) || ref.ignoreWhen.actions.length === 0) {
+        unsupported(`${key}.ignoreWhen without an actions list`, where);
+      }
+      entry.ignoreWhen = { actions: ref.ignoreWhen.actions };
+    }
+    out[key] = entry;
+  }
+  return out;
+}
+
 const TRANSLATORS = {
   resourcePolicy(body, where, drop) {
     assertKeys(
@@ -150,6 +177,7 @@ const TRANSLATORS = {
         'resource',
         'scope',
         'scopePermissions',
+        'schemas',
         'rules',
         'importDerivedRoles',
         'variables',
@@ -166,6 +194,7 @@ const TRANSLATORS = {
         resource: body.resource,
         ...(body.scope !== undefined && { scope: body.scope }),
         ...(body.importDerivedRoles && { importDerivedRoles: body.importDerivedRoles }),
+        ...(body.schemas && !drop.has('schemas') && { schemas: translateSchemas(body.schemas, `${where}.schemas`) }),
         ...shared(body, where),
         rules: body.rules.map((rule, i) => {
           const at = `${where}.rules[${i}]`;
