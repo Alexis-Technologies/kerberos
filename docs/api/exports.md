@@ -13,6 +13,7 @@ The full public surface of the package, by entry point.
 | `createSafeExprCodec`, `serializePolicy`, `deserializePolicy` | Safe AST codec for [dynamic/stored policies](/guide/caching). |
 | `PlanKind` | `{ AlwaysAllowed, AlwaysDenied, Conditional }` — [query plan](/guide/query-plans) filter kinds (const object, not an `enum`). |
 | `expandRelationOperands` | Materializes ReBAC `relation` operands of a [query plan](/guide/query-plans) into id filters. |
+| `toCerbosQueryPlan` | Converts a plan to the `@cerbos/core` SDK shape for the [official Cerbos ORM adapters](/guide/query-plans#using-the-official-cerbos-orm-adapters). |
 | `KerberosValidationError`, `KerberosCacheError`, `KerberosCodecError`, `KerberosExprError`, `KerberosRelationsError` | Typed [error classes](/api/errors). |
 | `registerAjvKeywords`, `createAjvAdapter` | [Validation](/guide/schema-validation) helpers. |
 | `JsonSchemas`, `TypeBoxSchemas`, `ZodSchemas`, `KerberosJsonSchemas`, `ResourcePolicyJsonSchemas`, `PrincipalPolicyJsonSchemas`, `RolePolicyJsonSchemas`, … | Schema builders for the three backends. |

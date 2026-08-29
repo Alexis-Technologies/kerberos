@@ -19,6 +19,17 @@ cross-request instance memo, audit-stream completeness (fail-closed denials,
 
 ### Added
 
+- **Verified Cerbos ORM-adapter compatibility.** New `toCerbosQueryPlan`
+  export converts `planResources` output (HTTP-API operand encoding) into
+  the flattened `@cerbos/core` SDK encoding, and the claim that Cerbos's
+  official adapters "accept the filter" is now CI-executable:
+  `test/OrmAdapters.test.js` runs the real `@cerbos/orm-prisma` and
+  `@cerbos/orm-drizzle` packages against Kerberos plans and pins the
+  produced Prisma `where` objects / Drizzle SQL. The Kerberos-only
+  operators are handled by contract — `relation` plans convert only after
+  `expandRelationOperands` (the converter throws otherwise, naming it),
+  `opaque` plans throw with a post-filtering directive. Recipes in the
+  query-plans guide.
 - **Fuzzing + published comparative benchmarks.** A deterministic seeded
   fuzz suite (`test/Fuzz.test.js`, part of `pnpm test`, crankable via
   `FUZZ_ITERATIONS`) covers the `$expr` codec, the CEL translator's output

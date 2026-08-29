@@ -1054,6 +1054,25 @@ export function expandRelationOperands<S extends KerberosSchema = AnySchema>(
 ): Promise<PlanResourcesResponse<S>>;
 
 /** One entry of a `checkResources` batch — the kind narrows its `actions`. */
+
+/** A query plan in the `@cerbos/core` SDK encoding (flattened operands) that the official Cerbos ORM adapters accept. */
+export type CerbosSdkQueryPlan = {
+  kind: PlanKind;
+  condition?: unknown;
+};
+
+/**
+ * Converts a `planResources` response (or its `filter`) from the HTTP-API
+ * operand encoding Kerberos emits into the flattened `@cerbos/core` SDK
+ * encoding consumed by `@cerbos/orm-prisma` / `@cerbos/orm-drizzle`.
+ * Kerberos-only operators are rejected: materialize `relation` operands with
+ * `expandRelationOperands` first; `opaque` plans need post-filtering.
+ */
+export declare function toCerbosQueryPlan(planOrFilter: {
+  filter?: unknown;
+  kind?: string;
+  condition?: unknown;
+}): CerbosSdkQueryPlan;
 export type CheckResourcesEntry<S extends KerberosSchema = AnySchema> = {
   [K in ResourceKindOf<S>]: { resource: RequestResource<S, K>; actions: ActionOf<S, K>[] };
 }[ResourceKindOf<S>];
