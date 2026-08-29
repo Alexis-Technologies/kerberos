@@ -288,6 +288,7 @@ const NODE_VALIDATORS = createDispatch({
     }
   },
   CallExpression(node, maxDepth, depth) {
+    if (!node.callee) throw new KerberosExprError('Only whitelisted function or method calls are allowed');
     if (node.callee.type === 'Identifier') {
       if (!Object.prototype.hasOwnProperty.call(GLOBAL_FUNCTIONS, node.callee.name)) {
         throw new KerberosExprError(`Function "${node.callee.name}" is not allowed`);
@@ -297,16 +298,21 @@ const NODE_VALIDATORS = createDispatch({
     } else {
       throw new KerberosExprError('Only whitelisted function or method calls are allowed');
     }
-    for (const argument of node.arguments) validateNode(argument, maxDepth, depth + 1);
+    for (const argument of node.arguments ?? []) validateNode(argument, maxDepth, depth + 1);
   },
   NewExpression(node, maxDepth, depth) {
+    // `node.callee` may be MISSING entirely: @jsep-plugin/new emits a
+    // malformed `{ type: 'NewExpression', name }` node (no callee, no
+    // arguments) for inputs like `new R.attr.x` — found by fuzzing. The
+    // guard keeps the error typed instead of a raw TypeError.
     if (
+      !node.callee ||
       node.callee.type !== 'Identifier' ||
       !Object.prototype.hasOwnProperty.call(ALLOWED_CONSTRUCTORS, node.callee.name)
     ) {
       throw new KerberosExprError('Only whitelisted constructors are allowed (Date)');
     }
-    for (const argument of node.arguments) validateNode(argument, maxDepth, depth + 1);
+    for (const argument of node.arguments ?? []) validateNode(argument, maxDepth, depth + 1);
   },
   Compound() {
     throw new KerberosExprError('Compound expressions (e.g. "a, b", "a in b") are not allowed');
@@ -394,7 +400,8 @@ function evalArguments(nodeArguments, ctx, config) {
 
 function evalCall(node, ctx, config) {
   const { callee } = node;
-  const args = evalArguments(node.arguments, ctx, config);
+  if (!callee) throw new KerberosExprError('Only whitelisted function or method calls are allowed');
+  const args = evalArguments(node.arguments ?? [], ctx, config);
 
   if (callee.type === 'Identifier') {
     if (!Object.prototype.hasOwnProperty.call(GLOBAL_FUNCTIONS, callee.name)) {
@@ -450,7 +457,7 @@ function evalCall(node, ctx, config) {
 }
 
 function evalNew(node, ctx, config) {
-  if (node.callee.type !== 'Identifier') {
+  if (!node.callee || node.callee.type !== 'Identifier') {
     throw new KerberosExprError('Only whitelisted constructors are allowed (Date)');
   }
 

@@ -19,6 +19,17 @@ cross-request instance memo, audit-stream completeness (fail-closed denials,
 
 ### Added
 
+- **Fuzzing + published comparative benchmarks.** A deterministic seeded
+  fuzz suite (`test/Fuzz.test.js`, part of `pnpm test`, crankable via
+  `FUZZ_ITERATIONS`) covers the `$expr` codec, the CEL translator's output
+  contract, the YAML parser and `RelationResolver` — it already caught and
+  fixed a real contract bug: `@jsep-plugin/new` emits a malformed
+  callee-less node for `new R.attr.x`, which the codec now rejects as
+  `KerberosExprError` instead of crashing with a raw `TypeError`. New
+  `pnpm bench:compare` (Kerberos vs `@casl/ability` vs `casbin` on a
+  shared RBAC+ABAC scenario) and `pnpm size:compare` (browser min+gzip)
+  publish honest cross-library numbers, with the caveats, in the
+  Benchmarks docs.
 - **Policy-testing CLI.** The package now ships a `kerberos` binary:
   `kerberos test <policiesDir> <testsDir>` runs Cerbos-`TestSuite`-format
   suites (`*_test.yaml`/`*_test.json`, named fixtures + expected effects)

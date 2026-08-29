@@ -1971,6 +1971,29 @@ Apple Silicon (M-series), Node v24:
 
 Numbers vary by hardware and Node version — treat them as relative guidance, not absolutes. The harness exists primarily to catch performance regressions between releases.
 
+### Cross-library comparison
+
+The same scenario — role-gated actions plus one ownership condition — implemented in Kerberos, [CASL](https://casl.js.org) and [casbin](https://casbin.org) (`pnpm bench:compare`; Apple Silicon, Node v24):
+
+| Library · path | ops/sec |
+| -------------- | -------:|
+| `@alexify/kerberos` · `isAllowed` | ~640,000 |
+| `@casl/ability` · check (prebuilt ability) | ~7,300,000 |
+| `@casl/ability` · build + check (per request) | ~1,300,000 |
+| `casbin` · `enforce` (in-memory model) | ~200,000 |
+
+Read it honestly — the libraries do different amounts of work per call. CASL's prebuilt check is a plain in-memory predicate and is faster because it does dramatically less: no policy documents, versions or scopes, no audit/telemetry path, no batch API, no query planner. Abilities are built **per user**, so the *build + check* row is the realistic per-request path. casbin interprets its model DSL on every call. The Kerberos number includes argument validation, the guarded audit/telemetry seams and the scope-chain walk. `@cerbos/embedded` and OPA-WASM are absent by necessity: their policy bundles cannot be built from open tooling alone (Cerbos Hub / the `opa` compiler), so honest numbers cannot be produced here.
+
+Bundle size for the browser, measured the same way as the table above (`pnpm size:compare`, esbuild, min+gzip):
+
+| Library | min+gzip |
+| ------- | --------:|
+| `@alexify/kerberos` (main entry) | 31.4 KB |
+| `@casl/ability` | 6.6 KB |
+| `casbin` | 33.9 KB — does not bundle for the browser (Node builtins); measured as a Node bundle |
+
+CASL is the size floor for a reason (it implements far less); casbin does not run in browsers at all.
+
 ## Changelog
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full history of changes, including the `2.x → 3.x` release notes (ReBAC, OpenTelemetry, runtime split, query plans).

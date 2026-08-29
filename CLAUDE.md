@@ -20,6 +20,8 @@ pnpm test:conformance  # Cerbos conformance corpus (node --test conformance/*.te
 pnpm lint              # oxlint src test scripts bench conformance
 pnpm format            # oxfmt src test scripts bench conformance (format:check for CI)
 pnpm bench             # ops/sec benchmark harness (bench/bench.js)
+pnpm bench:compare     # cross-library comparison (CASL/casbin; bench/compare.js)
+pnpm size:compare      # cross-library bundle-size comparison (scripts/size-compare.js)
 pnpm size              # bundle-size report (scripts/size.js; CI-enforced smoke)
 pnpm docs:dev          # VitePress dev server for docs/ (docs:build / docs:preview too)
 ```
