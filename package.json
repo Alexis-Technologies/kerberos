@@ -5,7 +5,9 @@
   "main": "index.js",
   "browser": {
     "./index.js": "./browser.js",
-    "./src/runtime/node.js": "./src/runtime/browser.js"
+    "./src/runtime/node.js": "./src/runtime/browser.js",
+    "./loader.js": "./src/loader/browser.js",
+    "./src/loader/index.js": "./src/loader/browser.js"
   },
   "types": "index.d.ts",
   "exports": {
@@ -25,6 +27,11 @@
     "./cerbos": {
       "types": "./cerbos.d.ts",
       "default": "./cerbos.js"
+    },
+    "./loader": {
+      "types": "./loader.d.ts",
+      "browser": "./src/loader/browser.js",
+      "default": "./loader.js"
     }
   },
   "directories": {
@@ -127,6 +134,8 @@
     "relations.d.ts",
     "cerbos.js",
     "cerbos.d.ts",
+    "loader.js",
+    "loader.d.ts",
     "src/",
     "LICENSE",
     "README.md",

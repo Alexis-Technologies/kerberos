@@ -89,6 +89,7 @@ await kerberos.isAllowed({
   - [How it works](#how-it-works-fallback-layer) · [`codec` modes](#codec-option--three-modes) · [Dynamic policy format](#dynamic-policy-format) · [Safe builtins](#allowed-safe-builtins) · [Serialization mechanism](#serialization-mechanism-security--performance)
 - [Importing Cerbos Policies](#importing-cerbos-policies)
   - [What is translated](#what-is-translated) · [CEL → `$expr`](#the-cel--expr-translation) · [How this is verified](#how-the-importer-is-verified)
+- [Loading Policies from Files](#loading-policies-from-files)
 - [ReBAC (Relations)](#rebac-relations)
   - [Relation-backed derived roles](#relation-backed-derived-roles) · [Zanzibar-lite resolver](#the-built-in-zanzibar-lite-resolver) · [Dynamic tuples](#dynamic-tuples-cache-backed) · [Consistency](#consistency-honest-limitations)
 - [Query Plans (planResources)](#query-plans-planresources)
@@ -560,6 +561,14 @@ Subpath **`@alexify/kerberos/tests`** (dev/test only — not loaded by the main 
 | `KerberosTest`, `KerberosTests` | Cerbos-style declarative test runner. |
 | `PrincipalMock`, `PrincipalsMock`, `ResourceMock`, `ResourcesMock` | Named fixtures for test suites. |
 | `*ZodSchemas`, `*JsonSchemas`, `*TypeBoxSchemas` | Schema builders for the test harness. |
+
+Subpath **`@alexify/kerberos/loader`** (Node-only [file/directory loader + versioned bundles](#loading-policies-from-files); browser bundlers substitute throwing stubs):
+
+| Export | Purpose |
+| ------ | ------- |
+| `loadPolicyDirectory`, `loadPolicyFile` | Read Kerberos JSON / Cerbos YAML+JSON policy files (+ `_schemas/`) into constructor inputs. |
+| `createPolicyBundle`, `writePolicyBundle`, `loadPolicyBundle` | Hash-stamped (SHA-256, content-addressed) policy bundles with load-time integrity verification. |
+| `KerberosLoaderError` | Typed error for I/O, format and bundle-integrity failures (carries `file`). |
 
 Subpath **`@alexify/kerberos/cerbos`** (the [Cerbos policy importer](#importing-cerbos-policies) — kept out of the main entry):
 
@@ -1293,6 +1302,25 @@ Rejected by design, each with a named error: comprehension macros (`exists`/`all
 ### How the importer is verified
 
 The whole [Cerbos conformance corpus](conformance/README.md) — real Cerbos policy YAML whose expected decisions are pinned against a live Cerbos PDP in CI — additionally runs **through the public importer** (`conformance/importer.test.js`): YAML parsed by this parser, CEL translated by this translator, and every decision and query-plan expectation must still hold. The YAML parser is separately verified differentially against the reference `yaml` package over the same corpus.
+
+## Loading Policies from Files
+
+The core package never touches the filesystem; the **Node-only** **`@alexify/kerberos/loader`** subpath is the boot-time bridge for **policy-as-code repositories** — and the bundle format is the GitOps artifact:
+
+```javascript
+import { loadPolicyDirectory, writePolicyBundle, loadPolicyBundle } from '@alexify/kerberos/loader';
+
+// Boot: load a directory (Kerberos JSON and Cerbos YAML/JSON can mix; `_schemas/` included).
+const { policies, derivedRoles, schemas } = loadPolicyDirectory('./policies', { codec });
+const kerberos = new Kerberos(policies, derivedRoles, { ajv, schemas: { definitions: schemas } });
+
+// CI: bake the repo into one hash-stamped artifact…
+const bundle = writePolicyBundle('./dist/policies.bundle.json', loadPolicyDirectory('./policies'));
+// …whose `version` is the SHA-256 of its canonical content. Loading VERIFIES it:
+const verified = loadPolicyBundle('./dist/policies.bundle.json', { codec }); // tampered/truncated → throws
+```
+
+Directories load in deterministic sorted order, `_`-prefixed and hidden entries are skipped (the Cerbos repo convention), `.yaml` files and JSON documents carrying `apiVersion` route through the [Cerbos importer](#importing-cerbos-policies) automatically, and `_schemas/**.json` come back keyed for the [`schemas.definitions`](#attribute-schemas-cerbos-schemas) option. Bundles hold serialized documents only, `createPolicyBundle(content, { createdAt: null })` is byte-reproducible, and in browsers every loader function throws a clear error (fetch a bundle over the network instead). Errors are typed `KerberosLoaderError`s naming the offending file.
 
 ## ReBAC (Relations)
 

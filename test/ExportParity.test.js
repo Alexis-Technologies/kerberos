@@ -24,6 +24,7 @@ const entryPoints = [
   ['relations.js', 'relations.d.ts', () => require('../relations.js')],
   ['tests.js', 'tests.d.ts', () => require('../tests.js')],
   ['cerbos.js', 'cerbos.d.ts', () => require('../cerbos.js')],
+  ['loader.js', 'loader.d.ts', () => require('../loader.js')],
 ];
 
 describe('runtime ↔ d.ts export parity', () => {

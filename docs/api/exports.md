@@ -51,6 +51,16 @@ The [Cerbos policy importer](/guide/cerbos-import) — kept out of the main entr
 | `parseYamlDocuments` | The zero-dependency YAML-subset parser, standalone. |
 | `KerberosImportError` | Typed error for unsupported constructs (carries `line` for YAML errors). |
 
+## `@alexify/kerberos/loader`
+
+Node-only boot-time [file/directory loader + versioned bundles](/guide/policy-loader) (browser bundlers substitute throwing stubs):
+
+| Export | Purpose |
+| ------ | ------- |
+| `loadPolicyDirectory`, `loadPolicyFile` | Read Kerberos JSON / Cerbos YAML+JSON policy files (+ `_schemas/`) into constructor inputs. |
+| `createPolicyBundle`, `writePolicyBundle`, `loadPolicyBundle` | Hash-stamped (SHA-256, content-addressed) policy bundles with load-time integrity verification. |
+| `KerberosLoaderError` | Typed error for I/O, format and bundle-integrity failures (carries `file`). |
+
 ## `@alexify/kerberos/tests`
 
 Dev/test only — not loaded by the main entry:

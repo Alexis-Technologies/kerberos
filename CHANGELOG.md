@@ -19,6 +19,17 @@ cross-request instance memo, audit-stream completeness (fail-closed denials,
 
 ### Added
 
+- **File/directory policy loader + versioned bundles** — the new Node-only
+  **`@alexify/kerberos/loader`** subpath: `loadPolicyDirectory` /
+  `loadPolicyFile` read policy-as-code repositories (Kerberos serialized
+  JSON and Cerbos YAML/JSON mix freely — `apiVersion` documents route
+  through the `/cerbos` importer; `_schemas/**.json` come back keyed for
+  `schemas.definitions`; deterministic sorted order; `_`-prefixed and
+  hidden entries skipped), and `createPolicyBundle` / `writePolicyBundle` /
+  `loadPolicyBundle` implement hash-stamped GitOps artifacts: `version` is
+  the SHA-256 of the canonical sorted-key JSON, recomputed and verified on
+  load so tampered or truncated bundles throw. Browser bundlers substitute
+  throwing stubs via the package `browser` map. Typed `KerberosLoaderError`.
 - **Attribute schema enforcement** (Cerbos `schemas` parity). Resource
   policies now accept a `schemas:` block (`principalSchema` /
   `resourceSchema` refs with `ignoreWhen.actions` globs), enforced through
