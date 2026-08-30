@@ -20,6 +20,12 @@ function unavailable(name) {
   };
 }
 
+// The async variants REJECT (rather than throw synchronously) so browser call
+// sites written against the promises contract fail through their own .catch.
+function unavailableAsync(name) {
+  return async () => unavailable(name)();
+}
+
 module.exports = {
   KerberosLoaderError,
   loadPolicyFile: unavailable('loadPolicyFile'),
@@ -27,4 +33,10 @@ module.exports = {
   createPolicyBundle: unavailable('createPolicyBundle'),
   writePolicyBundle: unavailable('writePolicyBundle'),
   loadPolicyBundle: unavailable('loadPolicyBundle'),
+  promises: {
+    loadPolicyFile: unavailableAsync('promises.loadPolicyFile'),
+    loadPolicyDirectory: unavailableAsync('promises.loadPolicyDirectory'),
+    writePolicyBundle: unavailableAsync('promises.writePolicyBundle'),
+    loadPolicyBundle: unavailableAsync('promises.loadPolicyBundle'),
+  },
 };

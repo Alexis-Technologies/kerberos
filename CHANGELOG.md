@@ -60,8 +60,14 @@ cross-request instance memo, audit-stream completeness (fail-closed denials,
   hidden entries skipped), and `createPolicyBundle` / `writePolicyBundle` /
   `loadPolicyBundle` implement hash-stamped GitOps artifacts: `version` is
   the SHA-256 of the canonical sorted-key JSON, recomputed and verified on
-  load so tampered or truncated bundles throw. Browser bundlers substitute
-  throwing stubs via the package `browser` map. Typed `KerberosLoaderError`.
+  load so tampered or truncated bundles throw. Both a synchronous driver
+  (top-level functions) and an asynchronous one (the `promises` namespace,
+  Node's `fs.promises` idiom) share one decision core, so results are
+  byte-identical; `promises.loadPolicyDirectory` reads files concurrently
+  (bounded by the `concurrency` option, default 64) to keep cold starts
+  fast over large policy repositories — the `kerberos` CLI uses it
+  internally. Browser bundlers substitute throwing/rejecting stubs via the
+  package `browser` map. Typed `KerberosLoaderError`.
 - **Attribute schema enforcement** (Cerbos `schemas` parity). Resource
   policies now accept a `schemas:` block (`principalSchema` /
   `resourceSchema` refs with `ignoreWhen.actions` globs), enforced through

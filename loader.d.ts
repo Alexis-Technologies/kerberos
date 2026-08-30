@@ -38,6 +38,12 @@ export interface LoadPolicyOptions {
 export interface LoadPolicyDirectoryOptions extends LoadPolicyOptions {
   /** Recurse into subdirectories (default true). `_`- and `.`-prefixed entries are always skipped. */
   recursive?: boolean;
+  /**
+   * Upper bound on concurrent file reads in `promises.loadPolicyDirectory`
+   * (default 64). The synchronous driver reads one file at a time and
+   * ignores this option. Results are identical either way.
+   */
+  concurrency?: number;
 }
 
 export interface LoadedPolicies {
@@ -115,3 +121,26 @@ export declare function loadPolicyBundle(
   source: string | KerberosPolicyBundle | Record<string, unknown>,
   options?: LoadPolicyBundleOptions,
 ): LoadedPolicyBundle;
+
+/**
+ * The asynchronous driver, mirroring Node's `fs.promises` idiom: the same
+ * function names returning promises, backed by the same shared core, so the
+ * results are identical to the synchronous driver's. What changes is I/O
+ * scheduling: `promises.loadPolicyDirectory` reads files CONCURRENTLY
+ * (bounded by `concurrency`, default 64), which keeps cold starts fast over
+ * large policy repositories. `createPolicyBundle` is pure CPU (no
+ * filesystem) and therefore lives only at the top level.
+ */
+export declare const promises: {
+  loadPolicyFile(filePath: string, options?: LoadPolicyOptions): Promise<LoadedPolicies>;
+  loadPolicyDirectory(dir: string, options?: LoadPolicyDirectoryOptions): Promise<LoadedPolicyDirectory>;
+  writePolicyBundle(
+    filePath: string,
+    input: Partial<LoadedPolicies> | KerberosPolicyBundle,
+    options?: CreatePolicyBundleOptions,
+  ): Promise<KerberosPolicyBundle>;
+  loadPolicyBundle(
+    source: string | KerberosPolicyBundle | Record<string, unknown>,
+    options?: LoadPolicyBundleOptions,
+  ): Promise<LoadedPolicyBundle>;
+};

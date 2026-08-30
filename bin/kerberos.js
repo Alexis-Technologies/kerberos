@@ -22,10 +22,11 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
+const fsp = require('node:fs/promises');
 const { createRequire } = require('node:module');
 
 const { Kerberos, createSafeExprCodec, Effect } = require('../index.js');
-const { loadPolicyDirectory, writePolicyBundle, KerberosLoaderError } = require('../loader.js');
+const { promises: loader, KerberosLoaderError } = require('../loader.js');
 const { parseYamlDocuments } = require('../src/cerbos/yaml.js');
 const { KerberosImportError } = require('../src/cerbos/errors.js');
 
@@ -114,11 +115,11 @@ function resolveCodec() {
   return jsep ? createSafeExprCodec({ jsep }) : null;
 }
 
-function loadPolicies(dir, { schemas: schemasMode }) {
+async function loadPolicies(dir, { schemas: schemasMode }) {
   const codec = resolveCodec();
   let loaded;
   try {
-    loaded = loadPolicyDirectory(dir, { codec: codec ?? undefined });
+    loaded = await loader.loadPolicyDirectory(dir, { codec: codec ?? undefined });
   } catch (error) {
     if (!codec && /\$expr/.test(String(error?.message))) {
       fail(
@@ -160,27 +161,25 @@ function loadPolicies(dir, { schemas: schemasMode }) {
 // `kerberos test` — Cerbos TestSuite runner
 // ---------------------------------------------------------------------------
 
-function collectSuiteFiles(dir) {
-  const files = [];
-  const walk = (current, relative) => {
-    for (const entry of fs
-      .readdirSync(current, { withFileTypes: true })
-      .sort((a, b) => a.name.localeCompare(b.name, 'en'))) {
-      if (entry.name.startsWith('.') || entry.name.startsWith('_')) continue;
-      const entryRelative = relative ? `${relative}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) {
-        walk(path.join(current, entry.name), entryRelative);
-        continue;
-      }
-      if (/_test\.(ya?ml|json)$/i.test(entry.name)) files.push(entryRelative);
-    }
+async function collectSuiteFiles(dir) {
+  const walk = async (current, relative) => {
+    const entries = (await fsp.readdir(current, { withFileTypes: true })).sort((a, b) =>
+      a.name.localeCompare(b.name, 'en'),
+    );
+    const nested = await Promise.all(
+      entries.map(async (entry) => {
+        if (entry.name.startsWith('.') || entry.name.startsWith('_')) return [];
+        const entryRelative = relative ? `${relative}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) return walk(path.join(current, entry.name), entryRelative);
+        return /_test\.(ya?ml|json)$/i.test(entry.name) ? [entryRelative] : [];
+      }),
+    );
+    return nested.flat();
   };
-  walk(dir, '');
-  return files;
+  return walk(dir, '');
 }
 
-function parseSuiteFile(dir, file) {
-  const text = fs.readFileSync(path.join(dir, file), 'utf8');
+function parseSuiteText(text, file) {
   if (file.endsWith('.json')) {
     try {
       return JSON.parse(text);
@@ -248,13 +247,16 @@ function expandSuite(suite, file) {
 
 async function runTests(policiesDir, testsDir, options) {
   if (!fs.existsSync(testsDir) || !fs.statSync(testsDir).isDirectory()) fail(`${testsDir}: not a directory`);
-  const { engine } = loadPolicies(policiesDir, options);
-  const suiteFiles = collectSuiteFiles(testsDir);
+  const { engine } = await loadPolicies(policiesDir, options);
+  const suiteFiles = await collectSuiteFiles(testsDir);
   if (suiteFiles.length === 0) fail(`${testsDir}: no *_test.{yaml,yml,json} suites found`);
 
+  // Suite files stream in concurrently; the report keeps sorted-file order.
+  const suiteTexts = await Promise.all(suiteFiles.map((file) => fsp.readFile(path.join(testsDir, file), 'utf8')));
+
   const report = { suites: [], passed: 0, failed: 0 };
-  for (const file of suiteFiles) {
-    const suite = parseSuiteFile(testsDir, file);
+  for (const [fileIndex, file] of suiteFiles.entries()) {
+    const suite = parseSuiteText(suiteTexts[fileIndex], file);
     const cases = expandSuite(suite, file);
     const suiteReport = { file, name: suite.name ?? file, cases: [] };
     for (const testCase of cases) {
@@ -300,12 +302,12 @@ async function runTests(policiesDir, testsDir, options) {
 // `kerberos bundle`
 // ---------------------------------------------------------------------------
 
-function runBundle(policiesDir, options) {
+async function runBundle(policiesDir, options) {
   const outFile = options.out;
   if (!outFile) fail('bundle needs --out <file>');
   // Bundles hold serialized documents — never load with a codec here.
-  const loaded = loadPolicyDirectory(policiesDir);
-  const bundle = writePolicyBundle(outFile, loaded, options.reproducible ? { createdAt: null } : {});
+  const loaded = await loader.loadPolicyDirectory(policiesDir);
+  const bundle = await loader.writePolicyBundle(outFile, loaded, options.reproducible ? { createdAt: null } : {});
   process.stdout.write(
     `wrote ${outFile}\n  version:      ${bundle.version}\n  policies:     ${bundle.counts.policies}\n  derivedRoles: ${bundle.counts.derivedRoles}\n`,
   );
@@ -334,7 +336,7 @@ async function main() {
   if (command === 'bundle') {
     const { positional, options } = parseArgs(rest, { out: 'value', reproducible: 'boolean' });
     if (positional.length !== 1) fail(`bundle needs <policiesDir>\n\n${USAGE}`);
-    runBundle(positional[0], options);
+    await runBundle(positional[0], options);
     return;
   }
   fail(`unknown command \`${command}\`\n\n${USAGE}`);

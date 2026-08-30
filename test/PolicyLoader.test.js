@@ -227,6 +227,95 @@ describe('policy bundles', () => {
   });
 });
 
+describe('promises API (async driver)', () => {
+  const { promises } = require('../loader.js');
+
+  it('exposes the fs.promises-style namespace', () => {
+    assert.deepEqual(Object.keys(promises).sort(), [
+      'loadPolicyBundle',
+      'loadPolicyDirectory',
+      'loadPolicyFile',
+      'writePolicyBundle',
+    ]);
+  });
+
+  it('loadPolicyDirectory returns exactly what the sync driver returns', async () => {
+    const syncResult = loadPolicyDirectory(REPO);
+    const asyncResult = await promises.loadPolicyDirectory(REPO);
+    // Deep equality over the WHOLE result — documents, deterministic file
+    // order, and the _schemas map — is the shared-core guarantee: concurrent
+    // reads must not be observable in the output.
+    assert.deepEqual(asyncResult, syncResult);
+  });
+
+  it('loadPolicyDirectory honors options like the sync driver', async () => {
+    const syncFlat = loadPolicyDirectory(REPO, { recursive: false });
+    const asyncFlat = await promises.loadPolicyDirectory(REPO, { recursive: false });
+    assert.deepEqual(asyncFlat, syncFlat);
+    // A tight concurrency bound changes scheduling, never results.
+    const serial = await promises.loadPolicyDirectory(REPO, { concurrency: 1 });
+    assert.deepEqual(serial, loadPolicyDirectory(REPO));
+  });
+
+  it('loadPolicyFile matches the sync driver for JSON and YAML', async () => {
+    for (const file of ['document.json', 'roles/reader.yaml']) {
+      const absolute = path.join(REPO, file);
+      assert.deepEqual(await promises.loadPolicyFile(absolute), loadPolicyFile(absolute));
+    }
+  });
+
+  it('deserializes with a codec end to end', async () => {
+    const { policies, derivedRoles } = await promises.loadPolicyDirectory(REPO, { codec });
+    const kerberos = new Kerberos(policies, derivedRoles);
+    assert.equal(
+      await kerberos.isAllowed({
+        principal: { id: 'u1', roles: ['USER'] },
+        resource: { kind: 'document', id: 'd1', attr: { ownerId: 'u1' } },
+        action: 'view',
+      }),
+      true,
+    );
+  });
+
+  it('write + load round-trips and verifies asynchronously', async () => {
+    const file = path.join(tempDir(), 'bundle.json');
+    const content = loadPolicyDirectory(REPO);
+    const written = await promises.writePolicyBundle(file, content, { createdAt: null });
+    // Byte-identical artifact to the sync writer.
+    const syncFile = path.join(tempDir(), 'sync-bundle.json');
+    writePolicyBundle(syncFile, content, { createdAt: null });
+    assert.equal(fs.readFileSync(file, 'utf8'), fs.readFileSync(syncFile, 'utf8'));
+
+    const loaded = await promises.loadPolicyBundle(file);
+    assert.equal(loaded.version, written.version);
+    assert.deepEqual(loaded, loadPolicyBundle(syncFile));
+  });
+
+  it('rejects (not throws) with typed errors on failures', async () => {
+    await assert.rejects(promises.loadPolicyDirectory(path.join(REPO, 'nope')), KerberosLoaderError);
+    await assert.rejects(promises.loadPolicyDirectory(REPO, { cerbos: false }), KerberosLoaderError);
+    await assert.rejects(promises.loadPolicyBundle(path.join(REPO, 'document.json')), /not a Kerberos policy bundle/);
+
+    const file = path.join(tempDir(), 'tampered.json');
+    await promises.writePolicyBundle(file, loadPolicyDirectory(REPO));
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    raw.policies.push({ rolePolicy: { role: 'SNEAKY', version: 'default', rules: [] } });
+    fs.writeFileSync(file, JSON.stringify(raw));
+    await assert.rejects(promises.loadPolicyBundle(file), /integrity check failed/);
+  });
+
+  it('reports the offending file on parse errors', async () => {
+    const dir = tempDir();
+    const file = path.join(dir, 'broken.json');
+    fs.writeFileSync(file, '{ nope');
+    await assert.rejects(promises.loadPolicyFile(file), (error) => {
+      assert.equal(error.name, 'KerberosLoaderError');
+      assert.equal(error.file, file);
+      return true;
+    });
+  });
+});
+
 describe('browser stub', () => {
   it('every loader function throws a clear error in browsers', () => {
     const browserLoader = require('../src/loader/browser.js');
@@ -238,6 +327,13 @@ describe('browser stub', () => {
       'loadPolicyBundle',
     ]) {
       assert.throws(() => browserLoader[name](), /not available in browsers/);
+    }
+  });
+
+  it('the promises namespace rejects in browsers', async () => {
+    const browserLoader = require('../src/loader/browser.js');
+    for (const name of ['loadPolicyFile', 'loadPolicyDirectory', 'writePolicyBundle', 'loadPolicyBundle']) {
+      await assert.rejects(browserLoader.promises[name](), /not available in browsers/);
     }
   });
 });

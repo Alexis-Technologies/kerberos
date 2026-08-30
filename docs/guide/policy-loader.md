@@ -22,7 +22,22 @@ What `loadPolicyDirectory` does:
 - loads `_schemas/**.json` into a ref → schema map keyed both as `expense.json` and `cerbos:///expense.json`, ready for the engine's [`schemas.definitions`](/guide/schema-validation#attribute-schemas-cerbos-schemas) option;
 - with `codec`, deserializes every document (`{ $expr }` → live functions) so the result plugs straight into the constructor; without it you get the serialized documents (cache- and bundle-ready).
 
-`loadPolicyFile(path, options)` is the single-file variant. Everything is synchronous (boot-time work) and throws a typed `KerberosLoaderError` naming the offending file.
+`loadPolicyFile(path, options)` is the single-file variant. The top-level functions are synchronous and throw a typed `KerberosLoaderError` naming the offending file.
+
+## Async loading (`promises`)
+
+The subpath also ships an asynchronous driver, mirroring Node's `fs.promises` idiom — the same function names returning promises:
+
+```js
+import { promises as loader } from '@alexify/kerberos/loader';
+
+const { policies, derivedRoles, schemas } = await loader.loadPolicyDirectory('./policies', {
+  codec,
+  concurrency: 64, // upper bound on concurrent file reads (the default)
+});
+```
+
+Both drivers run the **same shared core** — routing, parsing, classification, bundle stamping and verification are one code path, so results are identical to the byte (deterministic sorted order regardless of read-completion order; every behavior test asserts deep equality between the two). What changes is I/O scheduling: `promises.loadPolicyDirectory` reads files **concurrently** (bounded by `concurrency`, default 64), which is what keeps cold starts fast when a policy repository holds hundreds of files — and it never blocks the event loop, so a server can load policies while already serving other traffic. `promises.loadPolicyFile`, `promises.writePolicyBundle` and `promises.loadPolicyBundle` complete the namespace; `createPolicyBundle` is pure CPU (no filesystem) and lives only at the top level. Errors reject with the same typed `KerberosLoaderError`s. The `kerberos` CLI uses this driver internally.
 
 ## Versioned bundles (GitOps)
 
