@@ -23,6 +23,7 @@ const ENTRIES = [
   { label: 'main entry (@alexify/kerberos)', entry: 'browser.js' },
   { label: '/relations subpath', entry: 'relations.js' },
   { label: '/tests subpath', entry: 'tests.js' },
+  { label: '/cerbos subpath', entry: 'cerbos.js' },
 ];
 
 async function bundle(entry, minify) {

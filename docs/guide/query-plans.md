@@ -66,7 +66,7 @@ flowchart TD
     NORM -->|residual tree| COND(["KIND_CONDITIONAL + condition<br/>(operators and/or/not/eq/…/in + opaque/relation)"])
 ```
 
-Every layer keeps its runtime semantics: principal rules override (Deny wins), the role layer is an allowlist with implicit deny and `parentRoles` intersection, the resource layer is Deny-over-Allow with default deny — the parity is enforced by a property-style test suite ([`test/PlanParity.test.js`](https://github.com/Alexis-Technologies/kerberos/blob/main/test/PlanParity.test.js)) that grid-samples unknown attributes and compares the filter against real `isAllowed` results.
+Every layer keeps its runtime semantics: principal rules override (Deny wins), the role layer is an allowlist with implicit deny and `parentRoles` intersection, the resource layer resolves conflicts per principal role (deny over allow within a role, allow over deny across roles) with default deny — the parity is enforced by a property-style test suite ([`test/PlanParity.test.js`](https://github.com/Alexis-Technologies/kerberos/blob/main/test/PlanParity.test.js)) that grid-samples unknown attributes and compares the filter against real `isAllowed` results.
 
 ## Operators
 
@@ -109,6 +109,34 @@ const expanded = await expandRelationOperands(plan, ({ relation }) =>
 ```
 
 The lookup is any `({ name, relation }) => ids` function — resolver-agnostic, like the engine's `relations` seam. Without expansion, treat `relation` like `opaque`: post-check the rows. Mind the cardinality: a principal with access to a very large set of resources materializes a very large `in`-list — for those cases a post-check (or a resolver-side limit) can beat expansion.
+
+## Using the official Cerbos ORM adapters
+
+Cerbos's own [query-plan adapters](https://github.com/cerbos/query-plan-adapters) — [`@cerbos/orm-prisma`](https://www.npmjs.com/package/@cerbos/orm-prisma) and [`@cerbos/orm-drizzle`](https://www.npmjs.com/package/@cerbos/orm-drizzle) — accept Kerberos plans through one exported hop: `toCerbosQueryPlan` converts the HTTP-API operand encoding Kerberos emits (`{ variable }` / `{ expression }`) into the flattened `@cerbos/core` SDK encoding the adapters consume (`{ name }` / `{ operator, operands }`; the plan kinds are byte-identical):
+
+```javascript
+import { toCerbosQueryPlan, expandRelationOperands } from '@alexify/kerberos';
+import { queryPlanToPrisma } from '@cerbos/orm-prisma';
+
+const plan = await kerberos.planResources({ principal, resource: { kind: 'document' }, action: 'view' });
+const result = queryPlanToPrisma({
+  queryPlan: toCerbosQueryPlan(plan),
+  mapper: {
+    'request.resource.attr.ownerId': { field: 'ownerId' },
+    'request.resource.id': { field: 'id' },
+  },
+});
+// result.kind: ALWAYS_ALLOWED | ALWAYS_DENIED | CONDITIONAL (+ result.filters for Prisma's `where`)
+```
+
+The two Kerberos-only operators follow the refuse-to-guess rule at this boundary:
+
+- **`relation`** (ReBAC dependency) — materialize it first: `toCerbosQueryPlan(await expandRelationOperands(plan, lookup))`; the expanded plan renders as a plain `id IN (...)` filter. Handing an *unexpanded* plan to the converter throws, naming `expandRelationOperands`.
+- **`opaque`** (statically unplannable condition) — the converter throws with a post-filtering directive; translate the rest of the query and filter the rows through `checkResources` afterwards.
+
+This path is CI-verified against the real adapter packages (`test/OrmAdapters.test.js`): conditional/membership plans render the expected Prisma `where` objects and Drizzle SQL, and both special operators take exactly the routes above.
+
+One caveat that is not ours: the adapter packages are CommonJS but depend on the ESM-only `@cerbos/core`, so **loading them** needs Node's `require(esm)` support — Node **20.19+ / 22.12+**. On Node 18 they cannot be required at all, and the verification suite skips accordingly. `toCerbosQueryPlan` itself, like the rest of Kerberos, runs on Node 18; only the third-party adapters are gated.
 
 ## Translating a plan
 

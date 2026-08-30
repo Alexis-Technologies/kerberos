@@ -6,7 +6,7 @@
 [![dependencies](https://img.shields.io/badge/runtime_dependencies-0-brightgreen)](#bundle-size)
 [![license](https://img.shields.io/npm/l/%40alexify%2Fkerberos)](./LICENSE)
 
-An **embedded, zero-dependency authorization engine** for Node.js and the browser: Cerbos-style policies (RBAC + ABAC), a SpiceDB-inspired "Zanzibar-lite" resolver (ReBAC) and Cerbos-compatible query plans — all in-process, no server to deploy, [~25 KB min+gzip](#bundle-size). The API deliberately stays as close to Cerbos as possible: if you know Cerbos, you already know Kerberos.js.
+An **embedded, zero-dependency authorization engine** for Node.js and the browser: Cerbos-style policies (RBAC + ABAC), a SpiceDB-inspired "Zanzibar-lite" resolver (ReBAC) and Cerbos-compatible query plans — all in-process, no server to deploy, [~29 KB min+gzip](#bundle-size). The API deliberately stays as close to Cerbos as possible: if you know Cerbos, you already know Kerberos.js.
 
 ```javascript
 import { Kerberos, Effect } from '@alexify/kerberos';
@@ -46,6 +46,9 @@ await kerberos.isAllowed({
 | Consistency | in-process state + your cache ([honest limitations](#consistency-honest-limitations)) | per-PDP policy sync                | Zanzibar consistency (zookies) |
 | Best when | JS/TS stack, zero-infra, browser/edge                                                 | polyglot stack, central governance | relationship graphs at scale, strict consistency |
 
+> [!NOTE]
+> Compatibility with Cerbos is checked in CI by a [conformance suite](./conformance/) that runs one corpus against both engines — every decision and every query plan is compared to a real Cerbos PDP. Features Kerberos deliberately does not implement (CEL, attribute schemas, `scopePermissions`, `auxData`) are catalogued in [DIVERGENCES.md](./conformance/DIVERGENCES.md).
+
 ### When NOT to use Kerberos.js
 
 - **Polyglot backends** — if Go/Python/Java services need the same decisions, a central PDP (Cerbos) beats reimplementing policies per language.
@@ -61,7 +64,8 @@ await kerberos.isAllowed({
 | **Dynamic policies** | [Cache-agnostic storage](#caching--storing-policies) with a safe, eval-free `$expr` codec (jsep AST allowlist) |
 | **ReBAC** | [Relation-backed derived roles](#rebac-relations) + a built-in Zanzibar-lite resolver (`@alexify/kerberos/relations`) |
 | **Observability** | [Audit logs](#options) (console / structured / Pino), [OpenTelemetry](#opentelemetry) traces + metrics, [decision metadata](#decision-metadata-includemeta) |
-| **DX** | [Pluggable validation](#schema-validation) (Zod / JSON Schema + Ajv / TypeBox), [testing DSL](#testing) (`/tests`), hand-maintained TypeScript types, [browser build](#browser-usage) |
+| **DX** | [Pluggable validation](#schema-validation) (Zod / JSON Schema + Ajv / TypeBox), [testing DSL](#testing) (`/tests`), [typed authoring](#typescript) via an optional app schema, [browser build](#browser-usage), [live playground](https://kerberosjs.vercel.app/playground) |
+| **Compatibility** | A [conformance suite](./conformance/) runs one corpus — written in Cerbos's own policy and test formats — against both Kerberos and a real Cerbos PDP in CI; known gaps are listed in [DIVERGENCES.md](./conformance/DIVERGENCES.md) |
 
 > **Version 3.x** — see the [CHANGELOG](./CHANGELOG.md) for everything that changed since `2.0.0`: ReBAC with the built-in Zanzibar-lite resolver (`3.0.0`), OpenTelemetry, the Node/browser runtime split, and Cerbos-compatible query plans via `planResources` (`3.1.0`).
 
@@ -75,19 +79,25 @@ await kerberos.isAllowed({
 - [Scopes and Policy Versions](#scopes-and-policy-versions)
 - [API Reference](#api-reference)
   - [`new Kerberos(...)`](#new-kerberospolicies-derivedroles-options) · [`isAllowed`](#kerberosisallowedargs--promiseboolean) · [`checkResources`](#kerberoscheckresourcesargs-effectasboolean--false--promisecheckresourcesresponse) · [`planResources`](#kerberosplanresourcesargs--promiseplanresourcesresponse) · [Errors](#errors) · [Exports](#exports)
+- [TypeScript](#typescript)
+  - [Declaring a schema](#declaring-a-schema) · [What it buys you](#what-it-buys-you) · [Schema helper types](#schema-helper-types)
 - [Configuration Options](#configuration-options)
   - [Options](#options) · [Pino logging](#using-pino-for-production-logging) · [Call ID generation](#call-id-generation)
 - [Outputs](#outputs)
 - [Decision metadata (includeMeta)](#decision-metadata-includemeta)
 - [Caching / Storing Policies](#caching--storing-policies)
   - [How it works](#how-it-works-fallback-layer) · [`codec` modes](#codec-option--three-modes) · [Dynamic policy format](#dynamic-policy-format) · [Safe builtins](#allowed-safe-builtins) · [Serialization mechanism](#serialization-mechanism-security--performance)
+- [Importing Cerbos Policies](#importing-cerbos-policies)
+  - [What is translated](#what-is-translated) · [CEL → `$expr`](#the-cel--expr-translation) · [How this is verified](#how-the-importer-is-verified)
+- [Loading Policies from Files](#loading-policies-from-files)
 - [ReBAC (Relations)](#rebac-relations)
   - [Relation-backed derived roles](#relation-backed-derived-roles) · [Zanzibar-lite resolver](#the-built-in-zanzibar-lite-resolver) · [Dynamic tuples](#dynamic-tuples-cache-backed) · [Consistency](#consistency-honest-limitations)
 - [Query Plans (planResources)](#query-plans-planresources)
-  - [How a plan is composed](#how-a-plan-is-composed) · [Operators](#operators) · [Writing plannable policies](#writing-plannable-policies) · [Translating a plan](#translating-a-plan)
+  - [How a plan is composed](#how-a-plan-is-composed) · [Operators](#operators) · [Writing plannable policies](#writing-plannable-policies) · [ORM adapters](#using-the-official-cerbos-orm-adapters) · [Translating a plan](#translating-a-plan)
 - [Testing](#testing)
+  - [CLI](#policy-testing-from-the-command-line)
 - [Schema Validation](#schema-validation)
-  - [Zod](#using-zod) · [JSON Schema + Ajv](#using-json-schema--ajv) · [TypeBox + Ajv](#using-typebox--ajv) · [Explicit Builders](#using-explicit-builders)
+  - [Zod](#using-zod) · [JSON Schema + Ajv](#using-json-schema--ajv) · [TypeBox + Ajv](#using-typebox--ajv) · [Explicit Builders](#using-explicit-builders) · [Attribute schemas](#attribute-schemas-cerbos-schemas)
 - [OpenTelemetry](#opentelemetry)
 - [Benchmarks](#benchmarks)
 - [Changelog](#changelog) · [License](#license) · [Used by](#used-by)
@@ -106,10 +116,11 @@ Zero runtime dependencies. Measured with `pnpm size` (esbuild browser bundle, fu
 
 | Entry | min | min+gzip |
 | ----- | ---:| --------:|
-| `@alexify/kerberos` (main entry, query planner included) | 93.6 KB | **25.1 KB** |
-| `@alexify/kerberos/relations` (opt-in ReBAC resolver) | 57.2 KB | 15.1 KB |
+| `@alexify/kerberos` (main entry, query planner included) | 115.6 KB | **31.9 KB** |
+| `@alexify/kerberos/relations` (opt-in ReBAC resolver) | 60.5 KB | 16.3 KB |
+| `@alexify/kerberos/cerbos` (opt-in [Cerbos importer](#importing-cerbos-policies)) | 34.0 KB | 10.9 KB |
 
-The `/relations` and `/tests` subpaths are only bundled if you import them. Optional tooling (`jsep`, `zod`, `ajv`, `@sinclair/typebox`, `@opentelemetry/api`) is never included — you install what you use.
+The `/relations`, `/tests` and `/cerbos` subpaths are only bundled if you import them. Optional tooling (`jsep`, `zod`, `ajv`, `@sinclair/typebox`, `@opentelemetry/api`) is never included — you install what you use.
 
 ### Browser usage
 
@@ -208,6 +219,29 @@ const kerberos = new Kerberos(
 
 `ResourcePolicy` is the workhorse policy type, selected by `resource.kind`. Rules are matched by action, then by `roles` or `derivedRoles`, and may also use `conditions`, `variables`, `constants`, `outputs`, versions, and scopes — see the [Quick Start](#quick-start) for a complete example.
 
+#### Conflict resolution
+
+Conflicts are resolved **per principal role**, matching Cerbos: `EFFECT_DENY` overrides `EFFECT_ALLOW` **within** a role, and an `EFFECT_ALLOW` from **any** role wins across roles. Rule order never decides the outcome.
+
+This is deliberate anti-lockout behaviour — picking up an extra, less privileged role can never take away access another role grants:
+
+```javascript
+rules: [
+  { actions: ['close'], effect: Effect.Allow, roles: ['SUPPORT'] },
+  { actions: ['close'], effect: Effect.Deny, roles: ['AUDITOR'] },
+];
+// principal roles ['SUPPORT', 'AUDITOR'] -> EFFECT_ALLOW
+```
+
+A deny that is meant to hold regardless has to cover the role carrying the allow — either with the `'*'` wildcard or by naming it:
+
+```javascript
+{ actions: ['close'], effect: Effect.Deny, roles: ['*'] }                 // always denies
+{ actions: ['close'], effect: Effect.Deny, roles: ['SUPPORT', 'AUDITOR'] } // denies both roles
+```
+
+Derived roles do not form a dimension of their own: a rule reached through `derivedRoles` counts for the principal roles listed in that definition's `parentRoles`.
+
 ### PrincipalPolicy
 
 `PrincipalPolicy` follows the Cerbos-style model for principal-specific overrides. It is bound to a single principal and targets `resource + action` directly instead of `roles` / `derivedRoles`.
@@ -250,7 +284,21 @@ const sallyPrincipalPolicy = {
 
 ### RolePolicy
 
-`RolePolicy` follows the Cerbos-style role-centric model. It is bound to a single role, targets `resource + allowActions`, and behaves as an allowlist for matching resources. If a matching role policy exists for the current resource and the action is not listed in `allowActions`, Kerberos returns `EFFECT_DENY` for that role layer.
+`RolePolicy` follows the Cerbos-style role-centric model. It is bound to a single role, targets `resource + allowActions`, and acts as a **narrowing filter over the [`ResourcePolicy`](#resourcepolicy)** — it never grants on its own. Three consequences worth internalising:
+
+- **A role policy cannot allow what the resource policy withholds.** The resource policy is always what grants; a role policy only takes away. With no matching `ResourcePolicy` at all, nothing is allowed.
+- **Multiple role policies union.** A principal may do what **any** of its roles permits. Holding an extra role can widen access, never narrow it.
+- **A role with no applicable role policy is unrestricted.** If any of the principal's roles has no role policy targeting this resource kind, the filter does not apply at all.
+
+```javascript
+// resourcePolicy `report` allows view + edit + delete for roles: ['*']
+rolePolicy READER: allowActions: ['view']
+rolePolicy WRITER: allowActions: ['edit']
+
+roles: ['READER']            -> view                    (filtered to the allowlist)
+roles: ['READER', 'WRITER']  -> view, edit              (union, not intersection)
+roles: ['READER', 'PLAIN']   -> view, edit, delete      (PLAIN is unconstrained)
+```
 
 ```javascript
 const userRolePolicy = {
@@ -281,18 +329,17 @@ const userRolePolicy = {
 };
 ```
 
-`RolePolicy` also supports `parentRoles`. When present, the child role can only keep actions that are also allowed by each locally defined parent role policy. Missing parent role policies are treated as external IdP roles and do not impose extra constraints inside Kerberos.
+`RolePolicy` also supports `parentRoles`. Within a single role, the child keeps only actions that are **also** allowed by each locally defined parent role policy (intersection along the inheritance chain — distinct from the union *across* the principal's roles). Missing parent role policies are treated as external IdP roles and do not impose extra constraints inside Kerberos.
 
 ### Mixed Policy Evaluation
 
 When mixed policy types are present, Kerberos resolves each action in this order:
 
 1. Find the matching `PrincipalPolicy` for the request principal.
-2. If it returns an explicit `EFFECT_ALLOW` or `EFFECT_DENY`, use that result.
-3. Otherwise, evaluate all matching `RolePolicy` entries for the principal roles.
-4. If multiple role policies apply to the same action, `EFFECT_DENY` wins over `EFFECT_ALLOW`.
-5. If the role layer is not applicable for that action, fall back to the matching `ResourcePolicy`. Before its rules are matched, the imported **derived roles are resolved**: condition-backed definitions evaluate synchronously, and relation-backed definitions (the `relation:` field) resolve through the configured [`relations` resolver](#rebac-relations) (ReBAC) — `list`-first with parallel `check` fallback, one shared memo per request. The resulting `effectiveDerivedRoles` then participate in rule matching alongside plain `roles`.
-6. If nothing matches, return `EFFECT_DENY`.
+2. If it returns an explicit `EFFECT_ALLOW` or `EFFECT_DENY`, use that result — role policies do not narrow a principal-policy override.
+3. Otherwise, evaluate the matching `ResourcePolicy`. Before its rules are matched, the imported **derived roles are resolved**: condition-backed definitions evaluate synchronously, and relation-backed definitions (the `relation:` field) resolve through the configured [`relations` resolver](#rebac-relations) (ReBAC) — `list`-first with parallel `check` fallback, one shared memo per request. The resulting `effectiveDerivedRoles` then participate in rule matching alongside plain `roles`. Conflicts resolve **per principal role**: `EFFECT_DENY` overrides `EFFECT_ALLOW` within a role, an `EFFECT_ALLOW` from any role wins across roles.
+4. Apply the `RolePolicy` layer as a **filter** on that result: if every principal role is constrained by an applicable role policy, an `EFFECT_ALLOW` survives only when at least one of those roles allowlists the action (union across roles, `parentRoles` intersection within a role).
+5. If nothing matches, return `EFFECT_DENY`.
 
 The decision is computed **per action** — different actions in the same request may be resolved by different policy layers. Each lookup (principal / role / resource) walks the [scope search chain](#scopes-and-policy-versions) and `policyVersion`, and checks in-memory policies first, then the optional `cache`.
 
@@ -300,11 +347,7 @@ The decision is computed **per action** — different actions in the same reques
 flowchart TD
     A([Request: principal · resource · action]) --> P{{"PrincipalPolicy<br/>(by principal.id)"}}
     P -->|"EFFECT_ALLOW / EFFECT_DENY"| DONE([Action effect resolved])
-    P -->|no matching rule| R{{"RolePolicy layer<br/>(one per principal.roles[])"}}
-
-    R -->|"EFFECT_DENY (wins over Allow)"| DONE
-    R -->|"EFFECT_ALLOW"| DONE
-    R -->|role layer not applicable| DR
+    P -->|no matching rule| DR
 
     subgraph DR ["Derived-roles resolution (importDerivedRoles)"]
         direction TB
@@ -314,12 +357,16 @@ flowchart TD
 
     EDR --> RES{{"ResourcePolicy<br/>(by resource.kind — rules match roles / derivedRoles)"}}
 
-    RES -->|"EFFECT_ALLOW / EFFECT_DENY"| DONE
+    RES -->|"EFFECT_ALLOW (per-role conflict resolution)"| RP{{"RolePolicy filter<br/>(union across principal.roles[])"}}
+    RES -->|"EFFECT_DENY"| DONE
     RES -->|no rule matched| DEF([Default: EFFECT_DENY])
     DEF --> DONE
+
+    RP -->|"allowlisted by some role, or a role is unconstrained"| DONE
+    RP -->|"every role constrained and none allowlists it"| DEF
 ```
 
-> **Within the role layer:** every `RolePolicy` matching a `principal.roles[]` entry is evaluated; `EFFECT_DENY` wins over `EFFECT_ALLOW`. When a role declares `parentRoles`, the child keeps only the actions that are **also** allowed by each locally defined parent role policy (intersection).
+> **Within the role layer:** the principal may do what **any** of its roles allowlists (union). A role with no applicable role policy is unrestricted, which disables the filter entirely. When a role declares `parentRoles`, the child keeps only the actions that are **also** allowed by each locally defined parent role policy (intersection along the chain).
 
 This keeps Kerberos.js aligned with the Cerbos-style principal override model described in the [Cerbos principal policies documentation](https://docs.cerbos.dev/cerbos/latest/policies/principal_policies) while extending the runtime with role-centric policy evaluation similar to [Cerbos role policies](https://docs.cerbos.dev/cerbos/latest/policies/role_policies).
 
@@ -349,6 +396,22 @@ Scope behavior follows the Cerbos-style model:
 - Example search chain for `scope: 'acme.corp'`: `acme.corp -> acme -> ''`
 
 When both policy types are loaded, Kerberos first resolves principal overrides using the principal scope/version chain and then falls back to resource policy lookup when the principal policy is not applicable for a given action.
+
+### How the scope chain is evaluated
+
+Matching Cerbos's `SCOPE_PERMISSIONS_OVERRIDE_PARENT` (its default), the chain is not a lookup for one policy — every policy found along it participates, and evaluation is **per action, per principal role**:
+
+- The first scope whose policy produces a decision (allow or deny) for an action and a role **seals** it; policies further up cannot change it.
+- A rule whose condition fails decides nothing — the walk **falls through** to the parent scope for that action.
+- The walk runs per principal role, so a deny sealing one role at a specific scope does not stop another role from winning an allow at the base scope (allow from any role wins across roles).
+- A scope with no policy at all is simply skipped (Cerbos's `lenientScopeSearch`; Kerberos has no strict mode).
+
+Which scope drives which policy type: **resource policies and role policies** walk the *resource's* scope chain; **principal policies** walk the *principal's*. (Cerbos's docs describe role-policy scope as the principal's, but its engine — and a live PDP — match it against the resource's; see [DIVERGENCES.md](./conformance/DIVERGENCES.md).)
+
+### Wildcards
+
+Name fields glob, exactly as in Cerbos: a bare `*` matches anything; in any other pattern `*` matches within a single `:`-delimited segment (`view:*` matches `view:public` but neither the bare `view` nor `view:a:b`), and `**` crosses segments. Globs work in resource-policy `actions` and `roles`, principal-policy `resource` and `action`, role-policy `resource` and `allowActions`, and derived-role `parentRoles`. `rules[].derivedRoles` references are exact names — Cerbos's schema rejects globs there too.
+
 
 Example:
 
@@ -473,12 +536,13 @@ All error classes are exported from the main entry. Evaluation-phase errors foll
 | Export | Purpose |
 | ------ | ------- |
 | `Kerberos` | Main authorization engine. |
-| `Effect` | `{ Allow: 'EFFECT_ALLOW', Deny: 'EFFECT_DENY' }`. |
+| `Effect` | `{ Allow: 'EFFECT_ALLOW', Deny: 'EFFECT_DENY' }` — a frozen const object, [not an `enum`](#typescript). |
 | `ResourcePolicy`, `PrincipalPolicy`, `RolePolicy`, `DerivedRoles` | Policy classes (rarely constructed directly). |
 | `Conditions`, `Variables`, `Constants`, `Outputs` | DSL building blocks. |
 | `createSafeExprCodec`, `serializePolicy`, `deserializePolicy` | Safe AST codec for [dynamic/stored policies](#caching--storing-policies). |
 | `PlanKind` | `{ AlwaysAllowed, AlwaysDenied, Conditional }` — [query plan](#query-plans-planresources) filter kinds. |
 | `expandRelationOperands` | Materializes ReBAC `relation` operands of a [query plan](#query-plans-planresources) into id filters. |
+| `toCerbosQueryPlan` | Converts a plan to the `@cerbos/core` SDK shape for the [official Cerbos ORM adapters](#using-the-official-cerbos-orm-adapters). |
 | `KerberosValidationError`, `KerberosCacheError`, `KerberosCodecError`, `KerberosExprError`, `KerberosRelationsError` | Typed [error classes](#errors). |
 | `registerAjvKeywords`, `createAjvAdapter` | [Validation](#schema-validation) helpers. |
 | `JsonSchemas`, `TypeBoxSchemas`, `ZodSchemas`, `KerberosJsonSchemas`, `ResourcePolicyJsonSchemas`, `PrincipalPolicyJsonSchemas`, `RolePolicyJsonSchemas`, … | Schema builders for the three backends. |
@@ -499,6 +563,127 @@ Subpath **`@alexify/kerberos/tests`** (dev/test only — not loaded by the main 
 | `KerberosTest`, `KerberosTests` | Cerbos-style declarative test runner. |
 | `PrincipalMock`, `PrincipalsMock`, `ResourceMock`, `ResourcesMock` | Named fixtures for test suites. |
 | `*ZodSchemas`, `*JsonSchemas`, `*TypeBoxSchemas` | Schema builders for the test harness. |
+
+Subpath **`@alexify/kerberos/loader`** (Node-only [file/directory loader + versioned bundles](#loading-policies-from-files); browser bundlers substitute throwing stubs):
+
+| Export | Purpose |
+| ------ | ------- |
+| `loadPolicyDirectory`, `loadPolicyFile` | Read Kerberos JSON / Cerbos YAML+JSON policy files (+ `_schemas/`) into constructor inputs. |
+| `createPolicyBundle`, `writePolicyBundle`, `loadPolicyBundle` | Hash-stamped (SHA-256, content-addressed) policy bundles with load-time integrity verification. |
+| `KerberosLoaderError` | Typed error for I/O, format and bundle-integrity failures (carries `file`). |
+
+Subpath **`@alexify/kerberos/cerbos`** (the [Cerbos policy importer](#importing-cerbos-policies) — kept out of the main entry):
+
+| Export | Purpose |
+| ------ | ------- |
+| `importCerbosPolicies` | Cerbos YAML/JSON documents → `{ policies, derivedRoles }` serialized Kerberos documents. |
+| `celToExpr` | Translates one CEL expression into a `$expr`-compatible JavaScript expression string. |
+| `parseYamlDocuments` | The zero-dependency YAML-subset parser, standalone. |
+| `KerberosImportError` | Typed error for unsupported constructs (carries `line` for YAML errors). |
+
+## TypeScript
+
+Kerberos.js ships hand-maintained types. By default every position is open — `kind` and `action` are `string`, `attr` is `Record<string, unknown>` — which is what you want for policies loaded from a store at runtime.
+
+When your resource kinds are known at compile time, declare them once and the whole surface narrows to them.
+
+### Declaring a schema
+
+```typescript
+import { Kerberos, Effect, type KerberosPolicy } from '@alexify/kerberos';
+
+type AppSchema = {
+  principal: {
+    roles: 'admin' | 'user';
+    attr: { department: string; clearance: number };
+  };
+  resources: {
+    document: { actions: 'view' | 'edit' | 'delete'; attr: { ownerId: string; status: 'draft' | 'published' } };
+    invoice: { actions: 'view' | 'approve'; attr: { amount: number } };
+  };
+};
+
+const kerberos = new Kerberos<AppSchema>(policies, derivedRoles);
+```
+
+Both keys are optional — declare only `resources` if you do not want to enumerate roles.
+
+### What it buys you
+
+The resource kind drives everything else. `action`, `attr`, and the condition callbacks all narrow to the kind you named:
+
+```typescript
+await kerberos.isAllowed({
+  principal: { id: 'u1', roles: ['admin'], attr: { department: 'eng', clearance: 3 } },
+  resource: { kind: 'document', id: 'd1', attr: { ownerId: 'u1', status: 'draft' } },
+  action: 'edit', // ✅ autocompleted from `document`'s actions
+});
+
+await kerberos.isAllowed({
+  principal: { id: 'u1', roles: ['admin'] },
+  resource: { kind: 'document', id: 'd1' },
+  action: 'approve', // ❌ 'approve' belongs to `invoice`, not `document`
+});
+```
+
+Policy documents are checked the same way — `resource:` discriminates the rules, so a typo in an action or a role is a compile error rather than a silent `EFFECT_DENY` at 3am:
+
+```typescript
+const policy: KerberosPolicy<AppSchema> = {
+  resourcePolicy: {
+    version: 'default',
+    resource: 'document',
+    rules: [
+      { actions: ['view', 'edit'], effect: Effect.Allow, roles: ['admin'] },
+      {
+        actions: ['edit'],
+        effect: Effect.Allow,
+        roles: ['user'],
+        // R.attr is { ownerId: string; status: 'draft' | 'published' }
+        condition: { match: ({ R, P }) => R.attr?.ownerId === P.id && R.attr?.status === 'draft' },
+      },
+    ],
+  },
+};
+```
+
+`checkResources` keeps each batch entry typed independently, so a mixed batch still catches a wrong action per kind:
+
+```typescript
+const { results } = await kerberos.checkResources({
+  principal: { id: 'u1', roles: ['user'] },
+  resources: [
+    { resource: { kind: 'document', id: 'd1' }, actions: ['view', 'edit'] },
+    { resource: { kind: 'invoice', id: 'i1' }, actions: ['approve'] },
+  ],
+});
+```
+
+The second argument now selects the effect representation through overloads: `checkResources(args)` resolves `results[].actions` to `Effect`, and `checkResources(args, true)` to `boolean` — previously both were typed as the `Effect | boolean` union.
+
+### Schema helper types
+
+Exported so you can build your own typed wrappers (an Express middleware, a React hook) over the same schema:
+
+| Type | Resolves to |
+| ---- | ----------- |
+| `ResourceKindOf<S>` | Union of declared resource kinds. |
+| `ActionOf<S, K>` | Actions for kind `K`; every action across all kinds when `K` is omitted. |
+| `ResourceAttrOf<S, K>` | Attribute bag of kind `K`. |
+| `PrincipalRoleOf<S>` / `PrincipalAttrOf<S>` | Declared principal roles / attributes. |
+| `RequestPrincipal<S>`, `RequestResource<S, K>`, `BaseRequest<S, K>` | Request shapes. |
+| `PolicyEvalRequest<S, K>` | The `{ P, R, V, C }` envelope a condition/variable/output callback receives. |
+| `CheckResourcesArgs<S>`, `CheckResourcesResponse<S, E>`, `PlanResourcesArgs<S, K>`, `PlanResourcesResponse<S>` | Method arguments and responses. |
+| `AnySchema` | The permissive default used when no schema is supplied. |
+
+> [!NOTE]
+> Typing is **compile-time only** — there is no runtime cost and no runtime enforcement. A schema constrains the policies and requests you write in TypeScript; it does not validate policies loaded from a cache at runtime. For that, use [schema validation](#schema-validation).
+
+`Effect` and `PlanKind` are const objects rather than TypeScript `enum`s, so the raw wire strings that a stored policy or a serialized plan actually carries stay assignable:
+
+```typescript
+const rule = { actions: ['view'], effect: 'EFFECT_ALLOW', roles: ['user'] }; // ✅ no `Effect.Allow` needed
+```
 
 ## Configuration Options
 
@@ -530,7 +715,7 @@ const kerberos = new Kerberos(policies, derivedRoles, {
   - Logging is pure observability: it never changes decisions or error behavior (that is [`onError`](#options)'s job), and a throwing logger is swallowed — it can never affect authorization.
 - **`onError`** (`'throw' | 'deny'`, default `'throw'`): What happens when policy **evaluation** fails at runtime (a throwing condition function, a failing cache backend, a ReBAC resolver error).
   - `'throw'` propagates the error to the caller;
-  - `'deny'` fails closed: `isAllowed` resolves to `false`, `checkResources` to `{ results: [], kerberosCallId, reqId? }`, `planResources` to a `KIND_ALWAYS_DENIED` filter.
+  - `'deny'` fails closed: `isAllowed` resolves to `false`, `checkResources` to one all-DENY result per requested resource (positional parity with the request, like the per-resource fail-closed path — entries that cannot be echoed back from malformed arguments are skipped), `planResources` to a `KIND_ALWAYS_DENIED` filter.
   - Malformed **arguments** are programming errors and always throw `KerberosValidationError`, regardless of this option.
 
   ```javascript
@@ -540,8 +725,13 @@ const kerberos = new Kerberos(policies, derivedRoles, {
 
 - **`telemetry`** (KerberosTelemetryOptions): Enable OpenTelemetry traces and metrics. Pass `{ api }` (the `@opentelemetry/api` module) or `{ tracer, meter }` instances — see [OpenTelemetry](#opentelemetry).
 - **`cache`** (CacheLike): An optional cache used as a fallback source for dynamic/stored policies. Any object exposing a `get(key)` method is accepted (keyv, cacheable, cache-manager, ...). See [Caching / Storing policies](#caching--storing-policies).
-- **`cacheRetry`** (`{ attempts?: number }`, default `{ attempts: 3 }`): Retry policy for transient `cache.get` failures. After the attempts are exhausted the failure surfaces as `KerberosCacheError` (and then follows `onError`). `attempts: 1` disables retrying.
+- **`cacheRetry`** (`{ attempts?, delayMs?, jitter?, timeoutMs?, onExhausted? }`, default `{ attempts: 3, delayMs: 25, jitter: true }`): Retry policy for `cache.get` failures. Attempts are spaced by full-jitter exponential backoff (`delayMs` base, doubling per attempt; `delayMs: 0` restores immediate retries); deterministic adapter errors (`TypeError`/`SyntaxError`) are never retried. `timeoutMs` (off by default) bounds each read attempt so a *hung* backend fails instead of hanging authorization. After the attempts are exhausted the failure surfaces as `KerberosCacheError` (and then follows `onError`) — unless `onExhausted: 'miss'` opts into **degraded mode**: the read counts as a cache miss and evaluation falls through to the remaining static sources, so a cache outage no longer disables statically-resolvable decisions (the degradation stays visible via the `kerberos.cache.requests` `error` metric and a guarded error log entry). `attempts: 1` disables retrying.
+- **`cacheKeyPrefix`** (`string`, default `''`): Prefix prepended to **every** cache key (policies *and* derived roles). Use it to namespace tenants or environments sharing one store — derived-roles documents are otherwise a single global `derivedRoles:<name>` namespace, so two tenants publishing the same definition name on a shared store would silently overwrite each other.
+- **`relationsTimeoutMs`** (`number`, off by default): Bounds each `relations.check` / `relations.list` call; a resolver that neither resolves nor rejects fails as `KerberosRelationsError` (following `onError`) instead of hanging the request.
+- **`audit`** (`{ includeMeta?: boolean }`): Engine-level audit enrichment. With `{ includeMeta: true }` and a logger attached, decision tracing runs for **every** request, so audit entries always carry `meta.resolution` and the `policy-miss` reason — audit completeness stops depending on each call site remembering the per-request `includeMeta` flag. The response stays gated on the request flag.
+- **`maxConcurrency`** (`number`, unbounded by default): Caps how many resources of a `checkResources` batch evaluate at once. Without it a 10k-resource batch launches 10k concurrent evaluation chains (each issuing its own cache reads) — memory spikes, event-loop saturation and a thundering herd on the cache backend. The built-in `RelationResolver` accepts the same option for its `lookupResources` candidate-verification fan-out.
 - **`codec`** (PolicyCodec): How cached policy documents are transformed before construction: `{ jsep }` enables the built-in safe `$expr` evaluator, `{ deserialize }` plugs in your own logic, and when omitted cached values are passed to policy constructors **as-is** — see [`codec` option — three modes](#codec-option--three-modes).
+- **`schemas`** (`{ enforcement?, definitions? }`): **Attribute schema enforcement** — Cerbos [`schemas`](https://docs.cerbos.dev/cerbos/latest/policies/schemas) parity. Resource policies declare `schemas.principalSchema` / `resourceSchema` refs (with optional `ignoreWhen.actions` globs); this option maps the refs to validators and picks the level: `'reject'` (default when set) denies requests whose attributes fail validation, `'warn'` reports without changing decisions, `'none'` disables (the Cerbos default when unconfigured). Failures are returned as Cerbos-shaped `validationErrors` (`{ path, message, source }`) on `checkResources` results — regardless of `includeMeta` — and reach the audit log. A definition may be a JSON Schema object (compiled with the `ajv` option), a Zod schema, or a validator function. See [Attribute schemas](#attribute-schemas-cerbos-schemas).
 - **`relations`** (KerberosRelationsResolver): ReBAC resolver used by relation-backed derived roles — any object with a `check(args, opts)` method (and an optional batched `list`). See [ReBAC (Relations)](#rebac-relations).
 - **`z`**: Enables validation using the built-in Zod schema builders.
 - **`ajv`**: Enables validation using the built-in JSON Schema builders compiled with Ajv.
@@ -565,7 +755,7 @@ const kerberos = new Kerberos(policies, derivedRoles, {
 });
 ```
 
-With `Pino`, Kerberos emits structured audit entries that include `callId`, `reqId`, `reqKind`, `principalId`, `resourceId`, `action`, `effect`, `outputs`, and `meta`. This mode is better suited for production ingestion than the default console table output.
+With `Pino`, Kerberos emits structured audit entries that include `callId`, `reqId`, `reqKind`, `principalId`, `principalRoles` (the role set the decision was based on — roles change over time, so past entries stay explainable), `resourceId`, `action`, `effect`, `outputs`, and `meta`. Fail-closed denials are part of the stream too: a resource whose evaluation failed inside a `checkResources` batch (and the `onError: 'deny'` fallback of `isAllowed`) logs its DENY decisions marked `reason: 'evaluation-error'`, and `planResources` results (`PlanResources.result`, with the filter kind) go out at **info** level like other decision entries — only lifecycle `*.start`/`*.finish` events sit at debug. This mode is better suited for production ingestion than the default console table output.
 
 It also emits lifecycle logs such as `IsAllowed.start`, `IsAllowed.error`, `IsAllowed.finish`, `CheckResources.start`, `CheckResources.finish` and `PlanResources.*`. Errors are always logged, but whether they are rethrown or converted into a fail-closed response is decided solely by the [`onError`](#options) option — never by the logger.
 
@@ -797,12 +987,12 @@ Per action, `meta.actions[action]` includes:
 - **matchedPolicy**: The policy source that produced the decision — a resource source such as `resource.expense.vdefault/acme.corp`, a principal source such as `principal.sally.vdefault/acme.corp`, or a role source such as `role.USER.vdefault`
 - **matchedRule**: The exact rule that produced the decision
 - **matchedScope**: The scope of the matched policy (present for scoped policies)
-- **reason** (denied actions only): why nothing allowed the action — `'rule-miss'` (no rule targeted the action / matched the principal's roles), `'condition-not-met'` (a rule targeted it but its condition failed) or `'policy-miss'` (no applicable policy existed at all)
+- **reason** (denied actions only): why nothing allowed the action — `'rule-miss'` (no rule targeted the action / matched the principal's roles), `'condition-not-met'` (a rule targeted it but its condition failed), `'policy-miss'` (no applicable policy existed at all) or `'evaluation-error'` (the resource's evaluation rejected inside a `checkResources` batch and failed closed — paired with `errorName` so an outage is distinguishable from a policy DENY)
 
 At the result level:
 
 - **effectiveDerivedRoles**: derived roles that activated for this resource
-- **resolution** (decision trace): every policy lookup that was attempted — `{ source, id, version, scopesSearched, matchedScope, origin? }` entries (with `origin: 'cache'` for cache-resolved policies) plus `{ source: 'relations', name, relation, matched, reason? }` entries for [relation-backed derived roles](#rebac-relations). The same trace appears in [`planResources` meta](#query-plans-planresources).
+- **resolution** (decision trace): every policy lookup that was attempted — `{ source, id, version, scopesSearched, matchedScope, origin? }` entries (with `origin: 'cache'` for cache-resolved policies), `{ source: 'derivedRoles', name, matched, origin? }` entries for every imported derived-roles set (`matched: false` = the import resolved nowhere — e.g. an evicted or corrupt cache document silently stopping rules from matching), plus `{ source: 'relations', name, relation, matched, reason? }` entries for [relation-backed derived roles](#rebac-relations). The same trace appears in [`planResources` meta](#query-plans-planresources).
 
 ## Caching / Storing policies
 
@@ -810,12 +1000,15 @@ Kerberos.js can resolve policies dynamically from a remote store (Redis, MongoDB
 
 ### How it works (fallback layer)
 
-Static policies passed to the constructor stay in memory and are always checked first. The `cache` is only consulted on a **miss**:
+Static policies passed to the constructor stay in memory; the `cache` is a fallback source. Resolution collects the **whole policy chain** along the scope search chain, with per-scope precedence:
 
-1. Resolve the policy by `kind` / `id` / `role` + `policyVersion` + scope chain in memory.
-2. On a miss, and only if a `cache` is configured, call `await cache.get(key)` for each scope in the chain.
-3. On a hit, the JSON document is handled according to the `codec` option (see below).
+1. For each scope in the chain (most specific → base), look the policy up in memory first, then — only on a miss at that scope, and only if a `cache` is configured — call `await cache.get(key)`.
+2. On a hit, the JSON document is handled according to the `codec` option (see below).
+3. Every policy found participates in [per-action scope evaluation](#scopes-and-policy-versions) — a more specific policy decides first, and actions it does not decide fall through to less specific ones.
 4. If nothing matches, the action falls back to `EFFECT_DENY` (unchanged behavior).
+
+> [!NOTE]
+> Precedence is **per scope**: an in-memory policy wins at its own scope, but no longer shadows a *more specific* cached policy at a deeper scope. Hybrid deployments (static org-wide defaults in code + per-tenant overrides in the store) resolve the way scope specificity implies.
 
 Cache keys follow this layout:
 
@@ -1022,7 +1215,7 @@ Kerberos deliberately does **not** serialize raw JavaScript function bodies and 
 - `fn.toString()` produces engine/bundler-specific output (V8 vs SpiderMonkey, Babel/esbuild/SWC, `[native code]`), which silently breaks serialization across environments.
 - Re-`eval`ing on every cache hit pays a JIT-compilation cost exactly when load is highest.
 
-Instead, the built-in codec (`createSafeExprCodec({ jsep })`) uses an **AST allowlist interpreter** built on the tiny, eval-free [`jsep`](https://ericsmekens.github.io/jsep/) parser. Safe-by-default resource limits are configurable per codec: `createSafeExprCodec({ jsep, maxCachedExprs, maxExprLength, maxDepth })` — defaults `1000` cached ASTs (FIFO eviction), `4096` chars per expression, nesting depth `32` (unrelated to the ReBAC resolver's own `maxDepth: 50` walk limit). How it works:
+Instead, the built-in codec (`createSafeExprCodec({ jsep })`) uses an **AST allowlist interpreter** built on the tiny, eval-free [`jsep`](https://ericsmekens.github.io/jsep/) parser. Safe-by-default resource limits are configurable per codec: `createSafeExprCodec({ jsep, maxCachedExprs, maxExprLength, maxDepth, maxBuiltStringLength })` — defaults `1000` cached ASTs (LRU-touched bounded cache), `4096` chars per expression, nesting depth `32` (unrelated to the ReBAC resolver's own `maxDepth: 50` walk limit), and `1_000_000` chars for strings **built** by expressions (`repeat`/`padStart`/`padEnd` — without the cap a tiny expression could allocate a ~0.5GB string per evaluation). How it works:
 
 1. Each `{ $expr }` string is parsed **once** into an AST via your `jsep` instance, which is cached per (jsep instance, expression string) pair (`parse-once`).
 2. Evaluation walks the AST per request with a strict allowlist — no `eval`, no `new Function`, no recompilation.
@@ -1060,6 +1253,76 @@ To skip deserialization entirely (e.g. your cached documents are already plain J
 ```javascript
 const kerberos = new Kerberos([], [], { cache }); // values passed as-is to policy constructors
 ```
+
+## Importing Cerbos Policies
+
+The **`@alexify/kerberos/cerbos`** subpath turns an existing **Cerbos policy repository** — YAML/JSON policy documents with CEL conditions — into Kerberos policies you can evaluate in-process, still with **zero dependencies**: the subpath ships its own parser for the YAML subset Cerbos policies are written in and its own CEL parser + translator.
+
+```javascript
+import { importCerbosPolicies } from '@alexify/kerberos/cerbos';
+import { Kerberos, createSafeExprCodec, deserializePolicy } from '@alexify/kerberos';
+
+// The importer emits SERIALIZED documents ({ $expr } conditions), so the
+// standard dynamic-policy codec setup applies (see "Caching / Storing Policies"):
+const codec = createSafeExprCodec({ jsep });
+
+const { policies, derivedRoles } = importCerbosPolicies(yamlTexts); // strings, parsed objects, or arrays
+
+const kerberos = new Kerberos(
+  policies.map((doc) => deserializePolicy(doc, codec)),
+  derivedRoles.map((doc) => deserializePolicy(doc, codec)),
+);
+```
+
+Because the output is plain JSON with `{ $expr }` descriptors, it is also exactly what the [cache layer](#caching--storing-policies) stores — import a Cerbos repo once and publish the results to Redis/keyv instead of constructing an engine directly.
+
+**The governing invariant: refuse to guess.** Every Cerbos construct is either translated with faithful semantics or rejected with a `KerberosImportError` naming the construct and its location — nothing is dropped or approximated silently, because a skipped rule or a mistranslated condition would change authorization decisions without a trace. The single opt-in exception: `importCerbosPolicies(input, { drop: ['schemas'] })` discards validation-only `schemas` blocks instead of throwing on them.
+
+### What is translated
+
+All four document kinds (`resourcePolicy`, `principalPolicy`, `rolePolicy` — Cerbos role policies have no version, so `default` is assumed — and `derivedRoles`), including scopes, `importDerivedRoles`, nested `all`/`any`/`none` condition combinators, `variables.local` / `constants.local`, and `output.expr` / `output.when`. Policies with `disabled: true` are skipped, matching Cerbos's own loader; `scopePermissions: SCOPE_PERMISSIONS_OVERRIDE_PARENT` (the Cerbos default, and exactly what Kerberos implements) is accepted. `schemas:` blocks translate verbatim (wire their definitions into the [`schemas` engine option](#attribute-schemas-cerbos-schemas) to enforce them; `drop: ['schemas']` discards them instead). Always rejected: `exportVariables`/`exportConstants` and `variables.import`, `REQUIRE_PARENTAL_CONSENT_FOR_ALLOWS`, script conditions, and unknown keys at any level.
+
+### The CEL → `$expr` translation
+
+`celToExpr` (exported standalone) parses real CEL — full expression grammar with precedence, ternary, raw/triple-quoted strings, hex/uint literals, comments — and emits JavaScript for the [safe interpreter](#serialization-mechanism-security--performance). Highlights:
+
+| CEL | JavaScript (`$expr`) |
+| --- | ------------------- |
+| `request.principal` / `request.resource` (or `P` / `R` / `V` / `C` shorthand) | `P` / `R` / `V` / `C` |
+| `==` / `!=` | `===` / `!==` |
+| `x in list` | `list.includes(x)` (a *map* receiver errors at evaluation — fail-loud) |
+| `has(R.attr.x)` | `typeof R.attr.x !== "undefined"` (an explicit `null` is *present*, as in CEL) |
+| `size(x)` / `x.size()` | `x.length` |
+| `timestamp(x)` / `now()` | `Date.parse(x)` / `Date.now()` — timestamps are epoch-ms numbers, so `<`, `==`, `-` work numerically |
+| `duration("72h3m")` | constant-folded milliseconds |
+| `t.getFullYear()` … | `new Date(t).getUTCFullYear()` … (CEL defaults to UTC; `getDayOfMonth()` gets the `- 1`) |
+| `x.replace(a, b)` | `x.split(a).join(b)` (CEL replaces every occurrence) |
+| `7 / 2` (int literals) | `Math.trunc(7 / 2)` (CEL integer division truncates) |
+
+Rejected by design, each with a named error: comprehension macros (`exists`/`all`/`filter`/`map`/`exists_one` — the interpreter has no lambdas), `matches()` (RE2), Cerbos extension functions (`hasIntersection`, `hierarchy`, `spiffeID`, …), `globals`, `runtime`, `request.auxData`, bytes literals, message construction, and any identifier the translator does not recognize. Documented deviations: `lowerAscii`/`upperAscii` map to full-Unicode case folding, and `/` with non-literal operands keeps JS numeric semantics (Cerbos attributes arrive as JSON numbers — CEL doubles — where the two agree).
+
+### How the importer is verified
+
+The whole [Cerbos conformance corpus](conformance/README.md) — real Cerbos policy YAML whose expected decisions are pinned against a live Cerbos PDP in CI — additionally runs **through the public importer** (`conformance/importer.test.js`): YAML parsed by this parser, CEL translated by this translator, and every decision and query-plan expectation must still hold. The YAML parser is separately verified differentially against the reference `yaml` package over the same corpus.
+
+## Loading Policies from Files
+
+The core package never touches the filesystem; the **Node-only** **`@alexify/kerberos/loader`** subpath is the boot-time bridge for **policy-as-code repositories** — and the bundle format is the GitOps artifact:
+
+```javascript
+import { loadPolicyDirectory, writePolicyBundle, loadPolicyBundle } from '@alexify/kerberos/loader';
+
+// Boot: load a directory (Kerberos JSON and Cerbos YAML/JSON can mix; `_schemas/` included).
+const { policies, derivedRoles, schemas } = loadPolicyDirectory('./policies', { codec });
+const kerberos = new Kerberos(policies, derivedRoles, { ajv, schemas: { definitions: schemas } });
+
+// CI: bake the repo into one hash-stamped artifact…
+const bundle = writePolicyBundle('./dist/policies.bundle.json', loadPolicyDirectory('./policies'));
+// …whose `version` is the SHA-256 of its canonical content. Loading VERIFIES it:
+const verified = loadPolicyBundle('./dist/policies.bundle.json', { codec }); // tampered/truncated → throws
+```
+
+Directories load in deterministic sorted order, `_`-prefixed and hidden entries are skipped (the Cerbos repo convention), `.yaml` files and JSON documents carrying `apiVersion` route through the [Cerbos importer](#importing-cerbos-policies) automatically, and `_schemas/**.json` come back keyed for the [`schemas.definitions`](#attribute-schemas-cerbos-schemas) option. The top-level functions are synchronous; the **`promises` namespace** (Node's `fs.promises` idiom — same names, same shared core, byte-identical results) is the asynchronous driver, and `promises.loadPolicyDirectory` reads files **concurrently** (bounded by the `concurrency` option, default 64) so cold starts stay fast over large policy repositories without blocking the event loop: `const { promises: loader } = require('@alexify/kerberos/loader')`. Bundles hold serialized documents only, `createPolicyBundle(content, { createdAt: null })` is byte-reproducible, and in browsers every loader function throws a clear error (fetch a bundle over the network instead). Errors are typed `KerberosLoaderError`s naming the offending file.
 
 ## ReBAC (Relations)
 
@@ -1114,7 +1377,7 @@ const kerberos = new Kerberos([policy], [derivedRoles], {
 });
 ```
 
-Resolver failures follow the [`onError`](#configuration-options) semantics, per-resource isolation in `checkResources` applies as usual, and with `includeMeta` every relation resolution is visible in `meta.resolution` as `{ source: 'relations', name, relation, matched }`.
+Resolver failures follow the [`onError`](#configuration-options) semantics **at request level** (`isAllowed`, or a failure outside per-resource evaluation). *Inside* a `checkResources` batch, per-resource isolation always wins: a rejected resource fails closed to DENY for its actions without failing the batch — even with `onError: 'throw'` — and with `includeMeta` those error-shaped denials are marked `{ reason: 'evaluation-error', errorName }` so an outage is never mistaken for a policy DENY. Every relation resolution is likewise visible in `meta.resolution` as `{ source: 'relations', name, relation, matched }`.
 
 ### The built-in Zanzibar-lite resolver
 
@@ -1181,7 +1444,7 @@ What it borrows from SpiceDB (see [`src/Relations/`](./src/Relations)):
 - **per-request memoization** of subproblems (`(resource#relation@subject)`), shared across a whole `checkResources` batch; concurrent identical document reads coalesce (the in-process analog of SpiceDB's singleflight);
 - **depth limiting instead of cycle tracking** (`maxDepth`, default 50) — visited-sets are semantically unsound under exclusions, so cyclic relationship data throws a typed `KerberosRelationsError`;
 - **caveats** (ABAC-on-ReBAC): named conditions bound to tuples with write-time context; at check time the written context takes precedence over the check-time `context` argument, and the condition sees `{ P, ctx }`. Caveats are ordinary Kerberos `Conditions` — for JSON/cache-stored schemas author them as `{ match: { $expr: '...' } }` and pass a codec built with `createSafeExprCodec({ jsep, roots: ['P', 'ctx'] })` (same eval-free guarantees as dynamic policies). A throwing or false caveat fails closed. There is deliberately no CEL and no partial evaluation of caveats (`CONDITIONAL` results) — in-process, the full context is available at check time (engine-level query planning is a separate, explicit API: [`planResources`](#query-plans-planresources));
-- **reverse lookups**: `lookupSubjects` walks the permission tree forward and expands groups (wildcards come back as `'user:*'`, or `{ subject: 'user:*', exclusions: [...] }` under exclusions; caveated tuples are treated as present — an upper bound); `lookupResources` uses compile-time reachability entrypoints plus candidate verification for intersection/exclusion/caveat paths (the LookupResources2 pattern).
+- **reverse lookups**: `lookupSubjects` walks the permission tree forward and expands groups (wildcards come back as `'user:*'`, or `{ subject: 'user:*', exclusions: [...] }` under exclusions; caveated tuples are treated as present — an upper bound); `lookupResources` uses compile-time reachability entrypoints plus candidate verification for intersection/exclusion/caveat paths (the LookupResources2 pattern). Both APIs cap their result at `maxResults` (default 1000). **The cap truncates**: by default the first `maxResults` sorted entries come back with no error, so `1000` results is indistinguishable from `1000 of 80 000`. Set `onTruncated: 'throw'` to get a typed `KerberosRelationsError` instead — recommended whenever lookup results feed a query-plan filter (`expandRelationOperands`), where a silently narrowed id list would drop authorized rows from the translated query; alternatively pass an `{ ids, truncated: true }` envelope to `expandRelationOperands`, which then degrades that branch to the sound `opaque` post-filter operator. Truncation is always recorded on the call's telemetry span as `kerberos.result.truncated`.
 
 ### Resolver telemetry
 
@@ -1205,7 +1468,7 @@ Exactly like dynamic policies, tuples can live in your cache/store — Kerberos 
 
 Static tuples always win per `(resource, relation)` key — the cache is only consulted on a static miss, and sources for the same key are never merged. **A corrupt document throws a typed `KerberosCodecError`** (propagating per the engine's `onError` semantics) instead of resolving as empty — an "empty" read would silently *widen* access in exclusion positions (`read_only = viewer − editor`: a real editor whose editor document fails to parse would gain `read_only`). The same rule applies to a caveat whose condition **throws** (→ `KerberosRelationsError`): an evaluation error is never read as an answer; a caveat that cleanly evaluates to `false` simply does not match. Genuine absence (cache miss) still resolves as an empty set, and entries the schema does not admit are skipped with an operator log. Transient cache failures retry per `cacheRetry` and then surface as `KerberosCacheError`.
 
-**Session memo contract** (`opts.memo` on `check`/`list`/`lookupSubjects`/`lookupResources`): pass one `Map` to share work across calls — document reads are shared whenever the same resolver instance is used, and decision entries are automatically scoped by resolver instance plus the *identity* of the `principal`/`context` objects, so reusing a memo across different principals, contexts or resolver instances is safe by construction (reuse the same object references to maximize sharing — that is exactly what the Kerberos engine does across a `checkResources` batch).
+**Session memo contract** (`opts.memo` on `check`/`list`/`lookupSubjects`/`lookupResources`): pass one `Map` to share work across calls — document reads are shared whenever the same resolver instance is used, and decision entries are automatically scoped by resolver instance plus the *identity* of the `principal`/`context` objects, so reusing a memo across different principals, contexts or resolver instances is safe by construction (reuse the same object references to maximize sharing — that is exactly what the Kerberos engine does across a `checkResources` batch). A read that fails (rejects) is evicted from the memo automatically, so a transient backend failure never poisons a long-lived memo — the next call retries; successfully resolved reads stay memoized for the memo's lifetime, so treat the memo as request/batch-scoped when document freshness matters.
 
 ### Consistency (honest limitations)
 
@@ -1283,7 +1546,7 @@ flowchart TD
     NORM -->|residual tree| COND(["KIND_CONDITIONAL + condition<br/>(operators and/or/not/eq/…/in + opaque/relation)"])
 ```
 
-Every layer keeps its runtime semantics: principal rules override (Deny wins), the role layer is an allowlist with implicit deny and `parentRoles` intersection, the resource layer is Deny-over-Allow with default deny — the parity is enforced by a property-style test suite ([`test/PlanParity.test.js`](./test/PlanParity.test.js)) that grid-samples unknown attributes and compares the filter against real `isAllowed` results.
+Every layer keeps its runtime semantics: principal rules override (Deny wins), the role layer is an allowlist with implicit deny and `parentRoles` intersection, the resource layer resolves conflicts per principal role (deny over allow within a role, allow over deny across roles) with default deny — the parity is enforced by a property-style test suite ([`test/PlanParity.test.js`](./test/PlanParity.test.js)) that grid-samples unknown attributes and compares the filter against real `isAllowed` results.
 
 ### Operators
 
@@ -1334,6 +1597,34 @@ const expanded = await expandRelationOperands(plan, ({ relation }) =>
 ```
 
 The lookup is any `({ name, relation }) => ids` function — resolver-agnostic, like the engine's `relations` seam. Without expansion, treat `relation` like `opaque`: post-check the rows. Mind the cardinality: a principal with access to a very large set of resources materializes a very large `in`-list — for those cases a post-check (or a resolver-side limit) can beat expansion.
+
+### Using the official Cerbos ORM adapters
+
+Cerbos's own [query-plan adapters](https://github.com/cerbos/query-plan-adapters) — [`@cerbos/orm-prisma`](https://www.npmjs.com/package/@cerbos/orm-prisma) and [`@cerbos/orm-drizzle`](https://www.npmjs.com/package/@cerbos/orm-drizzle) — accept Kerberos plans through one exported hop: `toCerbosQueryPlan` converts the HTTP-API operand encoding Kerberos emits (`{ variable }` / `{ expression }`) into the flattened `@cerbos/core` SDK encoding the adapters consume (`{ name }` / `{ operator, operands }`; the plan kinds are byte-identical):
+
+```javascript
+import { toCerbosQueryPlan, expandRelationOperands } from '@alexify/kerberos';
+import { queryPlanToPrisma } from '@cerbos/orm-prisma';
+
+const plan = await kerberos.planResources({ principal, resource: { kind: 'document' }, action: 'view' });
+const result = queryPlanToPrisma({
+  queryPlan: toCerbosQueryPlan(plan),
+  mapper: {
+    'request.resource.attr.ownerId': { field: 'ownerId' },
+    'request.resource.id': { field: 'id' },
+  },
+});
+// result.kind: ALWAYS_ALLOWED | ALWAYS_DENIED | CONDITIONAL (+ result.filters for Prisma's `where`)
+```
+
+The two Kerberos-only operators follow the refuse-to-guess rule at this boundary:
+
+- **`relation`** (ReBAC dependency) — materialize it first: `toCerbosQueryPlan(await expandRelationOperands(plan, lookup))`; the expanded plan renders as a plain `id IN (...)` filter. Handing an *unexpanded* plan to the converter throws, naming `expandRelationOperands`.
+- **`opaque`** (statically unplannable condition) — the converter throws with a post-filtering directive; translate the rest of the query and filter the rows through `checkResources` afterwards.
+
+This path is CI-verified against the real adapter packages (`test/OrmAdapters.test.js`): conditional/membership plans render the expected Prisma `where` objects and Drizzle SQL, and both special operators take exactly the routes above.
+
+One caveat that is not ours: the adapter packages are CommonJS but depend on the ESM-only `@cerbos/core`, so **loading them** needs Node's `require(esm)` support — Node **20.19+ / 22.12+**. On Node 18 they cannot be required at all, and the verification suite skips accordingly. `toCerbosQueryPlan` itself, like the rest of Kerberos, runs on Node 18; only the third-party adapters are gated.
 
 ### Translating a plan
 
@@ -1441,6 +1732,25 @@ describe('KerberosTests', () => {
   });
 });
 ```
+
+### Policy testing from the command line
+
+The package ships a `kerberos` CLI, so a **pure policy repository** — no engineering glue, no hand-written test harness — can test itself in CI:
+
+```bash
+npx kerberos test ./policies ./tests
+```
+
+- Policies load exactly like [`loadPolicyDirectory`](#loading-policies-from-files): Kerberos JSON and Cerbos YAML/JSON mix freely, `{ $expr }` conditions resolve `jsep` (+ the documented plugins) from **your** project.
+- Test suites are **Cerbos's own [`TestSuite`](https://api.cerbos.dev/latest/cerbos/policy/v1/TestSuite.schema.json) format** (`*_test.yaml` / `*_test.json`): named principal/resource fixtures plus expected effects per action — reviewable, engine-agnostic artifacts.
+- `--schemas reject|warn` wires `_schemas/` into [attribute-schema enforcement](#attribute-schemas-cerbos-schemas); `--json` prints a machine-readable report; the exit code is `1` on any failing case (`2` for usage/config errors).
+- The runner refuses to guess: an expectation feature it does not check (e.g. `outputs`) fails the run instead of silently passing.
+
+```bash
+npx kerberos bundle ./policies --out dist/policies.bundle.json --reproducible
+```
+
+bakes the repo into a [hash-stamped bundle](#loading-policies-from-files) for GitOps pipelines.
 
 ### Testing with Outputs
 
@@ -1577,6 +1887,48 @@ Kerberos policies can contain JavaScript functions in:
 
 When using Ajv or TypeBox, Kerberos.js registers custom Ajv keywords so those function-bearing fields can still be validated at runtime. This keeps the DSL usable even though plain JSON Schema doesn't natively understand JavaScript functions.
 
+### Attribute schemas (Cerbos `schemas`)
+
+Conditions read `P.attr` / `R.attr` — and garbage attributes silently flow into them (an undefined comparison quietly denies or allows). Cerbos guards this with per-kind attribute schemas; Kerberos implements the same model:
+
+```javascript
+const kerberos = new Kerberos(
+  [{
+    resourcePolicy: {
+      version: 'default',
+      resource: 'expense',
+      schemas: {
+        principalSchema: { ref: 'principal.json' },
+        resourceSchema: { ref: 'expense.json', ignoreWhen: { actions: ['create'] } },
+      },
+      rules: [/* ... */],
+    },
+  }],
+  [],
+  {
+    ajv: new Ajv({ allErrors: true }),
+    schemas: {
+      enforcement: 'reject', // 'reject' | 'warn' | 'none'
+      definitions: {
+        'expense.json': { type: 'object', required: ['amount'], properties: { amount: { type: 'number' } } },
+        'principal.json': z.object({ department: z.string() }), // Zod works too
+      },
+    },
+  },
+);
+```
+
+Semantics (mirroring Cerbos):
+
+- **`reject`** — a request whose attributes fail validation is denied for **every** action (a principal policy cannot rescue it), with the failures reported as `validationErrors: [{ path, message, source: 'SOURCE_PRINCIPAL' | 'SOURCE_RESOURCE' }]` on the `checkResources` result and `reason: 'invalid-attributes'` under `includeMeta`.
+- **`warn`** — `validationErrors` are reported (response + audit log) but decisions are unaffected.
+- **`none`** / option absent — schema references in policies are inert, matching Cerbos's own default.
+- **`ignoreWhen.actions`** (Cerbos globs) skips validation only when **every** requested action matches — one non-matching action in the batch entry re-enables it.
+- With scoped policies, the **most specific** policy in the resource scope chain that declares `schemas` wins.
+- A policy referencing a ref missing from `definitions` throws `KerberosValidationError` (always — a configuration error never reads as valid *or* invalid).
+
+Definitions may be plain JSON Schema objects (compiled with the engine's `ajv` option), Zod-like schemas (anything with `safeParse`), or validator functions returning error messages. The [Cerbos importer](#importing-cerbos-policies) translates `schemas:` blocks verbatim, so an imported policy repo enforces the same rules once you wire its schema files into `definitions`.
+
 ## OpenTelemetry
 
 Kerberos.js ships native OpenTelemetry support (traces + metrics) following the same delegating philosophy as `logger` and `cache`: **the package never depends on `@opentelemetry/api`** (not even as a peer dependency). You pass either the api module or pre-created instances:
@@ -1597,9 +1949,9 @@ const kerberos2 = new Kerberos(policies, derivedRoles, {
 
 Works out of the box with any registered SDK (e.g. `NodeSDK` from `@opentelemetry/sdk-node`); with no SDK registered, everything no-ops.
 
-**Spans** — one per public call: `Kerberos.isAllowed` (decision attributes on the span) and `Kerberos.checkResources` (one `kerberos.decision` event per resource × action); the built-in ReBAC resolver adds `Kerberos.relations.check` / `.list` / `.lookupSubjects` / `.lookupResources` when given its own `telemetry` option (see [Resolver telemetry](#resolver-telemetry)). The span is started **active**, so spans created inside — e.g. an auto-instrumented Redis cache behind the `cache` option, or resolver spans under an engine span — nest correctly. Attributes include `kerberos.call_id`, `kerberos.req_id`, `kerberos.resource.kind`, `kerberos.action`, `kerberos.allowed` / `kerberos.effect`, `kerberos.matched_policy` / `kerberos.matched_rule` / `kerberos.matched_scope`, and identity attributes `kerberos.principal.id` / `kerberos.resource.id`. On errors the span gets `ERROR` status plus an exception event — error-handling behavior itself is controlled solely by the [`onError`](#configuration-options) option, never by telemetry or logging.
+**Spans** — one per public call: `Kerberos.isAllowed` (decision attributes on the span), `Kerberos.checkResources` (one `kerberos.decision` event per resource × action) and `Kerberos.planResources` (plan attributes: `kerberos.plan.kind`, `kerberos.plan.actions_count`, `kerberos.plan.opaque_count`, `kerberos.plan.relation_count`); the built-in ReBAC resolver adds `Kerberos.relations.check` / `.list` / `.lookupSubjects` / `.lookupResources` when given its own `telemetry` option (see [Resolver telemetry](#resolver-telemetry)). When relation-backed derived roles resolve through the `relations` seam, the request span additionally carries `kerberos.relations.count` and `kerberos.relations.duration_ms` — so relation latency is attributable even with a **custom** resolver that has no instrumentation of its own. The span is started **active**, so spans created inside — e.g. an auto-instrumented Redis cache behind the `cache` option, or resolver spans under an engine span — nest correctly. Attributes include `kerberos.call_id`, `kerberos.req_id`, `kerberos.resource.kind`, `kerberos.action`, `kerberos.allowed` / `kerberos.effect`, `kerberos.matched_policy` / `kerberos.matched_rule` / `kerberos.matched_scope`, and identity attributes `kerberos.principal.id` / `kerberos.resource.id`. On errors the span gets `ERROR` status plus an exception event — error-handling behavior itself is controlled solely by the [`onError`](#configuration-options) option, never by telemetry or logging.
 
-**Metrics** — four instruments:
+**Metrics** — six instruments:
 
 | Instrument | Type | Unit | Attributes |
 | ---------- | ---- | ---- | ---------- |
@@ -1608,6 +1960,7 @@ Works out of the box with any registered SDK (e.g. `NodeSDK` from `@opentelemetr
 | `kerberos.request.duration` | Histogram | `ms` | `kerberos.req_kind`, `error` |
 | `kerberos.cache.requests` | Counter | `{request}` | `kerberos.cache.result` (`hit`/`miss`/`error`), `kerberos.cache.kind` (only for ReBAC tuple reads: `relation`) |
 | `kerberos.relations.checks` | Counter | `{check}` | `kerberos.relations.result` (`allow`/`deny`) |
+| `kerberos.observability.failures` | Counter | `{failure}` | `kerberos.observability.sink` (`logger`/`telemetry`) — swallowed sink failures. Authorization is never affected by a broken logger/exporter, but a non-zero rate here means audit or telemetry output is being **lost**; the engine also `console.warn`s once per instance on the first swallowed logger failure. |
 
 > Metric attributes deliberately exclude actions and principals to keep cardinality bounded — they assume a bounded set of resource kinds.
 
@@ -1629,18 +1982,46 @@ Apple Silicon (M-series), Node v24:
 
 | Scenario |  ops/sec |
 | -------- |---------:|
-| `isAllowed` — simple role match | ~320,000 |
-| `isAllowed` — derived roles + variables + condition | ~300,000 |
-| `checkResources` — 10 resources × 3 actions |  ~41,000 |
-| `isAllowed` — cache-backed dynamic policy (`$expr`, in-memory Map) | ~150,000 |
-| `planResources` — `$expr` policy (variables + deny rule) |  ~60,000 |
-| `relations.check` — direct tuple (flat) | ~850,000 |
-| `relations.check` — deep walk (3 arrows + nested groups) | ~120,000 |
-| `isAllowed` — relation-backed derived role (deep walk) |  ~80,000 |
+| `isAllowed` — simple role match | ~800,000 |
+| `isAllowed` — derived roles + variables + condition | ~650,000 |
+| `checkResources` — 10 resources × 3 actions |  ~63,000 |
+| `checkResources` — 10 resources, includeMeta |  ~61,000 |
+| `isAllowed` — role policy + 2-level parentRoles chain | ~480,000 |
+| `isAllowed` — 3-segment scoped request (chain walk) | ~640,000 |
+| `isAllowed` — simple role match + Zod validation | ~470,000 |
+| `isAllowed` — cache-backed dynamic policy (`$expr`, in-memory Map) | ~330,000 |
+| `checkResources` — 50 resources, cache-backed |   ~9,000 |
+| `planResources` — `$expr` policy (variables + deny rule) |  ~72,000 |
+| `relations.check` — direct tuple (flat) | ~760,000 |
+| `relations.check` — deep walk (3 arrows + nested groups) | ~106,000 |
+| `isAllowed` — relation-backed derived role (deep walk) |  ~77,000 |
 
 `checkResources` evaluates resources **concurrently** (`Promise.allSettled`): with a remote policy store, N resources cost one parallel wave of lookups instead of N sequential round-trips (measured ~8x faster with a 2ms-latency cache and 10 resources), and one failing resource never fails the batch — it fail-closes to `EFFECT_DENY` for its actions only.
 
 Numbers vary by hardware and Node version — treat them as relative guidance, not absolutes. The harness exists primarily to catch performance regressions between releases.
+
+### Cross-library comparison
+
+The same scenario — role-gated actions plus one ownership condition — implemented in Kerberos, [CASL](https://casl.js.org) and [casbin](https://casbin.org) (`pnpm bench:compare`; Apple Silicon, Node v24):
+
+| Library · path | ops/sec |
+| -------------- | -------:|
+| `@alexify/kerberos` · `isAllowed` | ~640,000 |
+| `@casl/ability` · check (prebuilt ability) | ~7,300,000 |
+| `@casl/ability` · build + check (per request) | ~1,300,000 |
+| `casbin` · `enforce` (in-memory model) | ~200,000 |
+
+Read it honestly — the libraries do different amounts of work per call. CASL's prebuilt check is a plain in-memory predicate and is faster because it does dramatically less: no policy documents, versions or scopes, no audit/telemetry path, no batch API, no query planner. Abilities are built **per user**, so the *build + check* row is the realistic per-request path. casbin interprets its model DSL on every call. The Kerberos number includes argument validation, the guarded audit/telemetry seams and the scope-chain walk. `@cerbos/embedded` and OPA-WASM are absent by necessity: their policy bundles cannot be built from open tooling alone (Cerbos Hub / the `opa` compiler), so honest numbers cannot be produced here.
+
+Bundle size for the browser, measured the same way as the table above (`pnpm size:compare`, esbuild, min+gzip):
+
+| Library | min+gzip |
+| ------- | --------:|
+| `@alexify/kerberos` (main entry) | 31.9 KB |
+| `@casl/ability` | 6.6 KB |
+| `casbin` | 33.9 KB — does not bundle for the browser (Node builtins); measured as a Node bundle |
+
+CASL is the size floor for a reason (it implements far less); casbin does not run in browsers at all.
 
 ## Changelog
 

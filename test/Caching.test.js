@@ -119,6 +119,114 @@ describe('Caching / Storing policies', () => {
       assert.ok(output);
       assert.deepStrictEqual(output.val, { owner: 'u1', by: 'u1' });
     });
+
+    it('reuses built policy instances across requests while the cached document is unchanged', async () => {
+      // Stable-reference backend (plain Map): the same raw object must be
+      // deserialized + constructed exactly once across requests.
+      let deserializeCalls = 0;
+      const store = new Map([
+        [
+          'resource:report:default:',
+          {
+            resourcePolicy: {
+              version: 'default',
+              resource: 'report',
+              rules: [{ actions: ['view'], effect: Effect.Allow, roles: ['USER'] }],
+            },
+          },
+        ],
+      ]);
+      const countingCodec = {
+        deserialize(value) {
+          deserializeCalls += 1;
+          return value;
+        },
+      };
+      const kerberos = new Kerberos([], [], { cache: store, codec: countingCodec });
+      const request = { principal: owner, action: 'view', resource: { id: 'r1', kind: 'report' } };
+
+      assert.strictEqual(await kerberos.isAllowed(request), true);
+      assert.strictEqual(await kerberos.isAllowed(request), true);
+      assert.strictEqual(await kerberos.isAllowed(request), true);
+      assert.strictEqual(deserializeCalls, 1);
+
+      // Backend invalidation is inherited: a REPLACED document (new object
+      // reference) rebuilds and the new rules apply immediately.
+      store.set('resource:report:default:', {
+        resourcePolicy: {
+          version: 'default',
+          resource: 'report',
+          rules: [{ actions: ['view'], effect: Effect.Deny, roles: ['USER'] }],
+        },
+      });
+      assert.strictEqual(await kerberos.isAllowed(request), false);
+      assert.strictEqual(deserializeCalls, 2);
+    });
+
+    it('memoizes string-valued cache entries by raw-string equality', async () => {
+      let builds = 0;
+      const doc = JSON.stringify({
+        resourcePolicy: {
+          version: 'default',
+          resource: 'report',
+          rules: [{ actions: ['view'], effect: Effect.Allow, roles: ['USER'] }],
+        },
+      });
+      // Returns a fresh string VALUE each get (same content) — the bounded
+      // string memo must still skip the rebuild.
+      const stringCache = {
+        async get(key) {
+          if (key !== 'resource:report:default:') return undefined;
+          return `${doc}`;
+        },
+      };
+      const countingCodec = {
+        deserialize(value) {
+          builds += 1;
+          return JSON.parse(value);
+        },
+      };
+      const kerberos = new Kerberos([], [], { cache: stringCache, codec: countingCodec });
+      const request = { principal: owner, action: 'view', resource: { id: 'r1', kind: 'report' } };
+
+      assert.strictEqual(await kerberos.isAllowed(request), true);
+      assert.strictEqual(await kerberos.isAllowed(request), true);
+      assert.strictEqual(builds, 1);
+    });
+
+    it('resolves each distinct policy once per checkResources batch (singleflight memo)', async () => {
+      const reads = [];
+      const backing = await buildCache();
+      const countingCache = {
+        async get(key) {
+          reads.push(key);
+          return backing.get(key);
+        },
+      };
+      const counted = new Kerberos([], [], { cache: countingCache, codec: { jsep } });
+
+      const resources = Array.from({ length: 20 }, (_, i) => ({
+        resource: { ...openDoc, id: `doc${i}` },
+        actions: ['view'],
+      }));
+      const response = await counted.checkResources({ principal: owner, resources, includeMeta: true });
+
+      // 20 same-kind resources share one principal / role / resource /
+      // derived-roles resolution each — no per-resource re-reads.
+      assert.equal(reads.length, new Set(reads).size, `duplicate cache reads: ${reads.join(', ')}`);
+
+      // The memoized trace entry is replayed into EVERY resource's resolution.
+      for (const result of response.results) {
+        assert.equal(result.actions.view, Effect.Allow);
+        const resourceEntry = result.meta.resolution.find((entry) => entry.source === 'resource');
+        assert.equal(resourceEntry.matchedScope, '');
+        assert.equal(resourceEntry.origin, 'cache');
+        // Derived-roles imports are traced too — previously the one
+        // cache-backed resolution step invisible to meta.resolution.
+        const derivedEntry = result.meta.resolution.find((entry) => entry.source === 'derivedRoles');
+        assert.deepEqual(derivedEntry, { source: 'derivedRoles', name: 'doc_roles', matched: true, origin: 'cache' });
+      }
+    });
   });
 
   describe('codec round-trip', () => {
@@ -352,6 +460,26 @@ describe('Caching / Storing policies', () => {
     it('rejects expressions nested deeper than maxDepth', () => {
       const limited = createSafeExprCodec({ jsep, maxDepth: 4 });
       assert.throws(() => limited.compileExpr(`${'!'.repeat(20)}P.flag`), KerberosExprError);
+    });
+
+    it('caps strings BUILT by expressions (repeat/padStart/padEnd) at maxBuiltStringLength', () => {
+      // The length/depth limits bound the expression itself; without this cap
+      // a tiny expression could allocate a ~0.5GB string per evaluation —
+      // memory exhaustion from exactly the compromised-store threat the
+      // limits exist for.
+      const evalOne = (expr) => codec.compileExpr(expr)({ P: {}, R: {} });
+      assert.throws(() => evalOne("'x'.repeat(2000000)"), KerberosExprError);
+      assert.throws(() => evalOne("'ab'.padStart(1000001)"), KerberosExprError);
+      assert.throws(() => evalOne("'ab'.padEnd(1000001)"), KerberosExprError);
+      // Under the cap the methods behave natively.
+      assert.strictEqual(evalOne("'ab'.repeat(3)"), 'ababab');
+      assert.strictEqual(evalOne("'7'.padStart(3, '0')"), '007');
+
+      // Configurable, like the other limits; Infinity disables the cap.
+      const tight = createSafeExprCodec({ jsep, maxBuiltStringLength: 8 });
+      assert.throws(() => tight.compileExpr("'abc'.repeat(3)")({}), KerberosExprError);
+      const unbounded = createSafeExprCodec({ jsep, maxBuiltStringLength: Infinity });
+      assert.strictEqual(unbounded.compileExpr("'x'.repeat(20)")({}).length, 20);
     });
 
     it('accepts deeper nesting when maxDepth is raised', () => {

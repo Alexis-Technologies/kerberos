@@ -1,0 +1,37 @@
+---
+name: ConditionErrorConformance
+description: >-
+  A DENY rule whose condition raises a runtime error. Cerbos (with its default
+  strictEvaluation: false) skips the rule and the ALLOW stands; Kerberos fails
+  closed. A recorded divergence — `cerbosActions` pins the other engine so the
+  difference cannot rot unnoticed.
+
+principals:
+  anyone:
+    id: u1
+    roles: ['USER']
+
+resources:
+  doc:
+    id: c1
+    kind: conderr
+    attr: {}
+
+tests:
+  - name: KNOWN DIVERGENCE — an erroring DENY condition
+    description: >-
+      Cerbos's engine page states the affected expression is "treated as not
+      satisfied and the evaluation carries on", warning that "an EFFECT_DENY
+      rule could be silently skipped" — verified: EFFECT_ALLOW. Its conditions
+      page claims the opposite for v0.55; the engine wins. Kerberos has no
+      per-rule skip: the error surfaces per `onError`, and inside a
+      checkResources batch it is isolated to a fail-closed EFFECT_DENY.
+    input:
+      principals: [anyone]
+      resources: [doc]
+      actions: [view]
+    expected:
+      - principal: anyone
+        resource: doc
+        actions: { view: EFFECT_DENY }
+        cerbosActions: { view: EFFECT_ALLOW }

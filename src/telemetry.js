@@ -62,6 +62,8 @@ function createDisabledTelemetryWriter() {
     recordError() {},
     recordCacheRequest() {},
     recordRelationCheck() {},
+    recordRelationResolution() {},
+    recordObservabilityFailure() {},
     endRequest() {},
   };
 }
@@ -96,6 +98,7 @@ function createTelemetryWriter(telemetry) {
   let durationHistogram = null;
   let cacheRequestsCounter = null;
   let relationChecksCounter = null;
+  let observabilityFailuresCounter = null;
   if (hasMethod(meter, 'createCounter') && hasMethod(meter, 'createHistogram')) {
     try {
       decisionsCounter = meter.createCounter('kerberos.decisions', {
@@ -108,7 +111,7 @@ function createTelemetryWriter(telemetry) {
       });
       durationHistogram = meter.createHistogram('kerberos.request.duration', {
         unit: 'ms',
-        description: 'Duration of Kerberos isAllowed/checkResources calls',
+        description: 'Duration of Kerberos engine and relations calls, by kerberos.req_kind',
       });
       cacheRequestsCounter = meter.createCounter('kerberos.cache.requests', {
         unit: '{request}',
@@ -118,12 +121,28 @@ function createTelemetryWriter(telemetry) {
         unit: '{check}',
         description: 'ReBAC relation checks resolved by the built-in resolver',
       });
+      observabilityFailuresCounter = meter.createCounter('kerberos.observability.failures', {
+        unit: '{failure}',
+        description:
+          'Swallowed logger/telemetry sink failures, by kerberos.observability.sink — a non-zero rate means audit or telemetry output is being lost while authorization keeps working',
+      });
     } catch {
       decisionsCounter = null;
       plansCounter = null;
       durationHistogram = null;
       cacheRequestsCounter = null;
       relationChecksCounter = null;
+      observabilityFailuresCounter = null;
+    }
+  }
+
+  // Best-effort self-count for the writer's own swallowed failures. Guarded so
+  // a broken meter can never re-throw out of a catch block.
+  function countSelfFailure() {
+    try {
+      observabilityFailuresCounter?.add(1, { 'kerberos.observability.sink': 'telemetry' });
+    } catch {
+      // Nothing left to do — the swallow contract still holds.
     }
   }
 
@@ -233,6 +252,7 @@ function createTelemetryWriter(telemetry) {
         }
       } catch {
         // Telemetry must never break authorization.
+        countSelfFailure();
       }
     },
 
@@ -258,6 +278,7 @@ function createTelemetryWriter(telemetry) {
         if (includeIdentity && plan.principalId) span.setAttribute?.('kerberos.principal.id', plan.principalId);
       } catch {
         // Telemetry must never break authorization.
+        countSelfFailure();
       }
     },
 
@@ -274,6 +295,7 @@ function createTelemetryWriter(telemetry) {
         handle.span?.setStatus?.({ code: SPAN_STATUS_ERROR, message: error?.message });
       } catch {
         // Telemetry must never break authorization.
+        countSelfFailure();
       }
     },
 
@@ -290,6 +312,7 @@ function createTelemetryWriter(telemetry) {
         cacheRequestsCounter?.add(1, attributes);
       } catch {
         // Telemetry must never break authorization.
+        countSelfFailure();
       }
     },
 
@@ -302,6 +325,42 @@ function createTelemetryWriter(telemetry) {
         relationChecksCounter?.add(1, { 'kerberos.relations.result': allowed ? 'allow' : 'deny' });
       } catch {
         // Telemetry must never break authorization.
+        countSelfFailure();
+      }
+    },
+
+    /**
+     * Annotates the request span with the engine-seam relation resolution
+     * (count of distinct relations + duration). This is the seam-level
+     * counterpart of the built-in resolver's own spans: it covers CUSTOM
+     * resolvers too, so relation latency is attributable from the engine span
+     * even when the resolver has no instrumentation of its own. Span
+     * attributes only — the kerberos.relations.checks counter stays inside
+     * the built-in resolver to avoid double counting.
+     */
+    recordRelationResolution(handle, resolution) {
+      try {
+        const span = handle?.span ?? null;
+        if (!span) return;
+        span.setAttribute?.('kerberos.relations.count', resolution.count);
+        span.setAttribute?.('kerberos.relations.duration_ms', resolution.duration);
+      } catch {
+        // Telemetry must never break authorization.
+        countSelfFailure();
+      }
+    },
+
+    /**
+     * Counts a swallowed observability-sink failure (`sink: 'logger'` from the
+     * engine's guarded log helpers; the writer's own failures self-count as
+     * `'telemetry'`). Keeps the swallow contract while making silent audit
+     * loss visible on a dashboard.
+     */
+    recordObservabilityFailure(sink) {
+      try {
+        observabilityFailuresCounter?.add(1, { 'kerberos.observability.sink': sink });
+      } catch {
+        // Nothing left to do — the swallow contract still holds.
       }
     },
 
@@ -315,6 +374,7 @@ function createTelemetryWriter(telemetry) {
         handle?.span?.end?.();
       } catch {
         // Telemetry must never break authorization.
+        countSelfFailure();
       }
     },
   };

@@ -1,0 +1,7 @@
+apiVersion: api.cerbos.dev/v1
+rolePolicy:
+  role: READER
+  scopePermissions: SCOPE_PERMISSIONS_OVERRIDE_PARENT
+  rules:
+    - resource: document
+      allowActions: ['view']

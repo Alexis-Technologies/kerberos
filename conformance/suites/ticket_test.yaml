@@ -1,0 +1,104 @@
+---
+name: ConflictResolutionConformance
+description: >-
+  Pins how an ALLOW and a DENY that both match one action are combined: deny
+  overrides allow WITHIN a role, allow overrides deny ACROSS roles.
+
+principals:
+  support:
+    id: s1
+    roles: ['SUPPORT']
+  auditor:
+    id: a1
+    roles: ['AUDITOR']
+  support_auditor:
+    id: sa1
+    roles: ['SUPPORT', 'AUDITOR']
+
+resources:
+  open_ticket:
+    id: t1
+    kind: ticket
+    attr:
+      locked: false
+  locked_ticket:
+    id: t2
+    kind: ticket
+    attr:
+      locked: true
+
+tests:
+  - name: a single role with only an ALLOW gets the allow
+    input:
+      principals: [support]
+      resources: [open_ticket]
+      actions: [close, comment]
+    expected:
+      - principal: support
+        resource: open_ticket
+        actions: { close: EFFECT_ALLOW, comment: EFFECT_ALLOW }
+
+  - name: a single role with only a DENY gets the deny
+    input:
+      principals: [auditor]
+      resources: [open_ticket]
+      actions: [close]
+    expected:
+      - principal: auditor
+        resource: open_ticket
+        actions: { close: EFFECT_DENY }
+
+  - name: within one role a conditional DENY overrides an earlier ALLOW
+    description: >-
+      Both `support-may-comment` and `nobody-comments-on-locked` match for a
+      SUPPORT principal on a locked ticket, and the ALLOW is listed first. Deny
+      wins, so rule order does not decide the outcome.
+    input:
+      principals: [support]
+      resources: [locked_ticket]
+      actions: [comment]
+    expected:
+      - principal: support
+        resource: locked_ticket
+        actions: { comment: EFFECT_DENY }
+
+  - name: a DENY scoped to another role does not veto the allowing role
+    description: >-
+      Anti-lockout. The AUDITOR deny is scoped to a role that does not carry the
+      allow, so holding AUDITOR in addition to SUPPORT cannot take away what
+      SUPPORT grants. This case previously diverged — Kerberos was deny-overrides
+      unconditionally — and is the reason the suite exists.
+    input:
+      principals: [support_auditor]
+      resources: [open_ticket]
+      actions: [close]
+    expected:
+      - principal: support_auditor
+        resource: open_ticket
+        actions: { close: EFFECT_ALLOW }
+
+  - name: a blanket DENY still overrides an ALLOW from any role
+    description: >-
+      Bounds the divergence above. `roles: ['*']` covers the allowing role too,
+      so both engines deny — blanket denies are not affected.
+    input:
+      principals: [support_auditor, support]
+      resources: [open_ticket]
+      actions: [escalate]
+    expected:
+      - principals: [support_auditor, support]
+        resource: open_ticket
+        actions: { escalate: EFFECT_DENY }
+
+  - name: a DENY that also enumerates the allowing role wins
+    description: >-
+      Bounds the divergence from the other side: once the DENY covers SUPPORT
+      as well, Cerbos's per-role resolution denies too, and the engines agree.
+    input:
+      principals: [support_auditor]
+      resources: [open_ticket]
+      actions: [delete]
+    expected:
+      - principal: support_auditor
+        resource: open_ticket
+        actions: { delete: EFFECT_DENY }

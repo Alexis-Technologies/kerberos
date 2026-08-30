@@ -8,6 +8,7 @@ const {
 const { RelationsJsonSchemas, RelationsTypeBoxSchemas, RelationsZodSchemas } = require('./schemas/index.js');
 
 const { createCacheReader } = require('../caching/cache.js');
+const { createLimiter, settleAll } = require('../async.js');
 const { createLoggerWriter } = require('../logging.js');
 const { createTelemetryWriter } = require('../telemetry.js');
 const { KerberosCodecError, KerberosRelationsError } = require('../errors.js');
@@ -91,138 +92,15 @@ function parseReverseEntry(raw) {
   throw new KerberosRelationsError('Invalid reverse entry — expected "type:id#relation" or { resource, relation }');
 }
 
-/**
- * allSettled with the engine's error rule: every sibling settles (no
- * unawaited rejection — memoized promises stay handled), then the FIRST
- * rejection reason is rethrown; otherwise the fulfilled values are returned
- * in input order.
- */
-async function settleAll(promises) {
-  const settled = await Promise.allSettled(promises);
-  const values = new Array(settled.length);
-  let firstError = null;
-  for (let i = 0; i < settled.length; i++) {
-    if (settled[i].status === 'rejected') {
-      if (!firstError) firstError = settled[i].reason;
-      continue;
-    }
-    values[i] = settled[i].value;
-  }
-  if (firstError) throw firstError instanceof Error ? firstError : new Error(String(firstError));
-  return values;
-}
-
-// ---------------------------------------------------------------------------
-// Subject-set algebra for lookupSubjects, keyed per type:
-//   { concrete: Map<type, Set<id>>, wildcards: Map<type, Set<excluded id>> }
-// Per-type Maps make wildcard coverage and subtraction O(1) per id instead of
-// slicing/`startsWith`-scanning composite string keys. Caveated tuples are
-// INCLUDED (results are an upper bound for them) — use check() for
-// per-subject certainty.
-// ---------------------------------------------------------------------------
-
-function emptySubjectSet() {
-  return { concrete: new Map(), wildcards: new Map() };
-}
-
-function cloneSubjectSet(set) {
-  const clone = emptySubjectSet();
-  for (const [type, ids] of set.concrete) clone.concrete.set(type, new Set(ids));
-  for (const [type, exclusions] of set.wildcards) clone.wildcards.set(type, new Set(exclusions));
-  return clone;
-}
-
-function addConcrete(set, type, id) {
-  let ids = set.concrete.get(type);
-  if (!ids) {
-    ids = new Set();
-    set.concrete.set(type, ids);
-  }
-  ids.add(id);
-}
-
-function wildcardCovers(set, type, id) {
-  const exclusions = set.wildcards.get(type);
-  return exclusions !== undefined && !exclusions.has(id);
-}
-
-function normalizeSubjectSet(set) {
-  // An exclusion that is also independently a concrete member is void.
-  for (const [type, exclusions] of set.wildcards) {
-    const ids = set.concrete.get(type);
-    if (!ids) continue;
-    for (const id of exclusions) if (ids.has(id)) exclusions.delete(id);
-  }
-  return set;
-}
-
-function unionSubjectSets(target, other) {
-  for (const [type, ids] of other.concrete) {
-    let targetIds = target.concrete.get(type);
-    if (!targetIds) {
-      targetIds = new Set();
-      target.concrete.set(type, targetIds);
-    }
-    for (const id of ids) targetIds.add(id);
-  }
-  for (const [type, otherExclusions] of other.wildcards) {
-    const existing = target.wildcards.get(type);
-    if (existing === undefined) {
-      target.wildcards.set(type, new Set(otherExclusions));
-      continue;
-    }
-    // Excluded from the union only if excluded on both sides. Deleting the
-    // current entry during Set iteration is safe per spec.
-    for (const id of existing) if (!otherExclusions.has(id)) existing.delete(id);
-  }
-  return normalizeSubjectSet(target);
-}
-
-function intersectSubjectSets(a, b) {
-  const result = emptySubjectSet();
-  for (const [type, ids] of a.concrete) {
-    const bIds = b.concrete.get(type);
-    for (const id of ids) {
-      if ((bIds !== undefined && bIds.has(id)) || wildcardCovers(b, type, id)) addConcrete(result, type, id);
-    }
-  }
-  for (const [type, ids] of b.concrete) {
-    for (const id of ids) {
-      if (wildcardCovers(a, type, id)) addConcrete(result, type, id);
-    }
-  }
-  for (const [type, aExclusions] of a.wildcards) {
-    const bExclusions = b.wildcards.get(type);
-    if (bExclusions === undefined) continue;
-    const merged = new Set(aExclusions);
-    for (const id of bExclusions) merged.add(id);
-    result.wildcards.set(type, merged);
-  }
-  return normalizeSubjectSet(result);
-}
-
-function subtractSubjectSets(target, other) {
-  for (const [type, ids] of target.concrete) {
-    const otherIds = other.concrete.get(type);
-    for (const id of ids) {
-      if ((otherIds !== undefined && otherIds.has(id)) || wildcardCovers(other, type, id)) ids.delete(id);
-    }
-    if (!ids.size) target.concrete.delete(type);
-  }
-  for (const [type, exclusions] of target.wildcards) {
-    const otherExclusions = other.wildcards.get(type);
-    if (otherExclusions !== undefined) {
-      // `type:* - type:*` removes the wildcard; the subtrahend's exclusions
-      // survive (they were not subtracted) unless excluded here too.
-      target.wildcards.delete(type);
-      for (const id of otherExclusions) if (!exclusions.has(id)) addConcrete(target, type, id);
-      continue;
-    }
-    const otherIds = other.concrete.get(type);
-    if (otherIds !== undefined) for (const id of otherIds) exclusions.add(id);
-  }
-  return normalizeSubjectSet(target);
-}
+const {
+  addConcrete,
+  cloneSubjectSet,
+  emptySubjectSet,
+  intersectSubjectSets,
+  normalizeSubjectSet,
+  subtractSubjectSets,
+  unionSubjectSets,
+} = require('./subjectSet.js');
 
 /**
  * The built-in in-process "Zanzibar-lite" relation resolver.
@@ -292,16 +170,24 @@ class RelationResolver {
   /** @type {Map<string, Array<{ subject: object, caveat: object | null }>>} */
   #forwardIndex = new Map();
 
-  /** @type {Map<string, Array<{ resource: { type: string, id: string }, relation: string, caveat: object | null }>>} */
-  #reverseStaticIndex = new Map();
+  /**
+   * Built lazily on first reverse-API use (see #ensureReverseStaticIndex):
+   * check/list-only deployments — the engine-seam contract — otherwise pay
+   * double the index memory for a structure they never read.
+   * @type {Map<string, Array<{ resource: { type: string, id: string }, relation: string, caveat: object | null }>> | null}
+   */
+  #reverseStaticIndex = null;
 
   // Structural reachability analyses per `${type}#${name}` — instance-scoped
   // and bounded by schema size, so a plain Map (not WeakMap) is the right
   // structure; session memos are request-scoped Maps owned by the caller.
   #reachabilityMemo = new Map();
 
-  // Kinds validated once per resolver (bounded by the schema's type count) so
-  // the hot object-form path skips the reserved-char regex after first sight.
+  // Seeded from the schema's type names at construction: known kinds skip the
+  // reserved-char regex on the hot object-form path, and UNKNOWN kinds are
+  // never cached — a caller-supplied kind outside the schema is about to fail
+  // #assertCheckable anyway, and caching arbitrary strings would let a fuzzing
+  // caller grow resolver memory without bound.
   #validKinds = new Set();
 
   // Argument validators are resolved ONCE here (mirroring Kerberos'
@@ -340,15 +226,38 @@ class RelationResolver {
       reverseIndex = false,
       maxDepth,
       maxResults,
+      maxConcurrency,
+      onTruncated,
       z,
       ajv,
       typebox,
     } = options;
 
+    if (maxConcurrency !== undefined && maxConcurrency !== null) {
+      if (typeof maxConcurrency !== 'number' || Number.isNaN(maxConcurrency) || maxConcurrency < 1) {
+        throw new KerberosRelationsError('Invalid maxConcurrency option — expected a number >= 1');
+      }
+    }
+
+    if (onTruncated !== undefined && onTruncated !== null && onTruncated !== 'ignore' && onTruncated !== 'throw') {
+      throw new KerberosRelationsError(`Invalid onTruncated option "${onTruncated}" — expected 'ignore' or 'throw'`);
+    }
+
     this.#schema = schema instanceof RelationSchema ? schema : new RelationSchema(schema, { z, ajv, typebox, codec });
+    for (const type of this.#schema.definitions.keys()) this.#validKinds.add(type);
     this.#limits = {
       maxDepth: maxDepth ?? DEFAULT_MAX_DEPTH,
       maxResults: maxResults ?? DEFAULT_MAX_RESULTS,
+      // 'throw' turns a maxResults truncation of lookupSubjects /
+      // lookupResources into a typed error instead of a silently narrowed
+      // result — for authorization filtering (query-plan expansion), a loud
+      // failure beats missing authorized rows. Default 'ignore' preserves the
+      // historical cap-and-return behavior.
+      onTruncated: onTruncated ?? 'ignore',
+      // Bounds the candidate-verification fan-out of lookupResources (the one
+      // wave that scales with tuple volume, not schema size). Infinity =
+      // historical unbounded behavior.
+      maxConcurrency: Number.isFinite(maxConcurrency) ? maxConcurrency : Infinity,
     };
     this.#reader = createCacheReader(cache, cacheRetry);
     this.#log = createLoggerWriter(logger);
@@ -566,25 +475,29 @@ class RelationResolver {
   async check(args, opts = {}) {
     // Validation runs INSIDE the instrumented scope so argument errors get an
     // error span and a duration sample too.
-    return this.#runInstrumented('RelationsCheck', async (otel) => {
-      if (!args || typeof args !== 'object') throw new KerberosRelationsError('check requires an arguments object');
-      const parsed = this.#parseArgs(this.#checkArgsValidator, 'Invalid check arguments', args);
+    return this.#runInstrumented(
+      'RelationsCheck',
+      async (otel) => {
+        if (!args || typeof args !== 'object') throw new KerberosRelationsError('check requires an arguments object');
+        const parsed = this.#parseArgs(this.#checkArgsValidator, 'Invalid check arguments', args);
 
-      const name = resolveName(parsed, 'check');
-      const resource = this.#normalizeResource(parsed.resource);
-      const subject = this.#normalizeSubject(parsed);
-      this.#assertCheckable(resource.type, name, 'check');
+        const name = resolveName(parsed, 'check');
+        const resource = this.#normalizeResource(parsed.resource);
+        const subject = this.#normalizeSubject(parsed);
+        this.#assertCheckable(resource.type, name, 'check');
 
-      const session = this.#createSession(parsed, opts);
-      const allowed = await this.#checkInternal(resource, name, subject, session, this.#limits.maxDepth);
-      this.#telemetry.recordRelationCheck(allowed);
-      this.#setSpanAttributes(otel, resource.type, name, {
-        'kerberos.allowed': allowed,
-        subjectKey: subjectToString(subject),
-        resourceId: resource.id,
-      });
-      return allowed;
-    });
+        const session = this.#createSession(parsed, opts);
+        const allowed = await this.#checkInternal(resource, name, subject, session, this.#limits.maxDepth);
+        this.#telemetry.recordRelationCheck(allowed);
+        this.#setSpanAttributes(otel, resource.type, name, {
+          'kerberos.allowed': allowed,
+          subjectKey: subjectToString(subject),
+          resourceId: resource.id,
+        });
+        return allowed;
+      },
+      opts?.callId ?? null,
+    );
   }
 
   /**
@@ -597,33 +510,37 @@ class RelationResolver {
    * @returns {Promise<Set<string>>}
    */
   async list(args, opts = {}) {
-    return this.#runInstrumented('RelationsList', async (otel) => {
-      if (!args || typeof args !== 'object') throw new KerberosRelationsError('list requires an arguments object');
-      const parsed = this.#parseArgs(this.#listArgsValidator, 'Invalid list arguments', args);
-      const names = parsed.relations;
-      if (!Array.isArray(names) || !names.length) {
-        throw new KerberosRelationsError('list requires a non-empty "relations" array');
-      }
+    return this.#runInstrumented(
+      'RelationsList',
+      async (otel) => {
+        if (!args || typeof args !== 'object') throw new KerberosRelationsError('list requires an arguments object');
+        const parsed = this.#parseArgs(this.#listArgsValidator, 'Invalid list arguments', args);
+        const names = parsed.relations;
+        if (!Array.isArray(names) || !names.length) {
+          throw new KerberosRelationsError('list requires a non-empty "relations" array');
+        }
 
-      const resource = this.#normalizeResource(parsed.resource);
-      const subject = this.#normalizeSubject(parsed);
-      for (const name of names) this.#assertCheckable(resource.type, name, 'list');
+        const resource = this.#normalizeResource(parsed.resource);
+        const subject = this.#normalizeSubject(parsed);
+        for (const name of names) this.#assertCheckable(resource.type, name, 'list');
 
-      const session = this.#createSession(parsed, opts);
-      const granted = new Set();
-      for (const name of names) {
-        const allowed = await this.#checkInternal(resource, name, subject, session, this.#limits.maxDepth);
-        this.#telemetry.recordRelationCheck(allowed);
-        if (allowed) granted.add(name);
-      }
-      this.#setSpanAttributes(otel, resource.type, null, {
-        'kerberos.relations.requested': names.length,
-        'kerberos.relations.granted': granted.size,
-        subjectKey: subjectToString(subject),
-        resourceId: resource.id,
-      });
-      return granted;
-    });
+        const session = this.#createSession(parsed, opts);
+        const granted = new Set();
+        for (const name of names) {
+          const allowed = await this.#checkInternal(resource, name, subject, session, this.#limits.maxDepth);
+          this.#telemetry.recordRelationCheck(allowed);
+          if (allowed) granted.add(name);
+        }
+        this.#setSpanAttributes(otel, resource.type, null, {
+          'kerberos.relations.requested': names.length,
+          'kerberos.relations.granted': granted.size,
+          subjectKey: subjectToString(subject),
+          resourceId: resource.id,
+        });
+        return granted;
+      },
+      opts?.callId ?? null,
+    );
   }
 
   /**
@@ -637,50 +554,57 @@ class RelationResolver {
    * @returns {Promise<Array<string | { subject: string, exclusions: string[] }>>}
    */
   async lookupSubjects(args, opts = {}) {
-    return this.#runInstrumented('RelationsLookupSubjects', async (otel) => {
-      if (!args || typeof args !== 'object') {
-        throw new KerberosRelationsError('lookupSubjects requires an arguments object');
-      }
-      const parsed = this.#parseArgs(this.#lookupSubjectsArgsValidator, 'Invalid lookupSubjects arguments', args);
-
-      const name = resolveName(parsed, 'lookupSubjects');
-      const resource = this.#normalizeResource(parsed.resource);
-      this.#assertCheckable(resource.type, name, 'lookupSubjects');
-
-      const session = this.#createSession(parsed, opts);
-      const collected = await this.#collectSubjectsInternal(resource, name, session, this.#limits.maxDepth);
-
-      const subjectTypeFilter = typeof parsed.subjectType === 'string' ? parsed.subjectType : null;
-      const results = [];
-      for (const [type, ids] of collected.concrete) {
-        if (subjectTypeFilter && type !== subjectTypeFilter) continue;
-        const exclusions = collected.wildcards.get(type);
-        for (const id of ids) {
-          // A concrete subject already covered by an unexcluded wildcard of
-          // the same type is redundant in the result.
-          if (exclusions !== undefined && !exclusions.has(id)) continue;
-          results.push(`${type}:${id}`);
+    return this.#runInstrumented(
+      'RelationsLookupSubjects',
+      async (otel) => {
+        if (!args || typeof args !== 'object') {
+          throw new KerberosRelationsError('lookupSubjects requires an arguments object');
         }
-      }
-      for (const [type, exclusions] of collected.wildcards) {
-        if (subjectTypeFilter && type !== subjectTypeFilter) continue;
-        if (exclusions.size) {
-          const excluded = [];
-          for (const id of exclusions) excluded.push(`${type}:${id}`);
-          excluded.sort();
-          results.push({ subject: `${type}:*`, exclusions: excluded });
-        } else {
-          results.push(`${type}:*`);
+        const parsed = this.#parseArgs(this.#lookupSubjectsArgsValidator, 'Invalid lookupSubjects arguments', args);
+
+        const name = resolveName(parsed, 'lookupSubjects');
+        const resource = this.#normalizeResource(parsed.resource);
+        this.#assertCheckable(resource.type, name, 'lookupSubjects');
+
+        const session = this.#createSession(parsed, opts);
+        const collected = await this.#collectSubjectsInternal(resource, name, session, this.#limits.maxDepth);
+
+        const subjectTypeFilter = typeof parsed.subjectType === 'string' ? parsed.subjectType : null;
+        const results = [];
+        for (const [type, ids] of collected.concrete) {
+          if (subjectTypeFilter && type !== subjectTypeFilter) continue;
+          const exclusions = collected.wildcards.get(type);
+          for (const id of ids) {
+            // A concrete subject already covered by an unexcluded wildcard of
+            // the same type is redundant in the result.
+            if (exclusions !== undefined && !exclusions.has(id)) continue;
+            results.push(`${type}:${id}`);
+          }
         }
-      }
-      results.sort(compareSubjectResults);
-      const limited = results.length > this.#limits.maxResults ? results.slice(0, this.#limits.maxResults) : results;
-      this.#setSpanAttributes(otel, resource.type, name, {
-        'kerberos.result.count': limited.length,
-        resourceId: resource.id,
-      });
-      return limited;
-    });
+        for (const [type, exclusions] of collected.wildcards) {
+          if (subjectTypeFilter && type !== subjectTypeFilter) continue;
+          if (exclusions.size) {
+            const excluded = [];
+            for (const id of exclusions) excluded.push(`${type}:${id}`);
+            excluded.sort();
+            results.push({ subject: `${type}:*`, exclusions: excluded });
+          } else {
+            results.push(`${type}:*`);
+          }
+        }
+        results.sort(compareSubjectResults);
+        const truncated = results.length > this.#limits.maxResults;
+        const limited = truncated ? results.slice(0, this.#limits.maxResults) : results;
+        this.#setSpanAttributes(otel, resource.type, name, {
+          'kerberos.result.count': limited.length,
+          'kerberos.result.truncated': truncated,
+          resourceId: resource.id,
+        });
+        if (truncated) this.#assertNotTruncated('lookupSubjects', results.length);
+        return limited;
+      },
+      opts?.callId ?? null,
+    );
   }
 
   /**
@@ -693,38 +617,44 @@ class RelationResolver {
    * @returns {Promise<string[]>}
    */
   async lookupResources(args, opts = {}) {
-    return this.#runInstrumented('RelationsLookupResources', async (otel) => {
-      if (!args || typeof args !== 'object') {
-        throw new KerberosRelationsError('lookupResources requires an arguments object');
-      }
-      const parsed = this.#parseArgs(this.#lookupResourcesArgsValidator, 'Invalid lookupResources arguments', args);
+    return this.#runInstrumented(
+      'RelationsLookupResources',
+      async (otel) => {
+        if (!args || typeof args !== 'object') {
+          throw new KerberosRelationsError('lookupResources requires an arguments object');
+        }
+        const parsed = this.#parseArgs(this.#lookupResourcesArgsValidator, 'Invalid lookupResources arguments', args);
 
-      const name = resolveName(parsed, 'lookupResources');
-      const subject = this.#normalizeSubject(parsed);
-      const resourceType = parsed.resourceType;
-      this.#assertCheckable(resourceType, name, 'lookupResources');
+        const name = resolveName(parsed, 'lookupResources');
+        const subject = this.#normalizeSubject(parsed);
+        const resourceType = parsed.resourceType;
+        this.#assertCheckable(resourceType, name, 'lookupResources');
 
-      // Cache-backed tuples make the static reverse index incomplete: the
-      // backend must opt in by maintaining `rel:rev:<subject>` documents.
-      if (this.#reader.enabled && !this.#reverseIndex) {
-        throw new KerberosRelationsError(
-          'lookupResources over cache-backed tuples requires reverseIndex: true and backend-maintained "rel:rev:<subject>" reverse documents',
-        );
-      }
+        // Cache-backed tuples make the static reverse index incomplete: the
+        // backend must opt in by maintaining `rel:rev:<subject>` documents.
+        if (this.#reader.enabled && !this.#reverseIndex) {
+          throw new KerberosRelationsError(
+            'lookupResources over cache-backed tuples requires reverseIndex: true and backend-maintained "rel:rev:<subject>" reverse documents',
+          );
+        }
 
-      const session = this.#createSession(parsed, opts);
-      const ids = await this.#lookupResourcesInternal(subject, resourceType, name, session, this.#limits.maxDepth);
-      const sortedIds = [...ids].sort();
-      const limitedIds =
-        sortedIds.length > this.#limits.maxResults ? sortedIds.slice(0, this.#limits.maxResults) : sortedIds;
-      const results = [];
-      for (const id of limitedIds) results.push(`${resourceType}:${id}`);
-      this.#setSpanAttributes(otel, resourceType, name, {
-        'kerberos.result.count': results.length,
-        subjectKey: subjectToString(subject),
-      });
-      return results;
-    });
+        const session = this.#createSession(parsed, opts);
+        const ids = await this.#lookupResourcesInternal(subject, resourceType, name, session, this.#limits.maxDepth);
+        const sortedIds = [...ids].sort();
+        const truncated = sortedIds.length > this.#limits.maxResults;
+        const limitedIds = truncated ? sortedIds.slice(0, this.#limits.maxResults) : sortedIds;
+        const results = [];
+        for (const id of limitedIds) results.push(`${resourceType}:${id}`);
+        this.#setSpanAttributes(otel, resourceType, name, {
+          'kerberos.result.count': results.length,
+          'kerberos.result.truncated': truncated,
+          subjectKey: subjectToString(subject),
+        });
+        if (truncated) this.#assertNotTruncated('lookupResources', sortedIds.length);
+        return results;
+      },
+      opts?.callId ?? null,
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -733,11 +663,14 @@ class RelationResolver {
   // run the handler directly (zero instrumentation overhead).
   // -------------------------------------------------------------------------
 
-  #runInstrumented(reqKind, handler) {
+  #runInstrumented(reqKind, handler, callId = null) {
     if (!this.#telemetry.enabled) return handler(null);
 
     const startedAt = getNow();
-    return this.#telemetry.withRequestSpan(reqKind, null, null, async (otel) => {
+    // callId (from opts, e.g. the engine's kerberosCallId through the
+    // relations seam) joins resolver spans to the authorization decision they
+    // served even when span parent-child nesting is unavailable.
+    return this.#telemetry.withRequestSpan(reqKind, callId, null, async (otel) => {
       try {
         return await handler(otel);
       } catch (error) {
@@ -793,7 +726,7 @@ class RelationResolver {
           `Invalid ${label} kind "${ref.type}" — kinds must not contain whitespace, ":", "#", "@", "*" or "|"`,
         );
       }
-      this.#validKinds.add(ref.type);
+      // Deliberately NOT cached — see the #validKinds field comment.
     }
     const id = ref.id;
     if (id.indexOf(':') !== -1 || id.indexOf('#') !== -1) {
@@ -840,6 +773,19 @@ class RelationResolver {
     if (!this.#schema.isCheckable(resourceType, name)) {
       throw new KerberosRelationsError(`${label}: "${name}" is not a relation or permission of "${resourceType}"`);
     }
+  }
+
+  // With onTruncated: 'throw', a capped reverse lookup fails loudly instead of
+  // returning a silently narrowed result (which downstream query-plan
+  // expansion would bake into an incomplete id filter, dropping authorized
+  // rows). Called after the span attributes are set so traces still record the
+  // truncation either way.
+  #assertNotTruncated(label, totalCount) {
+    if (this.#limits.onTruncated !== 'throw') return;
+    throw new KerberosRelationsError(
+      `${label}: result truncated to maxResults=${this.#limits.maxResults} (found ${totalCount}); ` +
+        'raise maxResults or handle truncation explicitly',
+    );
   }
 
   #identityToken(value) {
@@ -954,14 +900,33 @@ class RelationResolver {
       this.#forwardIndex.set(forwardKey, entries);
     }
     entries.push({ subject: tuple.subject, caveat: tuple.caveat });
+  }
 
-    const reverseKey = subjectToString(tuple.subject);
-    let reverseEntries = this.#reverseStaticIndex.get(reverseKey);
-    if (!reverseEntries) {
-      reverseEntries = [];
-      this.#reverseStaticIndex.set(reverseKey, reverseEntries);
+  // One O(n) pass over the forward index reconstructs the reverse view — all
+  // inputs are retained there, and the key format `type:id#relation` parses
+  // back unambiguously (types cannot contain ':', ids cannot contain '#').
+  // Reverse-set consumers are order-insensitive (results are set-built and
+  // sorted at the API boundary).
+  #ensureReverseStaticIndex() {
+    if (this.#reverseStaticIndex) return this.#reverseStaticIndex;
+    const index = new Map();
+    for (const [forwardKey, entries] of this.#forwardIndex) {
+      const typeEnd = forwardKey.indexOf(':');
+      const relationStart = forwardKey.indexOf('#', typeEnd + 1);
+      const resource = { type: forwardKey.slice(0, typeEnd), id: forwardKey.slice(typeEnd + 1, relationStart) };
+      const relation = forwardKey.slice(relationStart + 1);
+      for (const entry of entries) {
+        const reverseKey = subjectToString(entry.subject);
+        let reverseEntries = index.get(reverseKey);
+        if (!reverseEntries) {
+          reverseEntries = [];
+          index.set(reverseKey, reverseEntries);
+        }
+        reverseEntries.push({ resource, relation, caveat: entry.caveat });
+      }
     }
-    reverseEntries.push({ resource: tuple.resource, relation: tuple.relation, caveat: tuple.caveat });
+    this.#reverseStaticIndex = index;
+    return index;
   }
 
   async #readCachedEntries(type, id, relation) {
@@ -1017,30 +982,44 @@ class RelationResolver {
     }
   }
 
+  // Singleflight memoization for the session's shared read map. Stores the
+  // read PROMISE (not the value) so identical reads that start before the first
+  // settles coalesce. On rejection the entry is EVICTED (if it is still the
+  // stored promise) so a transient backend failure does not poison the subtree
+  // for the memo's lifetime — callers the README invites to reuse one memo
+  // across calls would otherwise keep re-throwing the stale error after the
+  // backend recovered. The eviction `.catch` keeps the rejection handled on its
+  // own branch; the returned promise still rejects for the awaiting caller.
+  #memoizeShared(session, key, factory) {
+    const existing = session.shared.get(key);
+    if (existing) return existing;
+    const promise = factory();
+    session.shared.set(key, promise);
+    promise.catch(() => {
+      if (session.shared.get(key) === promise) session.shared.delete(key);
+    });
+    return promise;
+  }
+
   // Doc-level fallback mirrors policy resolution: a static key wins and the
   // cache is only consulted on a full static miss — sources for the SAME
   // (resource, relation) key are never merged.
   //
-  // The memo stores the read PROMISE, not the resolved value: a batched
-  // checkResources evaluates resources concurrently, so identical document
-  // reads can start before the first one settles — memoizing the promise is
-  // the in-process equivalent of SpiceDB's singleflight coalescing. (Check
+  // Uses the singleflight memo (see #memoizeShared): static/empty reads resolve
+  // and stay memoized; a cache read that rejects evicts itself. (Check
   // subproblems memoize completed values only — an in-flight promise there
   // would deadlock on cyclic data instead of hitting the depth guard.)
   #readRelationEntries(type, id, relation, session) {
     const docKey = `doc|${type}:${id}#${relation}`;
-    let promise = session.shared.get(docKey);
-    if (!promise) {
+    return this.#memoizeShared(session, docKey, () => {
       const staticEntries = this.#forwardIndex.get(`${type}:${id}#${relation}`);
-      if (staticEntries) promise = Promise.resolve(staticEntries);
-      else promise = this.#reader.enabled ? this.#readCachedEntries(type, id, relation) : EMPTY_ENTRIES_PROMISE;
-      session.shared.set(docKey, promise);
-    }
-    return promise;
+      if (staticEntries) return Promise.resolve(staticEntries);
+      return this.#reader.enabled ? this.#readCachedEntries(type, id, relation) : EMPTY_ENTRIES_PROMISE;
+    });
   }
 
   async #loadReverseEntries(subjectKey) {
-    const staticEntries = this.#reverseStaticIndex.get(subjectKey) ?? EMPTY_ENTRIES;
+    const staticEntries = this.#ensureReverseStaticIndex().get(subjectKey) ?? EMPTY_ENTRIES;
     if (!this.#reader.enabled || !this.#reverseIndex) return staticEntries;
 
     // Reverse documents are keyed by the canonical subject string; unlike the
@@ -1098,13 +1077,7 @@ class RelationResolver {
 
   // Promise-memoized like forward documents (reverse reads never recurse).
   #readReverseEntries(subjectKey, session) {
-    const memoKey = `rev|${subjectKey}`;
-    let promise = session.shared.get(memoKey);
-    if (!promise) {
-      promise = this.#loadReverseEntries(subjectKey);
-      session.shared.set(memoKey, promise);
-    }
-    return promise;
+    return this.#memoizeShared(session, `rev|${subjectKey}`, () => this.#loadReverseEntries(subjectKey));
   }
 
   // -------------------------------------------------------------------------
@@ -1279,10 +1252,7 @@ class RelationResolver {
   // candidates found through it must then be verified with check().
   #subjectClosure(subject, session) {
     const memoKey = `closure|${subjectToString(subject)}`;
-    let promise = session.shared.get(memoKey);
-    if (promise) return promise;
-
-    promise = (async () => {
+    return this.#memoizeShared(session, memoKey, async () => {
       const members = new Set();
       let caveated = false;
       let level = [subjectToString(subject)];
@@ -1313,9 +1283,7 @@ class RelationResolver {
         level = next;
       }
       return { members, caveated };
-    })();
-    session.shared.set(memoKey, promise);
-    return promise;
+    });
   }
 
   async #lookupResourcesInternal(subject, type, name, session, depth) {
@@ -1413,11 +1381,19 @@ class RelationResolver {
     // the promise memo).
     let ids = candidates;
     if (analysis.needsCheck || closure.caveated) {
+      // Candidate verification is the wave that scales with tuple volume (one
+      // check chain per candidate) — the opt-in maxConcurrency limiter applies
+      // here so a 100k-candidate lookup cannot launch 100k chains at once.
+      const limit = Number.isFinite(this.#limits.maxConcurrency) ? createLimiter(this.#limits.maxConcurrency) : null;
       const candidateList = [];
       const checks = [];
       for (const id of candidates) {
         candidateList.push(id);
-        checks.push(this.#checkInternal({ type, id }, name, subject, session, depth - 1));
+        checks.push(
+          limit
+            ? limit(() => this.#checkInternal({ type, id }, name, subject, session, depth - 1))
+            : this.#checkInternal({ type, id }, name, subject, session, depth - 1),
+        );
       }
       const outcomes = await settleAll(checks);
       ids = new Set();

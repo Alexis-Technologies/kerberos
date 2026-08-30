@@ -1,6 +1,8 @@
 const { parseDerivedRolesShape } = require('./validation');
+const { cloneShapeTree, deepFreeze } = require('../freeze.js');
 
 const { Conditions } = require('../Conditions');
+const { compileMatcher } = require('../matching.js');
 const { parseConstants, parseVariables } = require('../policyParsers.js');
 
 /**
@@ -39,7 +41,7 @@ class DerivedRoles {
    * @param {object} [options]
    */
   constructor(shape, options = {}) {
-    this.#shape = DerivedRoles.parseShape(shape, options);
+    this.#shape = cloneShapeTree(DerivedRoles.parseShape(shape, options));
     if (this.#shape.constants) this.#shape.constants = DerivedRoles.parseConstants(this.#shape.constants, options);
     if (this.#shape.variables) this.#shape.variables = DerivedRoles.parseVariables(this.#shape.variables, options);
     if (this.#shape.definitions?.length) {
@@ -57,10 +59,23 @@ class DerivedRoles {
         // the optional-field validation on the next construction.
         const parsedDef = { ...def };
         if (def.condition) parsedDef.condition = DerivedRoles.parseConditions(def.condition, options);
+        if (Array.isArray(def.parentRoles) && def.parentRoles.length) {
+          // Cerbos matches parentRoles with globs (`*` and partial patterns
+          // like `adm*`) — precompiled here, non-enumerable like the policy
+          // rule matchers.
+          Object.defineProperty(parsedDef, 'parentRolesMatcher', { value: compileMatcher(def.parentRoles) });
+        }
         defs.push(parsedDef);
       }
       this.#shape.definitions = defs;
     }
+
+    // Post-construction hardening: the parsed shape IS live evaluation state
+    // (stored in the engine's policy Maps), and the constructor-time
+    // duplicate/deny integrity guards would be bypassable by mutating
+    // `policy.shape` afterwards. Frozen here, matching the codec's frozen
+    // shared ASTs and the Relations module's frozen compiled refs.
+    deepFreeze(this.#shape);
   }
 
   get name() {
@@ -80,18 +95,22 @@ class DerivedRoles {
   // Shared evaluation prelude: request enriched with constants/variables plus
   // an O(1) principal-roles set for parent-role gating.
   #buildEvalContext(req) {
+    // Skip the request copies when the definition set declares neither
+    // constants nor variables (the common case) — conditions then read `C`/`V`
+    // as undefined either way.
     const constants = this.#shape.constants?.get();
-    const reqWithConstants = { ...req, constants, C: constants };
+    const reqWithConstants = constants === undefined ? req : { ...req, constants, C: constants };
 
     const variables = this.#shape.variables?.get(reqWithConstants);
-    const reqWithVariables = { ...reqWithConstants, variables, V: variables };
+    const reqWithVariables =
+      variables === undefined ? reqWithConstants : { ...reqWithConstants, variables, V: variables };
 
     return { reqWithVariables, principalRoles: new Set(reqWithVariables.P.roles) };
   }
 
   static #parentRolesMatch(def, principalRoles) {
-    for (const role of def.parentRoles) {
-      if (principalRoles.has(role)) return true;
+    for (const role of principalRoles) {
+      if (def.parentRolesMatcher.matches(role)) return true;
     }
     return false;
   }
@@ -105,7 +124,23 @@ class DerivedRoles {
    * @returns {Set<string>}
    */
   get(req) {
-    const roles = new Set();
+    return new Set(this.getActivated(req).keys());
+  }
+
+  /**
+   * Same resolution as {@link get}, but keyed by role name with the
+   * definition's `parentRoles` as the value.
+   *
+   * Conflict resolution in a resource policy runs per principal role, and a
+   * derived role does not form a dimension of its own — it collapses into the
+   * principal roles that activated it. The engine therefore needs to know which
+   * roles each active derived role stands for, which a bare name cannot say.
+   *
+   * @param {Record<string, unknown>} req
+   * @returns {Map<string, string[]>}
+   */
+  getActivated(req) {
+    const roles = new Map();
 
     if (!this.#shape.definitions.length) return roles;
 
@@ -115,7 +150,7 @@ class DerivedRoles {
       if (def.relation) continue;
       if (!DerivedRoles.#parentRolesMatch(def, principalRoles)) continue;
 
-      if (def.condition.isFulfilled(reqWithVariables)) roles.add(def.name);
+      if (def.condition.isFulfilled(reqWithVariables)) roles.set(def.name, def.parentRoles);
     }
 
     return roles;
@@ -145,7 +180,10 @@ class DerivedRoles {
       }
       if (def.condition && !def.condition.isFulfilled(context.reqWithVariables)) continue;
 
-      candidates.push({ name: def.name, relation: def.relation });
+      // `parentRoles` is optional for relation-backed definitions; when absent
+      // the role is not gated on a principal role at all, and the engine treats
+      // it as standing for every role.
+      candidates.push({ name: def.name, relation: def.relation, parentRoles: def.parentRoles ?? null });
     }
 
     return candidates;

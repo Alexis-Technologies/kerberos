@@ -1,0 +1,29 @@
+---
+# Kept deliberately plannable: every condition reduces to comparisons over
+# `R.attr` / `P`, so `planResources` produces a filter tree rather than an
+# `opaque` operand. Used by the query-plan suite.
+apiVersion: 'api.cerbos.dev/v1'
+resourcePolicy:
+  version: default
+  resource: expense
+  rules:
+    - name: admin-all
+      actions: ['*']
+      effect: EFFECT_ALLOW
+      roles: ['ADMIN']
+
+    - name: user-view-own-or-approved
+      actions: ['view']
+      effect: EFFECT_ALLOW
+      roles: ['USER']
+      condition:
+        match:
+          expr: R.attr.ownerId == P.id || R.attr.status == 'APPROVED'
+
+    - name: user-approve-large-with-clearance
+      actions: ['approve']
+      effect: EFFECT_ALLOW
+      roles: ['USER']
+      condition:
+        match:
+          expr: P.attr.clearance >= 3 && R.attr.amount < 1000

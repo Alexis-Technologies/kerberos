@@ -123,4 +123,45 @@ describe('Runtime modules', () => {
       assert.equal(browserEntry.Kerberos, nodeEntry.Kerberos);
     });
   });
+
+  describe('Node-ESM named exports (cjs-module-lexer interop)', () => {
+    // src/index.js must be built only from `...require('./file.js')` spreads:
+    // a `...localVariable` spread, a `key: obj.member` property, or a
+    // bare-directory specifier makes cjs-module-lexer bail and silently drop
+    // every later name from the ESM named surface. Guard every direction.
+    const { execFileSync } = require('node:child_process');
+    const path = require('node:path');
+
+    const indexPath = path.join(__dirname, '..', 'index.js');
+    const runEsm = (source) =>
+      execFileSync(process.execPath, ['--input-type=module', '-e', source], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+    it('resolves every CJS export name as an ESM named import, with no internal seam leaked', () => {
+      const cjsNames = Object.keys(require('../index.js'));
+      const source = `
+        import * as ns from ${JSON.stringify(indexPath)};
+        const cjs = ${JSON.stringify(cjsNames)};
+        const missing = cjs.filter((name) => !(name in ns));
+        if (missing.length) throw new Error('missing ESM named exports: ' + missing.join(', '));
+        const leaked = ['EXPR_META', 'evalExprAst'].filter((name) => name in ns);
+        if (leaked.length) throw new Error('internal seam leaked to public surface: ' + leaked.join(', '));
+        process.stdout.write('ok');
+      `;
+      assert.equal(runEsm(source).trim(), 'ok');
+    });
+
+    it('resolves the dynamic-policy codec functions as ESM named imports', () => {
+      const source = `
+        import { createSafeExprCodec, serializePolicy, deserializePolicy, KerberosExprError } from ${JSON.stringify(indexPath)};
+        for (const [name, value] of Object.entries({ createSafeExprCodec, serializePolicy, deserializePolicy, KerberosExprError })) {
+          if (typeof value !== 'function') throw new Error(name + ' is not importable as a named export');
+        }
+        process.stdout.write('ok');
+      `;
+      assert.equal(runEsm(source).trim(), 'ok');
+    });
+  });
 });

@@ -1,0 +1,7 @@
+apiVersion: api.cerbos.dev/v1
+rolePolicy:
+  role: RS
+  scope: acme
+  rules:
+    - resource: sc
+      allowActions: ['view']

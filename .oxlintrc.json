@@ -247,6 +247,12 @@
     ],
     "node/no-exports-assign": "error",
     "node/no-new-require": "error",
-    "node/no-path-concat": "error"
+    "node/no-path-concat": "error",
+    "no-undef": "error",
+    "no-dupe-else-if": "error",
+    "getter-return": "error",
+    "no-setter-return": "error",
+    "no-unused-private-class-members": "error",
+    "no-constant-binary-expression": "error"
   }
 }

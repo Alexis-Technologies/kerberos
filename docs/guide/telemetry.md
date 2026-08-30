@@ -18,9 +18,9 @@ const kerberos2 = new Kerberos(policies, derivedRoles, {
 
 Works out of the box with any registered SDK (e.g. `NodeSDK` from `@opentelemetry/sdk-node`); with no SDK registered, everything no-ops.
 
-**Spans** — one per public call: `Kerberos.isAllowed` (decision attributes on the span) and `Kerberos.checkResources` (one `kerberos.decision` event per resource × action); the built-in ReBAC resolver adds `Kerberos.relations.check` / `.list` / `.lookupSubjects` / `.lookupResources` when given its own `telemetry` option (see [Resolver telemetry](/guide/relations-resolver#resolver-telemetry)). The span is started **active**, so spans created inside — e.g. an auto-instrumented Redis cache behind the `cache` option, or resolver spans under an engine span — nest correctly. Attributes include `kerberos.call_id`, `kerberos.req_id`, `kerberos.resource.kind`, `kerberos.action`, `kerberos.allowed` / `kerberos.effect`, `kerberos.matched_policy` / `kerberos.matched_rule` / `kerberos.matched_scope`, and identity attributes `kerberos.principal.id` / `kerberos.resource.id`. On errors the span gets `ERROR` status plus an exception event — error-handling behavior itself is controlled solely by the [`onError`](/guide/configuration) option, never by telemetry or logging.
+**Spans** — one per public call: `Kerberos.isAllowed` (decision attributes on the span), `Kerberos.checkResources` (one `kerberos.decision` event per resource × action) and `Kerberos.planResources` (plan attributes: `kerberos.plan.kind`, `kerberos.plan.actions_count`, `kerberos.plan.opaque_count`, `kerberos.plan.relation_count`); the built-in ReBAC resolver adds `Kerberos.relations.check` / `.list` / `.lookupSubjects` / `.lookupResources` when given its own `telemetry` option (see [Resolver telemetry](/guide/relations-resolver#resolver-telemetry)). When relation-backed derived roles resolve through the `relations` seam, the request span additionally carries `kerberos.relations.count` and `kerberos.relations.duration_ms` — so relation latency is attributable even with a **custom** resolver that has no instrumentation of its own. The span is started **active**, so spans created inside — e.g. an auto-instrumented Redis cache behind the `cache` option, or resolver spans under an engine span — nest correctly. Attributes include `kerberos.call_id`, `kerberos.req_id`, `kerberos.resource.kind`, `kerberos.action`, `kerberos.allowed` / `kerberos.effect`, `kerberos.matched_policy` / `kerberos.matched_rule` / `kerberos.matched_scope`, and identity attributes `kerberos.principal.id` / `kerberos.resource.id`. On errors the span gets `ERROR` status plus an exception event — error-handling behavior itself is controlled solely by the [`onError`](/guide/configuration) option, never by telemetry or logging.
 
-**Metrics** — four instruments:
+**Metrics** — six instruments:
 
 | Instrument | Type | Unit | Attributes |
 | ---------- | ---- | ---- | ---------- |
@@ -29,6 +29,7 @@ Works out of the box with any registered SDK (e.g. `NodeSDK` from `@opentelemetr
 | `kerberos.request.duration` | Histogram | `ms` | `kerberos.req_kind`, `error` |
 | `kerberos.cache.requests` | Counter | `{request}` | `kerberos.cache.result` (`hit`/`miss`/`error`), `kerberos.cache.kind` (only for ReBAC tuple reads: `relation`) |
 | `kerberos.relations.checks` | Counter | `{check}` | `kerberos.relations.result` (`allow`/`deny`) |
+| `kerberos.observability.failures` | Counter | `{failure}` | `kerberos.observability.sink` (`logger`/`telemetry`) — swallowed sink failures. Authorization is never affected by a broken logger/exporter, but a non-zero rate here means audit or telemetry output is being **lost**; the engine also `console.warn`s once per instance on the first swallowed logger failure. |
 
 ::: info
 Metric attributes deliberately exclude actions and principals to keep cardinality bounded — they assume a bounded set of resource kinds.

@@ -1,0 +1,10 @@
+{
+  "name": "document_roles",
+  "definitions": [
+    {
+      "name": "owner",
+      "parentRoles": ["USER"],
+      "condition": { "match": { "$expr": "R.attr.ownerId === P.id" } }
+    }
+  ]
+}

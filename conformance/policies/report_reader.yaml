@@ -1,0 +1,9 @@
+---
+apiVersion: 'api.cerbos.dev/v1'
+rolePolicy:
+  role: READER
+  rules:
+    - resource: report
+      # `archive` is deliberately NOT granted by the resource policy: a role
+      # policy allowlisting it must still not be able to grant it.
+      allowActions: ['view', 'archive']

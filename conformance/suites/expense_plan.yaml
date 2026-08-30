@@ -1,0 +1,85 @@
+---
+# Query-plan corpus, shaped after Cerbos's own QueryPlannerTestSuite golden
+# files: one principal per suite, and each test records the `want.filter` the
+# engine must produce. Filters are compared after canonicalization (see
+# conformance/lib/canonical.js) because neither engine promises an operand order.
+description: Query-plan parity for the `expense` kind.
+
+principal:
+  id: u1
+  roles: ['USER']
+  attr:
+    clearance: 4
+
+tests:
+  - description: an unresolved OR over two resource attributes stays conditional
+    resource: { kind: expense }
+    action: view
+    want:
+      filter:
+        kind: KIND_CONDITIONAL
+        condition:
+          expression:
+            operator: or
+            operands:
+              - expression:
+                  operator: eq
+                  operands:
+                    - variable: request.resource.attr.ownerId
+                    - value: u1
+              - expression:
+                  operator: eq
+                  operands:
+                    - variable: request.resource.attr.status
+                    - value: APPROVED
+
+  - description: >-
+      the principal-only half of the condition is decided at plan time
+      (clearance 4 >= 3 folds away), leaving just the resource predicate
+    resource: { kind: expense }
+    action: approve
+    want:
+      filter:
+        kind: KIND_CONDITIONAL
+        condition:
+          expression:
+            operator: lt
+            operands:
+              - variable: request.resource.attr.amount
+              - value: 1000
+
+  - description: multiple actions plan the conjunction
+    resource: { kind: expense }
+    actions: [view, approve]
+    want:
+      filter:
+        kind: KIND_CONDITIONAL
+        condition:
+          expression:
+            operator: and
+            operands:
+              - expression:
+                  operator: or
+                  operands:
+                    - expression:
+                        operator: eq
+                        operands:
+                          - variable: request.resource.attr.ownerId
+                          - value: u1
+                    - expression:
+                        operator: eq
+                        operands:
+                          - variable: request.resource.attr.status
+                          - value: APPROVED
+              - expression:
+                  operator: lt
+                  operands:
+                    - variable: request.resource.attr.amount
+                    - value: 1000
+
+  - description: an action reachable by no rule is denied without a filter
+    resource: { kind: expense }
+    action: shred
+    want:
+      filter:
+        kind: KIND_ALWAYS_DENIED

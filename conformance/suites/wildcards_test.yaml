@@ -1,0 +1,137 @@
+---
+name: WildcardConformance
+description: >-
+  Glob matching in every field that supports it (Cerbos semantics, from
+  internal/util/globs_common.go): a bare `*` matches anything, `:` is the
+  segment separator so `view:*` matches `view:public` but neither the bare
+  `view` nor `view:a:b`, and mid-segment globs like `v*w` stay within one
+  segment. Fields covered: resource-policy actions and roles, principal-policy
+  resource and action, role-policy resource and allowActions, derived-role
+  parentRoles.
+
+principals:
+  u1:
+    id: p1
+    roles: ['U1']
+  u2:
+    id: p2
+    roles: ['U2']
+  u4:
+    id: p4
+    roles: ['U4']
+  u5:
+    id: p5
+    roles: ['U5']
+  ryan:
+    id: ryan
+    roles: ['Z']
+  rg_holder:
+    id: p6
+    roles: ['RG']
+  rh_holder:
+    id: p7
+    roles: ['RH']
+  admin_like:
+    id: p8
+    roles: ['admin']
+  team_member:
+    id: p9
+    roles: ['team_red']
+
+resources:
+  glob_doc:
+    id: g1
+    kind: glob
+  gr_doc:
+    id: g2
+    kind: gr
+  wp_doc:
+    id: g3
+    kind: wp
+  rolesfield_doc:
+    id: g4
+    kind: rg
+
+tests:
+  - name: action glob view:* honours the segment separator
+    input:
+      principals: [u1]
+      resources: [glob_doc]
+      actions: ['view:public', 'view', 'view:a:b']
+    expected:
+      - principal: u1
+        resource: glob_doc
+        actions: { 'view:public': EFFECT_ALLOW, view: EFFECT_DENY, 'view:a:b': EFFECT_DENY }
+
+  - name: a mid-segment glob matches within one segment only
+    input:
+      principals: [u2]
+      resources: [glob_doc]
+      actions: ['view', 'view:public']
+    expected:
+      - principal: u2
+        resource: glob_doc
+        actions: { view: EFFECT_ALLOW, 'view:public': EFFECT_DENY }
+
+  - name: a bare * crosses segments, and a DENY glob beats it
+    input:
+      principals: [u4]
+      resources: [glob_doc]
+      actions: ['other:x', 'edit:a']
+    expected:
+      - principal: u4
+        resource: glob_doc
+        actions: { 'other:x': EFFECT_ALLOW, 'edit:a': EFFECT_DENY }
+
+  - name: deep globs stop at the next separator
+    input:
+      principals: [u5]
+      resources: [glob_doc]
+      actions: ['deep:a', 'deep:a:b']
+    expected:
+      - principal: u5
+        resource: glob_doc
+        actions: { 'deep:a': EFFECT_ALLOW, 'deep:a:b': EFFECT_DENY }
+
+  - name: principal policies glob the resource kind
+    input:
+      principals: [ryan]
+      resources: [glob_doc]
+      actions: [touch]
+    expected:
+      - principal: ryan
+        resource: glob_doc
+        actions: { touch: EFFECT_ALLOW }
+
+  - name: role policies glob allowActions and the resource kind
+    input:
+      principals: [rg_holder, rh_holder]
+      resources: [gr_doc]
+      actions: ['view:public', 'view', 'edit']
+    expected:
+      - principal: rg_holder
+        resource: gr_doc
+        actions: { 'view:public': EFFECT_ALLOW, view: EFFECT_DENY, edit: EFFECT_DENY }
+      - principal: rh_holder
+        resource: gr_doc
+        actions: { 'view:public': EFFECT_DENY, view: EFFECT_ALLOW, edit: EFFECT_DENY }
+
+  - name: derived-role parentRoles glob principal roles
+    input:
+      principals: [admin_like]
+      resources: [wp_doc]
+      actions: [view]
+    expected:
+      - principal: admin_like
+        resource: wp_doc
+        actions: { view: EFFECT_ALLOW }
+
+  - name: the roles field of a resource rule globs too
+    input:
+      principals: [team_member]
+      resources: [rolesfield_doc]
+      actions: [view]
+    expected:
+      - principal: team_member
+        resource: rolesfield_doc
+        actions: { view: EFFECT_ALLOW }

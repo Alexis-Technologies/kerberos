@@ -1,0 +1,8 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "principalPolicy": {
+    "principal": "auditor_amy",
+    "version": "default",
+    "rules": [{ "resource": "document", "actions": [{ "action": "view", "effect": "EFFECT_ALLOW" }] }]
+  }
+}

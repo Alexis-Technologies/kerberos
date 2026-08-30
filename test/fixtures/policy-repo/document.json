@@ -1,0 +1,17 @@
+{
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "document",
+    "schemas": { "resourceSchema": { "ref": "cerbos:///document.json" } },
+    "importDerivedRoles": ["document_roles"],
+    "rules": [
+      { "actions": ["view"], "effect": "EFFECT_ALLOW", "derivedRoles": ["owner"] },
+      {
+        "actions": ["publish"],
+        "effect": "EFFECT_ALLOW",
+        "roles": ["EDITOR"],
+        "condition": { "match": { "$expr": "R.attr.status === \"READY\"" } }
+      }
+    ]
+  }
+}

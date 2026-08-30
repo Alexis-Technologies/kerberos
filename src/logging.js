@@ -1,4 +1,5 @@
 const LEGACY_EXCLUDED_FOR_TABLE = new Set([
+  'principalRoles',
   'principalScope',
   'principalPolicyVersion',
   'resourceScope',
@@ -29,13 +30,16 @@ function hasMethod(value, methodName) {
   return typeof value?.[methodName] === 'function';
 }
 
-function isLegacyLogger(logger) {
-  return (
-    hasMethod(logger, 'log') ||
-    hasMethod(logger, 'table') ||
-    hasMethod(logger, 'group') ||
-    hasMethod(logger, 'groupEnd')
-  );
+// A console-like logger is identified by console-SPECIFIC methods (table /
+// group / groupEnd). A bare `.log` is deliberately NOT part of this test:
+// structured loggers such as winston and consola expose `.log` alongside
+// `.info`/`.debug`, and classifying them as console-like routed their audit
+// entries into the legacy writer — where `logger.log(summaryString)` misfires
+// (winston reads the first arg as a level) and the per-entry writes land on
+// `debug`, silently losing the audit trail. Only true console-likes have
+// table/group.
+function isConsoleLikeLogger(logger) {
+  return hasMethod(logger, 'table') || hasMethod(logger, 'group') || hasMethod(logger, 'groupEnd');
 }
 
 function isStructuredLogger(logger) {
@@ -53,6 +57,9 @@ function buildAuditEntries(input, reqKind, callId) {
         timestamp: new Date().toISOString(),
         reqKind,
         principalId: req.P.id,
+        // The role layer decides outcomes, and roles change over time — an
+        // audit entry must record the set the decision was based on.
+        principalRoles: req.P.roles,
         principalScope: req.P.scope,
         principalPolicyVersion: req.P.policyVersion,
         resourceKind: req.R.kind,
@@ -63,6 +70,7 @@ function buildAuditEntries(input, reqKind, callId) {
         effect: result.effects.get(action),
         outputs: result.outputs ? [...result.outputs.values()] : [],
         meta: result.meta,
+        validationErrors: result.validationErrors,
       };
 
       if (!auditEntry.callId) delete auditEntry.callId;
@@ -72,6 +80,7 @@ function buildAuditEntries(input, reqKind, callId) {
       if (!auditEntry.resourceScope) delete auditEntry.resourceScope;
       if (!auditEntry.resourcePolicyVersion) delete auditEntry.resourcePolicyVersion;
       if (!auditEntry.meta) delete auditEntry.meta;
+      if (!auditEntry.validationErrors) delete auditEntry.validationErrors;
 
       auditEntries.push(auditEntry);
     }
@@ -122,6 +131,7 @@ function createDisabledLoggerWriter() {
   return {
     enabled: false,
     write() {},
+    info() {},
     debug() {},
     error() {},
   };
@@ -146,6 +156,15 @@ function createLegacyLoggerWriter(logger) {
       }
 
       logger.groupEnd?.();
+    },
+    // Decision-level entries that must not be filtered out at production log
+    // levels (unlike lifecycle `debug` events) — e.g. PlanResources results.
+    info(entry, message) {
+      if (hasMethod(logger, 'info')) {
+        logger.info(entry, message);
+        return;
+      }
+      logger.log?.(message, entry);
     },
     debug(entry, message) {
       logger.debug?.(entry, message);
@@ -176,6 +195,11 @@ function createStructuredLoggerWriter(logger) {
         writeMethod(auditEntry, buildStructuredMessage(auditEntry));
       }
     },
+    // Same level as decision audit entries (`write`) — plan results are
+    // decisions, not lifecycle noise, so they survive a `level: 'info'` sink.
+    info(entry, message) {
+      writeMethod(entry, message);
+    },
     debug(entry, message) {
       debugMethod(entry, message);
     },
@@ -189,8 +213,14 @@ function createLoggerWriter(logger) {
   if (!logger) return createDisabledLoggerWriter();
   if (logger === true) return createLegacyLoggerWriter(console);
   if (typeof logger !== 'object') return createDisabledLoggerWriter();
-  if (isLegacyLogger(logger)) return createLegacyLoggerWriter(logger);
+  // Console-likes (console itself, custom table/group loggers) → legacy writer.
+  if (isConsoleLikeLogger(logger)) return createLegacyLoggerWriter(logger);
+  // Structured loggers (Pino, winston, consola, bunyan) → structured writer,
+  // even though several of them also expose `.log`.
   if (isStructuredLogger(logger)) return createStructuredLoggerWriter(logger);
+  // A bare `console.log`-only shim (no table/group, no info/debug): preserve the
+  // legacy behavior of emitting the summary line rather than silently dropping it.
+  if (hasMethod(logger, 'log')) return createLegacyLoggerWriter(logger);
   return createDisabledLoggerWriter();
 }
 

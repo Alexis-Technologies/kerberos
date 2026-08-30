@@ -1,6 +1,8 @@
 const { parsePrincipalPolicyShape } = require('./validation');
+const { cloneShapeTree, deepFreeze } = require('../freeze.js');
 
-const { ALL_ACTIONS, ALL_RESOURCES, Effect } = require('../schemas');
+const { Effect } = require('../schemas');
+const { compileMatcher } = require('../matching.js');
 const { parseConditions, parseConstants, parseOutputs, parseVariables } = require('../policyParsers.js');
 
 /**
@@ -31,7 +33,7 @@ class PrincipalPolicy {
   #shape = null;
 
   constructor(shape, options = {}) {
-    this.#shape = PrincipalPolicy.parseShape(shape, options);
+    this.#shape = cloneShapeTree(PrincipalPolicy.parseShape(shape, options));
     if (this.#shape.principalPolicy.constants) {
       this.#shape.principalPolicy.constants = PrincipalPolicy.parseConstants(
         this.#shape.principalPolicy.constants,
@@ -49,16 +51,29 @@ class PrincipalPolicy {
       for (const rule of this.#shape.principalPolicy.rules) {
         const actions = [];
         for (const actionRule of rule.actions) {
-          actions.push({
+          const parsedAction = {
             ...actionRule,
             condition: PrincipalPolicy.parseConditions(actionRule.condition, options),
             output: PrincipalPolicy.parseOutputs(actionRule.output, options),
-          });
+          };
+          // Glob-aware matchers, precompiled per rule (see ResourcePolicy);
+          // non-enumerable so they never leak into serialized shapes.
+          Object.defineProperty(parsedAction, 'actionMatcher', { value: compileMatcher([actionRule.action]) });
+          actions.push(parsedAction);
         }
-        rules.push({ ...rule, actions });
+        const parsedRule = { ...rule, actions };
+        Object.defineProperty(parsedRule, 'resourceMatcher', { value: compileMatcher([rule.resource]) });
+        rules.push(parsedRule);
       }
       this.#shape.principalPolicy.rules = rules;
     }
+
+    // Post-construction hardening: the parsed shape IS live evaluation state
+    // (stored in the engine's policy Maps), and the constructor-time
+    // duplicate/deny integrity guards would be bypassable by mutating
+    // `policy.shape` afterwards. Frozen here, matching the codec's frozen
+    // shared ASTs and the Relations module's frozen compiled refs.
+    deepFreeze(this.#shape);
   }
 
   get principal() {
@@ -99,11 +114,15 @@ class PrincipalPolicy {
 
     if (!req.actions?.length) return { effects, outputs, meta };
 
+    // Skip the request copies when the policy declares neither constants nor
+    // variables (the common case): conditions then read `C`/`V` as undefined
+    // either way, and the hot path saves two object spreads per check.
     const constants = this.#shape.principalPolicy.constants?.get();
-    const reqWithConstants = { ...req, constants, C: constants };
+    const reqWithConstants = constants === undefined ? req : { ...req, constants, C: constants };
 
     const variables = this.#shape.principalPolicy.variables?.get(reqWithConstants);
-    const reqWithVariables = { ...reqWithConstants, variables, V: variables };
+    const reqWithVariables =
+      variables === undefined ? reqWithConstants : { ...reqWithConstants, variables, V: variables };
 
     const rules = this.rules;
 
@@ -119,12 +138,12 @@ class PrincipalPolicy {
 
       for (let i = 0; i < rules.length; i++) {
         const rule = rules[i];
-        if (rule.resource !== ALL_RESOURCES && rule.resource !== reqWithVariables.R.kind) continue;
+        if (!rule.resourceMatcher.matches(reqWithVariables.R.kind)) continue;
 
         const actionRules = rule.actions;
         for (let j = 0; j < actionRules.length; j++) {
           const actionRule = actionRules[j];
-          if (actionRule.action !== ALL_ACTIONS && actionRule.action !== action) continue;
+          if (!actionRule.actionMatcher.matches(action)) continue;
 
           const isConditionFulfilled = actionRule.condition ? actionRule.condition.isFulfilled(reqWithVariables) : true;
           const metaSrc = `${metaSrcBase}#${actionRule.name || `UNNAMED_RULE_${i + 1}_${j + 1}`}`;

@@ -1,0 +1,8 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: default
+  resource: narrow2
+  rules:
+    - actions: ['nothing']
+      effect: EFFECT_ALLOW
+      roles: ['NOBODY']

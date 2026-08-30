@@ -804,6 +804,35 @@ describe('RelationResolver', () => {
       );
     });
 
+    it('evicts rejected reads from a shared memo so callers recover after a transient failure', async () => {
+      // A rejected singleflight promise must not stay poisoned in a shared
+      // memo: the README invites callers to reuse one memo across calls, and a
+      // single transient backend blip would otherwise re-throw forever.
+      const { KerberosCacheError } = require('../src/index.js');
+      let failures = 1;
+      const cache = {
+        async get(key) {
+          if (failures > 0) {
+            failures--;
+            throw new Error('ECONNRESET');
+          }
+          return key === 'rel:document:flaky:viewer' ? ['user:carl'] : undefined;
+        },
+      };
+      const relations = buildResolver({ cache, cacheRetry: { attempts: 1 } });
+      const memo = new Map();
+
+      await assert.rejects(
+        () => relations.check({ resource: 'document:flaky', permission: 'view', subject: 'user:carl' }, { memo }),
+        (error) => error instanceof KerberosCacheError,
+      );
+      // Same shared memo after the backend recovered: the read retries and succeeds.
+      assert.equal(
+        await relations.check({ resource: 'document:flaky', permission: 'view', subject: 'user:carl' }, { memo }),
+        true,
+      );
+    });
+
     it('shares document reads through the memo across list names', async () => {
       const cache = buildCache({ 'rel:document:shared:viewer': ['user:carl'] });
       const relations = buildResolver({ cache });
@@ -1005,6 +1034,39 @@ describe('RelationResolver', () => {
         await limited.lookupResources({ subject: 'user:sara', permission: 'view', resourceType: 'document' }),
         ['document:public'],
       );
+    });
+
+    it("onTruncated: 'throw' fails loudly instead of silently narrowing the result", async () => {
+      const strict = buildResolver({ maxResults: 1, onTruncated: 'throw' });
+      await assert.rejects(
+        () => strict.lookupResources({ subject: 'user:sara', permission: 'view', resourceType: 'document' }),
+        (error) => error instanceof KerberosRelationsError && /truncated to maxResults=1/.test(error.message),
+      );
+      await assert.rejects(
+        () => strict.lookupSubjects({ resource: 'document:readme', permission: 'view' }),
+        (error) => error instanceof KerberosRelationsError && /lookupSubjects: result truncated/.test(error.message),
+      );
+      // Under the cap the strict mode returns results normally.
+      assert.deepEqual(
+        await buildResolver({ onTruncated: 'throw' }).lookupResources({
+          subject: 'user:olga',
+          relation: 'owner',
+          resourceType: 'document',
+        }),
+        ['document:orphan', 'document:readme'],
+      );
+      // Invalid option values are rejected at construction.
+      assert.throws(() => buildResolver({ onTruncated: 'maybe' }), KerberosRelationsError);
+    });
+
+    it('maxConcurrency bounds candidate verification without changing results', async () => {
+      const unbounded = buildResolver({});
+      const limited = buildResolver({ maxConcurrency: 1 });
+      assert.deepEqual(
+        await limited.lookupResources({ subject: 'user:sara', permission: 'view', resourceType: 'document' }),
+        await unbounded.lookupResources({ subject: 'user:sara', permission: 'view', resourceType: 'document' }),
+      );
+      assert.throws(() => buildResolver({ maxConcurrency: 0 }), KerberosRelationsError);
     });
 
     it('requires the reverse-index contract when a cache is configured', async () => {
@@ -2031,7 +2093,7 @@ describe('RelationResolver contract hardening', () => {
     assert.deepEqual(await relations.lookupSubjects({ resource: 'doc:d1', permission: 'view' }), ['user:*']);
   });
 
-  it('keeps actionsSet/allowActionsSet out of serialized policy shapes (M7)', async () => {
+  it('keeps actionsMatcher/allowActionsMatcher out of serialized policy shapes (M7)', async () => {
     const { ResourcePolicy, RolePolicy } = require('../src/index.js');
     const resourcePolicy = new ResourcePolicy({
       resourcePolicy: {
@@ -2044,11 +2106,11 @@ describe('RelationResolver contract hardening', () => {
       rolePolicy: { role: 'USER', version: 'default', rules: [{ resource: 'expense', allowActions: ['view'] }] },
     });
 
-    assert.equal(JSON.stringify(resourcePolicy.shape).includes('actionsSet'), false);
-    assert.equal(JSON.stringify(rolePolicy.shape).includes('allowActionsSet'), false);
+    assert.equal(JSON.stringify(resourcePolicy.shape).includes('actionsMatcher'), false);
+    assert.equal(JSON.stringify(rolePolicy.shape).includes('allowActionsMatcher'), false);
     // The hot-path Sets still exist as non-enumerable fields.
-    assert.ok(resourcePolicy.rules[0].actionsSet instanceof Set);
-    assert.ok(rolePolicy.rules[0].allowActionsSet instanceof Set);
+    assert.equal(typeof resourcePolicy.rules[0].actionsMatcher.matches, 'function');
+    assert.equal(typeof rolePolicy.rules[0].allowActionsMatcher.matches, 'function');
 
     // And evaluation still works.
     const kerberos = new Kerberos(

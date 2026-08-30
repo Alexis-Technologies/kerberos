@@ -4,12 +4,16 @@ Kerberos.js can resolve policies dynamically from a remote store (Redis, MongoDB
 
 ## How it works (fallback layer)
 
-Static policies passed to the constructor stay in memory and are always checked first. The `cache` is only consulted on a **miss**:
+Static policies passed to the constructor stay in memory; the `cache` is a fallback source. Resolution collects the **whole policy chain** along the scope search chain, with per-scope precedence:
 
-1. Resolve the policy by `kind` / `id` / `role` + `policyVersion` + scope chain in memory.
-2. On a miss, and only if a `cache` is configured, call `await cache.get(key)` for each scope in the chain.
-3. On a hit, the JSON document is handled according to the `codec` option (see below).
+1. For each scope in the chain (most specific → base), look the policy up in memory first, then — only on a miss at that scope, and only if a `cache` is configured — call `await cache.get(key)`.
+2. On a hit, the JSON document is handled according to the `codec` option (see below).
+3. Every policy found participates in [per-action scope evaluation](/guide/scopes) — a more specific policy decides first, and actions it does not decide fall through to less specific ones.
 4. If nothing matches, the action falls back to `EFFECT_DENY` (unchanged behavior).
+
+::: info
+Precedence is **per scope**: an in-memory policy wins at its own scope, but no longer shadows a *more specific* cached policy at a deeper scope. Hybrid deployments (static org-wide defaults in code + per-tenant overrides in the store) resolve the way scope specificity implies.
+:::
 
 Cache keys follow this layout:
 

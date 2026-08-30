@@ -5,7 +5,7 @@ import type {
   RequestResource,
   TypeBoxLike,
   ValidationOptions,
-} from '@alexify/kerberos';
+} from './index.js';
 
 export type PrincipalMockSchema = RequestPrincipal & { name: string };
 export class PrincipalMock {
@@ -36,13 +36,13 @@ export class PrincipalsMock {
   get(name: string): PrincipalMock | undefined;
 }
 export class PrincipalsMockZodSchemas {
-  static buildShape(z: unknown, PrincipalMock: typeof PrincipalMock): unknown;
+  static buildShape(z: unknown, principalMockClass: typeof PrincipalMock): unknown;
 }
 export class PrincipalsMockJsonSchemas {
-  static buildShape(PrincipalMock: typeof PrincipalMock): Record<string, unknown>;
+  static buildShape(principalMockClass: typeof PrincipalMock): Record<string, unknown>;
 }
 export class PrincipalsMockTypeBoxSchemas {
-  static buildShape(typebox: TypeBoxLike, PrincipalMock: typeof PrincipalMock): unknown;
+  static buildShape(typebox: TypeBoxLike, principalMockClass: typeof PrincipalMock): unknown;
 }
 
 export type ResourceMockSchema = RequestResource & { name: string };
@@ -75,13 +75,13 @@ export class ResourcesMock {
   getById(id: string): ResourceMock | undefined;
 }
 export class ResourcesMockZodSchemas {
-  static buildShape(z: unknown, ResourceMock: typeof ResourceMock): unknown;
+  static buildShape(z: unknown, resourceMockClass: typeof ResourceMock): unknown;
 }
 export class ResourcesMockJsonSchemas {
-  static buildShape(ResourceMock: typeof ResourceMock): Record<string, unknown>;
+  static buildShape(resourceMockClass: typeof ResourceMock): Record<string, unknown>;
 }
 export class ResourcesMockTypeBoxSchemas {
-  static buildShape(typebox: TypeBoxLike, ResourceMock: typeof ResourceMock): unknown;
+  static buildShape(typebox: TypeBoxLike, resourceMockClass: typeof ResourceMock): unknown;
 }
 
 export type Describe = (name: string, fn: () => void) => void;
@@ -110,6 +110,8 @@ export type KerberosTestSchema = {
 };
 export class KerberosTest {
   constructor(schema: KerberosTestSchema, kerberos?: Kerberos, options?: ValidationOptions);
+  /** Parses/validates one test fixture shape with the configured backend. */
+  static parseShape(shape: unknown, options?: ValidationOptions & { schema?: unknown }): KerberosTestSchema;
   run(
     {
       kerberos,
@@ -143,17 +145,21 @@ export type TestsPolicySchema = {
 };
 export class KerberosTests {
   constructor(kerberos: Kerberos, policies: [TestsPolicySchema, ...TestsPolicySchema[]], options?: ValidationOptions);
+  static parsePolicies(policies: unknown, options?: ValidationOptions): TestsPolicySchema[];
+  static parseTests(tests: unknown, kerberos?: Kerberos, options?: ValidationOptions): KerberosTest[];
+  static buildPrincipalsMock(principals: unknown, options?: ValidationOptions): PrincipalsMock;
+  static buildResourcesMock(resources: unknown, options?: ValidationOptions): ResourcesMock;
   run(
     { effectAsBoolean }: { effectAsBoolean?: boolean },
     { describe, it, assert }: { describe: Describe; it: It; assert: Assert },
   ): void;
 }
 export class KerberosTestsZodSchemas {
-  static buildShape(z: unknown, KerberosTest: typeof KerberosTest): unknown;
+  static buildShape(z: unknown, kerberosTestClass: typeof KerberosTest): unknown;
 }
 export class KerberosTestsJsonSchemas {
-  static buildShape(KerberosTest: typeof KerberosTest): Record<string, unknown>;
+  static buildShape(kerberosTestClass: typeof KerberosTest): Record<string, unknown>;
 }
 export class KerberosTestsTypeBoxSchemas {
-  static buildShape(typebox: TypeBoxLike, KerberosTest: typeof KerberosTest): unknown;
+  static buildShape(typebox: TypeBoxLike, kerberosTestClass: typeof KerberosTest): unknown;
 }

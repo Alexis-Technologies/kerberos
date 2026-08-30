@@ -1,0 +1,142 @@
+---
+# Cerbos TestSuite format (api.cerbos.dev TestSuite.schema.json), so this file
+# can be handed to `cerbos compile --tests` against a real PDP unchanged.
+name: DocumentPolicyConformance
+description: Decision parity for RBAC, ABAC and derived roles on the `document` kind.
+
+principals:
+  admin:
+    id: admin1
+    roles: ['ADMIN']
+    attr:
+      team: platform
+  owner:
+    id: u1
+    roles: ['USER']
+    attr:
+      team: design
+  teammate:
+    id: u2
+    roles: ['USER']
+    attr:
+      team: design
+  outsider:
+    id: u3
+    roles: ['USER']
+    attr:
+      team: finance
+
+resources:
+  open_doc:
+    id: d1
+    kind: document
+    attr:
+      ownerId: u1
+      team: design
+      status: OPEN
+      public: false
+      archived: false
+  closed_doc:
+    id: d2
+    kind: document
+    attr:
+      ownerId: u1
+      team: design
+      status: CLOSED
+      public: false
+      archived: false
+  public_doc:
+    id: d3
+    kind: document
+    attr:
+      ownerId: u9
+      team: legal
+      status: OPEN
+      public: true
+      archived: false
+  archived_doc:
+    id: d4
+    kind: document
+    attr:
+      ownerId: u1
+      team: design
+      status: OPEN
+      public: true
+      archived: true
+
+tests:
+  - name: admin gets the wildcard allow
+    input:
+      principals: [admin]
+      resources: [open_doc, closed_doc, public_doc]
+      actions: [view, edit, delete]
+    expected:
+      - principal: admin
+        resource: open_doc
+        actions: { view: EFFECT_ALLOW, edit: EFFECT_ALLOW, delete: EFFECT_ALLOW }
+      - principal: admin
+        resource: closed_doc
+        actions: { view: EFFECT_ALLOW, edit: EFFECT_ALLOW, delete: EFFECT_ALLOW }
+      - principal: admin
+        resource: public_doc
+        actions: { view: EFFECT_ALLOW, edit: EFFECT_ALLOW, delete: EFFECT_ALLOW }
+
+  - name: owner may view always and edit only while open
+    input:
+      principals: [owner]
+      resources: [open_doc, closed_doc]
+      actions: [view, edit, delete]
+    expected:
+      - principal: owner
+        resource: open_doc
+        actions: { view: EFFECT_ALLOW, edit: EFFECT_ALLOW, delete: EFFECT_DENY }
+      - principal: owner
+        resource: closed_doc
+        actions: { view: EFFECT_ALLOW, edit: EFFECT_DENY, delete: EFFECT_DENY }
+
+  - name: a non-owner on the same team is not an owner
+    input:
+      principals: [teammate]
+      resources: [open_doc]
+      actions: [view, edit]
+    expected:
+      - principal: teammate
+        resource: open_doc
+        actions: { view: EFFECT_DENY, edit: EFFECT_DENY }
+
+  - name: any USER may view a public document
+    input:
+      principals: [teammate, outsider]
+      resources: [public_doc]
+      actions: [view, edit]
+    expected:
+      - principals: [teammate, outsider]
+        resource: public_doc
+        actions: { view: EFFECT_ALLOW, edit: EFFECT_DENY }
+
+  - name: an explicit DENY overrides an ALLOW that also matches
+    description: >-
+      archived_doc is public and owned by u1, so both `anyone-view-public` and
+      `owner-edit-while-open` match — but `archived-is-read-only` denies edit
+      and delete for every role. This pins deny-overrides for BOTH engines.
+    input:
+      principals: [owner, admin]
+      resources: [archived_doc]
+      actions: [view, edit, delete]
+    expected:
+      - principal: owner
+        resource: archived_doc
+        actions: { view: EFFECT_ALLOW, edit: EFFECT_DENY, delete: EFFECT_DENY }
+      - principal: admin
+        resource: archived_doc
+        actions: { view: EFFECT_ALLOW, edit: EFFECT_DENY, delete: EFFECT_DENY }
+
+  - name: an action no rule targets is denied
+    input:
+      principals: [owner]
+      resources: [open_doc]
+      actions: [archive]
+    expected:
+      - principal: owner
+        resource: open_doc
+        actions: { archive: EFFECT_DENY }
