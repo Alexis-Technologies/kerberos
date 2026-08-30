@@ -5,7 +5,7 @@ All notable changes to **`@alexify/kerberos`** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [4.0.0] - 2026-08-30
 
 Code-review hardening waves (0–4): the Conditions inherited-key fail-open fix,
 restored Node-ESM named exports, scope-depth caps, cache-reader
@@ -579,7 +579,7 @@ Initial release.
 - In-browser / serverless authorization.
 - Built-in test harness (`Tests`).
 
-[unreleased]: https://github.com/Alexis-Technologies/kerberos/compare/v3.1.0...HEAD
+[4.0.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v4.0.0
 [3.1.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v3.1.0
 [3.0.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v3.0.0
 [2.0.1]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v2.0.1
