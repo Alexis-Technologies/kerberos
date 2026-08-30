@@ -411,6 +411,20 @@ type Rule<S extends KerberosSchema = AnySchema, K extends ResourceKindOf<S> = Re
  * discriminated union over `resource:` — writing `resource: 'document'`
  * narrows every rule's `actions` and every condition's `R.attr` to that kind.
  */
+/** One attribute-schema binding of a resource policy's `schemas:` block. */
+export type AttributeSchemaRef = {
+  /** Key into the engine's `schemas.definitions` map. */
+  ref: string;
+  /** Validation is skipped when EVERY requested action matches these globs. */
+  ignoreWhen?: { actions: NonEmptyArray<string> | readonly string[] };
+};
+
+/** Cerbos-style attribute-schema declarations on a resource policy. */
+export type ResourcePolicyAttributeSchemas = {
+  principalSchema?: AttributeSchemaRef;
+  resourceSchema?: AttributeSchemaRef;
+};
+
 export type ResourcePolicySchema<S extends KerberosSchema = AnySchema> = {
   [K in ResourceKindOf<S>]: {
     version: string;
@@ -420,6 +434,7 @@ export type ResourcePolicySchema<S extends KerberosSchema = AnySchema> = {
     variables?: VariablesSchema<S, K> | Variables<S, K>;
     constants?: ConstantsSchema | Constants;
     importDerivedRoles?: NonEmptyArray<string> | readonly string[];
+    schemas?: ResourcePolicyAttributeSchemas;
   };
 }[ResourceKindOf<S>];
 export type ResourcePolicyRootSchema<S extends KerberosSchema = AnySchema> = {
@@ -582,7 +597,12 @@ export type KerberosAuditLogEntry = {
  * - `'evaluation-error'` — the resource's evaluation rejected inside a
  *   `checkResources` batch and failed closed (paired with `errorName`).
  */
-export type KerberosDecisionReason = 'policy-miss' | 'rule-miss' | 'condition-not-met' | 'evaluation-error';
+export type KerberosDecisionReason =
+  | 'policy-miss'
+  | 'rule-miss'
+  | 'condition-not-met'
+  | 'evaluation-error'
+  | 'invalid-attributes';
 
 /** Relation-resolution record in the decision trace (`meta.resolution`). */
 export type KerberosRelationsTraceEntry = {
@@ -888,7 +908,39 @@ export type KerberosOptions<S extends KerberosSchema = AnySchema> = ValidationOp
    * `KerberosValidationError` regardless of this option.
    */
   onError?: 'throw' | 'deny';
+  /**
+   * Attribute-schema enforcement (Cerbos `schemas` parity): maps the schema
+   * refs declared by resource policies to actual validators and picks the
+   * enforcement level. Absent (or `enforcement: 'none'`) → schema references
+   * in policies are inert, matching Cerbos's own default.
+   */
+  schemas?: KerberosAttributeSchemasOptions | null;
   getCallId?: () => string;
+};
+
+/** One Cerbos-shaped attribute validation failure. */
+export type AttributeValidationError = {
+  /** JSON-pointer-ish path of the failing attribute (`'/amount'`; `''` for whole-bag failures). */
+  path: string;
+  message: string;
+  source: 'SOURCE_PRINCIPAL' | 'SOURCE_RESOURCE';
+};
+
+/**
+ * One attribute-schema definition: a plain JSON Schema object (compiled with
+ * the engine's `ajv` option), a Zod-like schema (anything with `safeParse`),
+ * or a validator function returning error messages (nothing/empty = valid).
+ */
+export type AttributeSchemaDefinition =
+  | Record<string, unknown>
+  | { safeParse(value: unknown): { success: boolean; error?: { issues?: unknown[] } } }
+  | ((value: unknown) => void | boolean | Array<string | { path?: string; message?: string }>);
+
+export type KerberosAttributeSchemasOptions = {
+  /** `'reject'` (default when the option is set) denies invalid requests; `'warn'` only reports; `'none'` disables. */
+  enforcement?: 'none' | 'warn' | 'reject';
+  /** Maps the `ref` strings used in policies' `schemas:` blocks to validators. */
+  definitions?: Record<string, AttributeSchemaDefinition>;
 };
 
 /** Wildcard action token used in policy rules. */
@@ -1002,6 +1054,25 @@ export function expandRelationOperands<S extends KerberosSchema = AnySchema>(
 ): Promise<PlanResourcesResponse<S>>;
 
 /** One entry of a `checkResources` batch — the kind narrows its `actions`. */
+
+/** A query plan in the `@cerbos/core` SDK encoding (flattened operands) that the official Cerbos ORM adapters accept. */
+export type CerbosSdkQueryPlan = {
+  kind: PlanKind;
+  condition?: unknown;
+};
+
+/**
+ * Converts a `planResources` response (or its `filter`) from the HTTP-API
+ * operand encoding Kerberos emits into the flattened `@cerbos/core` SDK
+ * encoding consumed by `@cerbos/orm-prisma` / `@cerbos/orm-drizzle`.
+ * Kerberos-only operators are rejected: materialize `relation` operands with
+ * `expandRelationOperands` first; `opaque` plans need post-filtering.
+ */
+export declare function toCerbosQueryPlan(planOrFilter: {
+  filter?: unknown;
+  kind?: string;
+  condition?: unknown;
+}): CerbosSdkQueryPlan;
 export type CheckResourcesEntry<S extends KerberosSchema = AnySchema> = {
   [K in ResourceKindOf<S>]: { resource: RequestResource<S, K>; actions: ActionOf<S, K>[] };
 }[ResourceKindOf<S>];
@@ -1018,6 +1089,13 @@ export type CheckResourcesResult<S extends KerberosSchema = AnySchema, E = Effec
   resource: Pick<RequestResource<S>, 'id' | 'kind' | 'policyVersion' | 'scope'>;
   actions: Record<ActionOf<S>, E>;
   outputs: unknown[];
+  /**
+   * Attribute-schema validation failures (`schemas` engine option). Present —
+   * regardless of `includeMeta` — whenever validation ran and failed: under
+   * `enforcement: 'reject'` the actions are all denied, under `'warn'` the
+   * decision is unaffected.
+   */
+  validationErrors?: AttributeValidationError[];
   meta?: {
     actions: Record<string, {
       matchedPolicy?: string;

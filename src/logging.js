@@ -70,6 +70,7 @@ function buildAuditEntries(input, reqKind, callId) {
         effect: result.effects.get(action),
         outputs: result.outputs ? [...result.outputs.values()] : [],
         meta: result.meta,
+        validationErrors: result.validationErrors,
       };
 
       if (!auditEntry.callId) delete auditEntry.callId;
@@ -79,6 +80,7 @@ function buildAuditEntries(input, reqKind, callId) {
       if (!auditEntry.resourceScope) delete auditEntry.resourceScope;
       if (!auditEntry.resourcePolicyVersion) delete auditEntry.resourcePolicyVersion;
       if (!auditEntry.meta) delete auditEntry.meta;
+      if (!auditEntry.validationErrors) delete auditEntry.validationErrors;
 
       auditEntries.push(auditEntry);
     }

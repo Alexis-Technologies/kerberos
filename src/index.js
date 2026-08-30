@@ -20,6 +20,7 @@ module.exports = {
   ...require('./errors.js'),
   ...require('./caching/cache.js'),
   ...require('./planning/expand.js'),
+  ...require('./planning/sdk.js'),
   ...require('./publicExports.js'),
   ...require('./schemas/index.js'),
   ...require('./validation/index.js'),

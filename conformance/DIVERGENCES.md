@@ -12,18 +12,17 @@ Each entry says how it is enforced: **corpus** (a test would fail if it changed)
 | **Kerberos**    | JavaScript expressions — either live functions, or `{ $expr }` strings parsed by jsep and walked by an eval-free allowlist interpreter.       |
 | **Enforcement** | loader — anything outside the shared subset throws `ConformanceUnsupportedError`.                                                             |
 
-This is the largest and most deliberate difference. The conformance corpus is restricted to the intersection (see [README](./README.md#the-shared-expression-subset)); it is not evidence that arbitrary Cerbos policies port over. A CEL→`$expr` importer is tracked separately as a product item, not a bug.
+This is the largest and most deliberate difference. The conformance corpus is restricted to the intersection (see [README](./README.md#the-shared-expression-subset)); it is not evidence that arbitrary Cerbos policies port over. The `@alexify/kerberos/cerbos` subpath ships a real CEL→`$expr` importer for the translatable subset (macros, `matches()` and extension functions still throw — see the "Importing Cerbos policies" guide), and `importer.test.js` re-runs this whole suite through it.
 
 ## Not implemented
 
-| Cerbos feature                                                                                 | Status                                                                                                                                                                                    | Enforcement |
-| ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| **Attribute schemas** (`schemas:` with `principalSchema` / `resourceSchema`, NONE/WARN/REJECT) | Not implemented. Kerberos validates _policy_ shapes through Zod/Ajv/TypeBox, but does not validate request attributes against a per-kind schema. Garbage attributes flow into conditions. | loader      |
-| **`scopePermissions`** (`REQUIRE_PARENTAL_CONSENT_FOR_ALLOWS`)                                 | Not implemented. Kerberos implements only the `OVERRIDE_PARENT` behaviour: the first policy in the scope chain to decide an action wins.                                                  | loader      |
-| **`exportVariables` / `exportConstants`** (imported variable and constant sets)                | Not implemented. Variables and constants are policy-scoped only.                                                                                                                          | loader      |
-| **`auxData`** (JWT claims in conditions)                                                       | Not implemented. Put the claims you need into `principal.attr` before calling.                                                                                                            | documented  |
-| **Globals** (`G`) and `engine.globals`                                                         | Not implemented. Use policy constants (`C`).                                                                                                                                              | documented  |
-| **Admin API, policy storage drivers, PDP server**                                              | Out of scope by design — Kerberos is a library. Policies come from the constructor or a read-only cache.                                                                                  | documented  |
+| Cerbos feature                                                                  | Status                                                                                                                                   | Enforcement |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| **`scopePermissions`** (`REQUIRE_PARENTAL_CONSENT_FOR_ALLOWS`)                  | Not implemented. Kerberos implements only the `OVERRIDE_PARENT` behaviour: the first policy in the scope chain to decide an action wins. | loader      |
+| **`exportVariables` / `exportConstants`** (imported variable and constant sets) | Not implemented. Variables and constants are policy-scoped only.                                                                         | loader      |
+| **`auxData`** (JWT claims in conditions)                                        | Not implemented. Put the claims you need into `principal.attr` before calling.                                                           | documented  |
+| **Globals** (`G`) and `engine.globals`                                          | Not implemented. Use policy constants (`C`).                                                                                             | documented  |
+| **Admin API, policy storage drivers, PDP server**                               | Out of scope by design — Kerberos is a library. Policies come from the constructor or a read-only cache.                                 | documented  |
 
 ## Behavioural differences
 
@@ -34,6 +33,12 @@ Cerbos's `engine.lenientScopeSearch` defaults to `false`, which makes a request 
 Kerberos always walks the chain and falls through to whatever it finds, with no gap requirement. Run the conformance PDP with `--set=engine.lenientScopeSearch=true` (as CI does) to compare like for like.
 
 _Enforcement: documented._
+
+### Attribute schemas — same semantics, different wiring
+
+Implemented since v4: resource policies declare `schemas.principalSchema` / `resourceSchema` refs with `ignoreWhen.actions`, and validation failures surface as Cerbos-shaped `validationErrors` (`{ path, message, source }`); `reject` denies every action, `warn` only reports. The wiring differs by design: Cerbos resolves refs against schema _files_ served from `_schemas/` and picks the level in server config (`schema.enforcement`, default `none`); Kerberos maps refs to validators via the `schemas` engine option (`definitions` accepts JSON Schema / Zod / functions; `enforcement` defaults to `reject` **when the option is set**, and to inert when it is not — matching Cerbos's unconfigured default). The conformance corpus does not carry schemas (the PDP leg would need the files served), so parity is pinned by unit tests (`test/AttributeSchemas.test.js`) mirroring Cerbos's documented behaviour, not by the live-PDP leg.
+
+_Enforcement: documented (unit tests only)._
 
 ### Role-policy scope: Cerbos's docs and engine disagree — we follow the engine
 

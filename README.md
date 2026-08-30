@@ -87,13 +87,17 @@ await kerberos.isAllowed({
 - [Decision metadata (includeMeta)](#decision-metadata-includemeta)
 - [Caching / Storing Policies](#caching--storing-policies)
   - [How it works](#how-it-works-fallback-layer) · [`codec` modes](#codec-option--three-modes) · [Dynamic policy format](#dynamic-policy-format) · [Safe builtins](#allowed-safe-builtins) · [Serialization mechanism](#serialization-mechanism-security--performance)
+- [Importing Cerbos Policies](#importing-cerbos-policies)
+  - [What is translated](#what-is-translated) · [CEL → `$expr`](#the-cel--expr-translation) · [How this is verified](#how-the-importer-is-verified)
+- [Loading Policies from Files](#loading-policies-from-files)
 - [ReBAC (Relations)](#rebac-relations)
   - [Relation-backed derived roles](#relation-backed-derived-roles) · [Zanzibar-lite resolver](#the-built-in-zanzibar-lite-resolver) · [Dynamic tuples](#dynamic-tuples-cache-backed) · [Consistency](#consistency-honest-limitations)
 - [Query Plans (planResources)](#query-plans-planresources)
-  - [How a plan is composed](#how-a-plan-is-composed) · [Operators](#operators) · [Writing plannable policies](#writing-plannable-policies) · [Translating a plan](#translating-a-plan)
+  - [How a plan is composed](#how-a-plan-is-composed) · [Operators](#operators) · [Writing plannable policies](#writing-plannable-policies) · [ORM adapters](#using-the-official-cerbos-orm-adapters) · [Translating a plan](#translating-a-plan)
 - [Testing](#testing)
+  - [CLI](#policy-testing-from-the-command-line)
 - [Schema Validation](#schema-validation)
-  - [Zod](#using-zod) · [JSON Schema + Ajv](#using-json-schema--ajv) · [TypeBox + Ajv](#using-typebox--ajv) · [Explicit Builders](#using-explicit-builders)
+  - [Zod](#using-zod) · [JSON Schema + Ajv](#using-json-schema--ajv) · [TypeBox + Ajv](#using-typebox--ajv) · [Explicit Builders](#using-explicit-builders) · [Attribute schemas](#attribute-schemas-cerbos-schemas)
 - [OpenTelemetry](#opentelemetry)
 - [Benchmarks](#benchmarks)
 - [Changelog](#changelog) · [License](#license) · [Used by](#used-by)
@@ -112,10 +116,11 @@ Zero runtime dependencies. Measured with `pnpm size` (esbuild browser bundle, fu
 
 | Entry | min | min+gzip |
 | ----- | ---:| --------:|
-| `@alexify/kerberos` (main entry, query planner included) | 105.7 KB | **28.6 KB** |
+| `@alexify/kerberos` (main entry, query planner included) | 115.6 KB | **31.9 KB** |
 | `@alexify/kerberos/relations` (opt-in ReBAC resolver) | 60.5 KB | 16.3 KB |
+| `@alexify/kerberos/cerbos` (opt-in [Cerbos importer](#importing-cerbos-policies)) | 34.0 KB | 10.9 KB |
 
-The `/relations` and `/tests` subpaths are only bundled if you import them. Optional tooling (`jsep`, `zod`, `ajv`, `@sinclair/typebox`, `@opentelemetry/api`) is never included — you install what you use.
+The `/relations`, `/tests` and `/cerbos` subpaths are only bundled if you import them. Optional tooling (`jsep`, `zod`, `ajv`, `@sinclair/typebox`, `@opentelemetry/api`) is never included — you install what you use.
 
 ### Browser usage
 
@@ -537,6 +542,7 @@ All error classes are exported from the main entry. Evaluation-phase errors foll
 | `createSafeExprCodec`, `serializePolicy`, `deserializePolicy` | Safe AST codec for [dynamic/stored policies](#caching--storing-policies). |
 | `PlanKind` | `{ AlwaysAllowed, AlwaysDenied, Conditional }` — [query plan](#query-plans-planresources) filter kinds. |
 | `expandRelationOperands` | Materializes ReBAC `relation` operands of a [query plan](#query-plans-planresources) into id filters. |
+| `toCerbosQueryPlan` | Converts a plan to the `@cerbos/core` SDK shape for the [official Cerbos ORM adapters](#using-the-official-cerbos-orm-adapters). |
 | `KerberosValidationError`, `KerberosCacheError`, `KerberosCodecError`, `KerberosExprError`, `KerberosRelationsError` | Typed [error classes](#errors). |
 | `registerAjvKeywords`, `createAjvAdapter` | [Validation](#schema-validation) helpers. |
 | `JsonSchemas`, `TypeBoxSchemas`, `ZodSchemas`, `KerberosJsonSchemas`, `ResourcePolicyJsonSchemas`, `PrincipalPolicyJsonSchemas`, `RolePolicyJsonSchemas`, … | Schema builders for the three backends. |
@@ -557,6 +563,23 @@ Subpath **`@alexify/kerberos/tests`** (dev/test only — not loaded by the main 
 | `KerberosTest`, `KerberosTests` | Cerbos-style declarative test runner. |
 | `PrincipalMock`, `PrincipalsMock`, `ResourceMock`, `ResourcesMock` | Named fixtures for test suites. |
 | `*ZodSchemas`, `*JsonSchemas`, `*TypeBoxSchemas` | Schema builders for the test harness. |
+
+Subpath **`@alexify/kerberos/loader`** (Node-only [file/directory loader + versioned bundles](#loading-policies-from-files); browser bundlers substitute throwing stubs):
+
+| Export | Purpose |
+| ------ | ------- |
+| `loadPolicyDirectory`, `loadPolicyFile` | Read Kerberos JSON / Cerbos YAML+JSON policy files (+ `_schemas/`) into constructor inputs. |
+| `createPolicyBundle`, `writePolicyBundle`, `loadPolicyBundle` | Hash-stamped (SHA-256, content-addressed) policy bundles with load-time integrity verification. |
+| `KerberosLoaderError` | Typed error for I/O, format and bundle-integrity failures (carries `file`). |
+
+Subpath **`@alexify/kerberos/cerbos`** (the [Cerbos policy importer](#importing-cerbos-policies) — kept out of the main entry):
+
+| Export | Purpose |
+| ------ | ------- |
+| `importCerbosPolicies` | Cerbos YAML/JSON documents → `{ policies, derivedRoles }` serialized Kerberos documents. |
+| `celToExpr` | Translates one CEL expression into a `$expr`-compatible JavaScript expression string. |
+| `parseYamlDocuments` | The zero-dependency YAML-subset parser, standalone. |
+| `KerberosImportError` | Typed error for unsupported constructs (carries `line` for YAML errors). |
 
 ## TypeScript
 
@@ -708,6 +731,7 @@ const kerberos = new Kerberos(policies, derivedRoles, {
 - **`audit`** (`{ includeMeta?: boolean }`): Engine-level audit enrichment. With `{ includeMeta: true }` and a logger attached, decision tracing runs for **every** request, so audit entries always carry `meta.resolution` and the `policy-miss` reason — audit completeness stops depending on each call site remembering the per-request `includeMeta` flag. The response stays gated on the request flag.
 - **`maxConcurrency`** (`number`, unbounded by default): Caps how many resources of a `checkResources` batch evaluate at once. Without it a 10k-resource batch launches 10k concurrent evaluation chains (each issuing its own cache reads) — memory spikes, event-loop saturation and a thundering herd on the cache backend. The built-in `RelationResolver` accepts the same option for its `lookupResources` candidate-verification fan-out.
 - **`codec`** (PolicyCodec): How cached policy documents are transformed before construction: `{ jsep }` enables the built-in safe `$expr` evaluator, `{ deserialize }` plugs in your own logic, and when omitted cached values are passed to policy constructors **as-is** — see [`codec` option — three modes](#codec-option--three-modes).
+- **`schemas`** (`{ enforcement?, definitions? }`): **Attribute schema enforcement** — Cerbos [`schemas`](https://docs.cerbos.dev/cerbos/latest/policies/schemas) parity. Resource policies declare `schemas.principalSchema` / `resourceSchema` refs (with optional `ignoreWhen.actions` globs); this option maps the refs to validators and picks the level: `'reject'` (default when set) denies requests whose attributes fail validation, `'warn'` reports without changing decisions, `'none'` disables (the Cerbos default when unconfigured). Failures are returned as Cerbos-shaped `validationErrors` (`{ path, message, source }`) on `checkResources` results — regardless of `includeMeta` — and reach the audit log. A definition may be a JSON Schema object (compiled with the `ajv` option), a Zod schema, or a validator function. See [Attribute schemas](#attribute-schemas-cerbos-schemas).
 - **`relations`** (KerberosRelationsResolver): ReBAC resolver used by relation-backed derived roles — any object with a `check(args, opts)` method (and an optional batched `list`). See [ReBAC (Relations)](#rebac-relations).
 - **`z`**: Enables validation using the built-in Zod schema builders.
 - **`ajv`**: Enables validation using the built-in JSON Schema builders compiled with Ajv.
@@ -1230,6 +1254,76 @@ To skip deserialization entirely (e.g. your cached documents are already plain J
 const kerberos = new Kerberos([], [], { cache }); // values passed as-is to policy constructors
 ```
 
+## Importing Cerbos Policies
+
+The **`@alexify/kerberos/cerbos`** subpath turns an existing **Cerbos policy repository** — YAML/JSON policy documents with CEL conditions — into Kerberos policies you can evaluate in-process, still with **zero dependencies**: the subpath ships its own parser for the YAML subset Cerbos policies are written in and its own CEL parser + translator.
+
+```javascript
+import { importCerbosPolicies } from '@alexify/kerberos/cerbos';
+import { Kerberos, createSafeExprCodec, deserializePolicy } from '@alexify/kerberos';
+
+// The importer emits SERIALIZED documents ({ $expr } conditions), so the
+// standard dynamic-policy codec setup applies (see "Caching / Storing Policies"):
+const codec = createSafeExprCodec({ jsep });
+
+const { policies, derivedRoles } = importCerbosPolicies(yamlTexts); // strings, parsed objects, or arrays
+
+const kerberos = new Kerberos(
+  policies.map((doc) => deserializePolicy(doc, codec)),
+  derivedRoles.map((doc) => deserializePolicy(doc, codec)),
+);
+```
+
+Because the output is plain JSON with `{ $expr }` descriptors, it is also exactly what the [cache layer](#caching--storing-policies) stores — import a Cerbos repo once and publish the results to Redis/keyv instead of constructing an engine directly.
+
+**The governing invariant: refuse to guess.** Every Cerbos construct is either translated with faithful semantics or rejected with a `KerberosImportError` naming the construct and its location — nothing is dropped or approximated silently, because a skipped rule or a mistranslated condition would change authorization decisions without a trace. The single opt-in exception: `importCerbosPolicies(input, { drop: ['schemas'] })` discards validation-only `schemas` blocks instead of throwing on them.
+
+### What is translated
+
+All four document kinds (`resourcePolicy`, `principalPolicy`, `rolePolicy` — Cerbos role policies have no version, so `default` is assumed — and `derivedRoles`), including scopes, `importDerivedRoles`, nested `all`/`any`/`none` condition combinators, `variables.local` / `constants.local`, and `output.expr` / `output.when`. Policies with `disabled: true` are skipped, matching Cerbos's own loader; `scopePermissions: SCOPE_PERMISSIONS_OVERRIDE_PARENT` (the Cerbos default, and exactly what Kerberos implements) is accepted. `schemas:` blocks translate verbatim (wire their definitions into the [`schemas` engine option](#attribute-schemas-cerbos-schemas) to enforce them; `drop: ['schemas']` discards them instead). Always rejected: `exportVariables`/`exportConstants` and `variables.import`, `REQUIRE_PARENTAL_CONSENT_FOR_ALLOWS`, script conditions, and unknown keys at any level.
+
+### The CEL → `$expr` translation
+
+`celToExpr` (exported standalone) parses real CEL — full expression grammar with precedence, ternary, raw/triple-quoted strings, hex/uint literals, comments — and emits JavaScript for the [safe interpreter](#serialization-mechanism-security--performance). Highlights:
+
+| CEL | JavaScript (`$expr`) |
+| --- | ------------------- |
+| `request.principal` / `request.resource` (or `P` / `R` / `V` / `C` shorthand) | `P` / `R` / `V` / `C` |
+| `==` / `!=` | `===` / `!==` |
+| `x in list` | `list.includes(x)` (a *map* receiver errors at evaluation — fail-loud) |
+| `has(R.attr.x)` | `typeof R.attr.x !== "undefined"` (an explicit `null` is *present*, as in CEL) |
+| `size(x)` / `x.size()` | `x.length` |
+| `timestamp(x)` / `now()` | `Date.parse(x)` / `Date.now()` — timestamps are epoch-ms numbers, so `<`, `==`, `-` work numerically |
+| `duration("72h3m")` | constant-folded milliseconds |
+| `t.getFullYear()` … | `new Date(t).getUTCFullYear()` … (CEL defaults to UTC; `getDayOfMonth()` gets the `- 1`) |
+| `x.replace(a, b)` | `x.split(a).join(b)` (CEL replaces every occurrence) |
+| `7 / 2` (int literals) | `Math.trunc(7 / 2)` (CEL integer division truncates) |
+
+Rejected by design, each with a named error: comprehension macros (`exists`/`all`/`filter`/`map`/`exists_one` — the interpreter has no lambdas), `matches()` (RE2), Cerbos extension functions (`hasIntersection`, `hierarchy`, `spiffeID`, …), `globals`, `runtime`, `request.auxData`, bytes literals, message construction, and any identifier the translator does not recognize. Documented deviations: `lowerAscii`/`upperAscii` map to full-Unicode case folding, and `/` with non-literal operands keeps JS numeric semantics (Cerbos attributes arrive as JSON numbers — CEL doubles — where the two agree).
+
+### How the importer is verified
+
+The whole [Cerbos conformance corpus](conformance/README.md) — real Cerbos policy YAML whose expected decisions are pinned against a live Cerbos PDP in CI — additionally runs **through the public importer** (`conformance/importer.test.js`): YAML parsed by this parser, CEL translated by this translator, and every decision and query-plan expectation must still hold. The YAML parser is separately verified differentially against the reference `yaml` package over the same corpus.
+
+## Loading Policies from Files
+
+The core package never touches the filesystem; the **Node-only** **`@alexify/kerberos/loader`** subpath is the boot-time bridge for **policy-as-code repositories** — and the bundle format is the GitOps artifact:
+
+```javascript
+import { loadPolicyDirectory, writePolicyBundle, loadPolicyBundle } from '@alexify/kerberos/loader';
+
+// Boot: load a directory (Kerberos JSON and Cerbos YAML/JSON can mix; `_schemas/` included).
+const { policies, derivedRoles, schemas } = loadPolicyDirectory('./policies', { codec });
+const kerberos = new Kerberos(policies, derivedRoles, { ajv, schemas: { definitions: schemas } });
+
+// CI: bake the repo into one hash-stamped artifact…
+const bundle = writePolicyBundle('./dist/policies.bundle.json', loadPolicyDirectory('./policies'));
+// …whose `version` is the SHA-256 of its canonical content. Loading VERIFIES it:
+const verified = loadPolicyBundle('./dist/policies.bundle.json', { codec }); // tampered/truncated → throws
+```
+
+Directories load in deterministic sorted order, `_`-prefixed and hidden entries are skipped (the Cerbos repo convention), `.yaml` files and JSON documents carrying `apiVersion` route through the [Cerbos importer](#importing-cerbos-policies) automatically, and `_schemas/**.json` come back keyed for the [`schemas.definitions`](#attribute-schemas-cerbos-schemas) option. The top-level functions are synchronous; the **`promises` namespace** (Node's `fs.promises` idiom — same names, same shared core, byte-identical results) is the asynchronous driver, and `promises.loadPolicyDirectory` reads files **concurrently** (bounded by the `concurrency` option, default 64) so cold starts stay fast over large policy repositories without blocking the event loop: `const { promises: loader } = require('@alexify/kerberos/loader')`. Bundles hold serialized documents only, `createPolicyBundle(content, { createdAt: null })` is byte-reproducible, and in browsers every loader function throws a clear error (fetch a bundle over the network instead). Errors are typed `KerberosLoaderError`s naming the offending file.
+
 ## ReBAC (Relations)
 
 Kerberos supports **relationship-based access control** (ReBAC) — "Google Drive-style" authorization where access flows through relationships (`viewer of the parent folder`, `member of the team that owns the document`) instead of attributes alone. The design is heavily inspired by [SpiceDB](https://github.com/authzed/spicedb) (the mature open-source implementation of Google's Zanzibar), adapted to the Kerberos philosophy: **in-process, zero-infra**, static data blazing fast, dynamic data through the same read-only `cache` fallback used for policies.
@@ -1504,6 +1598,34 @@ const expanded = await expandRelationOperands(plan, ({ relation }) =>
 
 The lookup is any `({ name, relation }) => ids` function — resolver-agnostic, like the engine's `relations` seam. Without expansion, treat `relation` like `opaque`: post-check the rows. Mind the cardinality: a principal with access to a very large set of resources materializes a very large `in`-list — for those cases a post-check (or a resolver-side limit) can beat expansion.
 
+### Using the official Cerbos ORM adapters
+
+Cerbos's own [query-plan adapters](https://github.com/cerbos/query-plan-adapters) — [`@cerbos/orm-prisma`](https://www.npmjs.com/package/@cerbos/orm-prisma) and [`@cerbos/orm-drizzle`](https://www.npmjs.com/package/@cerbos/orm-drizzle) — accept Kerberos plans through one exported hop: `toCerbosQueryPlan` converts the HTTP-API operand encoding Kerberos emits (`{ variable }` / `{ expression }`) into the flattened `@cerbos/core` SDK encoding the adapters consume (`{ name }` / `{ operator, operands }`; the plan kinds are byte-identical):
+
+```javascript
+import { toCerbosQueryPlan, expandRelationOperands } from '@alexify/kerberos';
+import { queryPlanToPrisma } from '@cerbos/orm-prisma';
+
+const plan = await kerberos.planResources({ principal, resource: { kind: 'document' }, action: 'view' });
+const result = queryPlanToPrisma({
+  queryPlan: toCerbosQueryPlan(plan),
+  mapper: {
+    'request.resource.attr.ownerId': { field: 'ownerId' },
+    'request.resource.id': { field: 'id' },
+  },
+});
+// result.kind: ALWAYS_ALLOWED | ALWAYS_DENIED | CONDITIONAL (+ result.filters for Prisma's `where`)
+```
+
+The two Kerberos-only operators follow the refuse-to-guess rule at this boundary:
+
+- **`relation`** (ReBAC dependency) — materialize it first: `toCerbosQueryPlan(await expandRelationOperands(plan, lookup))`; the expanded plan renders as a plain `id IN (...)` filter. Handing an *unexpanded* plan to the converter throws, naming `expandRelationOperands`.
+- **`opaque`** (statically unplannable condition) — the converter throws with a post-filtering directive; translate the rest of the query and filter the rows through `checkResources` afterwards.
+
+This path is CI-verified against the real adapter packages (`test/OrmAdapters.test.js`): conditional/membership plans render the expected Prisma `where` objects and Drizzle SQL, and both special operators take exactly the routes above.
+
+One caveat that is not ours: the adapter packages are CommonJS but depend on the ESM-only `@cerbos/core`, so **loading them** needs Node's `require(esm)` support — Node **20.19+ / 22.12+**. On Node 18 they cannot be required at all, and the verification suite skips accordingly. `toCerbosQueryPlan` itself, like the rest of Kerberos, runs on Node 18; only the third-party adapters are gated.
+
 ### Translating a plan
 
 Translators are deliberately **not** part of the package (same delegation philosophy as caching/validation). A hand-rolled SQL mapping is a ~40-line recursive walk:
@@ -1610,6 +1732,25 @@ describe('KerberosTests', () => {
   });
 });
 ```
+
+### Policy testing from the command line
+
+The package ships a `kerberos` CLI, so a **pure policy repository** — no engineering glue, no hand-written test harness — can test itself in CI:
+
+```bash
+npx kerberos test ./policies ./tests
+```
+
+- Policies load exactly like [`loadPolicyDirectory`](#loading-policies-from-files): Kerberos JSON and Cerbos YAML/JSON mix freely, `{ $expr }` conditions resolve `jsep` (+ the documented plugins) from **your** project.
+- Test suites are **Cerbos's own [`TestSuite`](https://api.cerbos.dev/latest/cerbos/policy/v1/TestSuite.schema.json) format** (`*_test.yaml` / `*_test.json`): named principal/resource fixtures plus expected effects per action — reviewable, engine-agnostic artifacts.
+- `--schemas reject|warn` wires `_schemas/` into [attribute-schema enforcement](#attribute-schemas-cerbos-schemas); `--json` prints a machine-readable report; the exit code is `1` on any failing case (`2` for usage/config errors).
+- The runner refuses to guess: an expectation feature it does not check (e.g. `outputs`) fails the run instead of silently passing.
+
+```bash
+npx kerberos bundle ./policies --out dist/policies.bundle.json --reproducible
+```
+
+bakes the repo into a [hash-stamped bundle](#loading-policies-from-files) for GitOps pipelines.
 
 ### Testing with Outputs
 
@@ -1746,6 +1887,48 @@ Kerberos policies can contain JavaScript functions in:
 
 When using Ajv or TypeBox, Kerberos.js registers custom Ajv keywords so those function-bearing fields can still be validated at runtime. This keeps the DSL usable even though plain JSON Schema doesn't natively understand JavaScript functions.
 
+### Attribute schemas (Cerbos `schemas`)
+
+Conditions read `P.attr` / `R.attr` — and garbage attributes silently flow into them (an undefined comparison quietly denies or allows). Cerbos guards this with per-kind attribute schemas; Kerberos implements the same model:
+
+```javascript
+const kerberos = new Kerberos(
+  [{
+    resourcePolicy: {
+      version: 'default',
+      resource: 'expense',
+      schemas: {
+        principalSchema: { ref: 'principal.json' },
+        resourceSchema: { ref: 'expense.json', ignoreWhen: { actions: ['create'] } },
+      },
+      rules: [/* ... */],
+    },
+  }],
+  [],
+  {
+    ajv: new Ajv({ allErrors: true }),
+    schemas: {
+      enforcement: 'reject', // 'reject' | 'warn' | 'none'
+      definitions: {
+        'expense.json': { type: 'object', required: ['amount'], properties: { amount: { type: 'number' } } },
+        'principal.json': z.object({ department: z.string() }), // Zod works too
+      },
+    },
+  },
+);
+```
+
+Semantics (mirroring Cerbos):
+
+- **`reject`** — a request whose attributes fail validation is denied for **every** action (a principal policy cannot rescue it), with the failures reported as `validationErrors: [{ path, message, source: 'SOURCE_PRINCIPAL' | 'SOURCE_RESOURCE' }]` on the `checkResources` result and `reason: 'invalid-attributes'` under `includeMeta`.
+- **`warn`** — `validationErrors` are reported (response + audit log) but decisions are unaffected.
+- **`none`** / option absent — schema references in policies are inert, matching Cerbos's own default.
+- **`ignoreWhen.actions`** (Cerbos globs) skips validation only when **every** requested action matches — one non-matching action in the batch entry re-enables it.
+- With scoped policies, the **most specific** policy in the resource scope chain that declares `schemas` wins.
+- A policy referencing a ref missing from `definitions` throws `KerberosValidationError` (always — a configuration error never reads as valid *or* invalid).
+
+Definitions may be plain JSON Schema objects (compiled with the engine's `ajv` option), Zod-like schemas (anything with `safeParse`), or validator functions returning error messages. The [Cerbos importer](#importing-cerbos-policies) translates `schemas:` blocks verbatim, so an imported policy repo enforces the same rules once you wire its schema files into `definitions`.
+
 ## OpenTelemetry
 
 Kerberos.js ships native OpenTelemetry support (traces + metrics) following the same delegating philosophy as `logger` and `cache`: **the package never depends on `@opentelemetry/api`** (not even as a peer dependency). You pass either the api module or pre-created instances:
@@ -1816,6 +1999,29 @@ Apple Silicon (M-series), Node v24:
 `checkResources` evaluates resources **concurrently** (`Promise.allSettled`): with a remote policy store, N resources cost one parallel wave of lookups instead of N sequential round-trips (measured ~8x faster with a 2ms-latency cache and 10 resources), and one failing resource never fails the batch — it fail-closes to `EFFECT_DENY` for its actions only.
 
 Numbers vary by hardware and Node version — treat them as relative guidance, not absolutes. The harness exists primarily to catch performance regressions between releases.
+
+### Cross-library comparison
+
+The same scenario — role-gated actions plus one ownership condition — implemented in Kerberos, [CASL](https://casl.js.org) and [casbin](https://casbin.org) (`pnpm bench:compare`; Apple Silicon, Node v24):
+
+| Library · path | ops/sec |
+| -------------- | -------:|
+| `@alexify/kerberos` · `isAllowed` | ~640,000 |
+| `@casl/ability` · check (prebuilt ability) | ~7,300,000 |
+| `@casl/ability` · build + check (per request) | ~1,300,000 |
+| `casbin` · `enforce` (in-memory model) | ~200,000 |
+
+Read it honestly — the libraries do different amounts of work per call. CASL's prebuilt check is a plain in-memory predicate and is faster because it does dramatically less: no policy documents, versions or scopes, no audit/telemetry path, no batch API, no query planner. Abilities are built **per user**, so the *build + check* row is the realistic per-request path. casbin interprets its model DSL on every call. The Kerberos number includes argument validation, the guarded audit/telemetry seams and the scope-chain walk. `@cerbos/embedded` and OPA-WASM are absent by necessity: their policy bundles cannot be built from open tooling alone (Cerbos Hub / the `opa` compiler), so honest numbers cannot be produced here.
+
+Bundle size for the browser, measured the same way as the table above (`pnpm size:compare`, esbuild, min+gzip):
+
+| Library | min+gzip |
+| ------- | --------:|
+| `@alexify/kerberos` (main entry) | 31.9 KB |
+| `@casl/ability` | 6.6 KB |
+| `casbin` | 33.9 KB — does not bundle for the browser (Node builtins); measured as a Node bundle |
+
+CASL is the size floor for a reason (it implements far less); casbin does not run in browsers at all.
 
 ## Changelog
 

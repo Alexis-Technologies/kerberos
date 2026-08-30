@@ -19,6 +19,80 @@ cross-request instance memo, audit-stream completeness (fail-closed denials,
 
 ### Added
 
+- **Verified Cerbos ORM-adapter compatibility.** New `toCerbosQueryPlan`
+  export converts `planResources` output (HTTP-API operand encoding) into
+  the flattened `@cerbos/core` SDK encoding, and the claim that Cerbos's
+  official adapters "accept the filter" is now CI-executable:
+  `test/OrmAdapters.test.js` runs the real `@cerbos/orm-prisma` and
+  `@cerbos/orm-drizzle` packages against Kerberos plans and pins the
+  produced Prisma `where` objects / Drizzle SQL. The Kerberos-only
+  operators are handled by contract — `relation` plans convert only after
+  `expandRelationOperands` (the converter throws otherwise, naming it),
+  `opaque` plans throw with a post-filtering directive. Recipes in the
+  query-plans guide.
+- **Fuzzing + published comparative benchmarks.** A deterministic seeded
+  fuzz suite (`test/Fuzz.test.js`, part of `pnpm test`, crankable via
+  `FUZZ_ITERATIONS`) covers the `$expr` codec, the CEL translator's output
+  contract, the YAML parser and `RelationResolver` — it already caught and
+  fixed a real contract bug: `@jsep-plugin/new` emits a malformed
+  callee-less node for `new R.attr.x`, which the codec now rejects as
+  `KerberosExprError` instead of crashing with a raw `TypeError`. New
+  `pnpm bench:compare` (Kerberos vs `@casl/ability` vs `casbin` on a
+  shared RBAC+ABAC scenario) and `pnpm size:compare` (browser min+gzip)
+  publish honest cross-library numbers, with the caveats, in the
+  Benchmarks docs.
+- **Policy-testing CLI.** The package now ships a `kerberos` binary:
+  `kerberos test <policiesDir> <testsDir>` runs Cerbos-`TestSuite`-format
+  suites (`*_test.yaml`/`*_test.json`, named fixtures + expected effects)
+  against a policy directory — policies load through the `/loader` subpath
+  (Kerberos JSON + Cerbos YAML/JSON), `{ $expr }` conditions resolve jsep
+  from the caller's project, `--schemas reject|warn` wires `_schemas/` into
+  attribute-schema enforcement, `--json` emits a machine-readable report,
+  and unsupported expectation features fail the run instead of silently
+  passing. `kerberos bundle <dir> --out <file> [--reproducible]` bakes a
+  hash-stamped policy bundle.
+- **File/directory policy loader + versioned bundles** — the new Node-only
+  **`@alexify/kerberos/loader`** subpath: `loadPolicyDirectory` /
+  `loadPolicyFile` read policy-as-code repositories (Kerberos serialized
+  JSON and Cerbos YAML/JSON mix freely — `apiVersion` documents route
+  through the `/cerbos` importer; `_schemas/**.json` come back keyed for
+  `schemas.definitions`; deterministic sorted order; `_`-prefixed and
+  hidden entries skipped), and `createPolicyBundle` / `writePolicyBundle` /
+  `loadPolicyBundle` implement hash-stamped GitOps artifacts: `version` is
+  the SHA-256 of the canonical sorted-key JSON, recomputed and verified on
+  load so tampered or truncated bundles throw. Both a synchronous driver
+  (top-level functions) and an asynchronous one (the `promises` namespace,
+  Node's `fs.promises` idiom) share one decision core, so results are
+  byte-identical; `promises.loadPolicyDirectory` reads files concurrently
+  (bounded by the `concurrency` option, default 64) to keep cold starts
+  fast over large policy repositories — the `kerberos` CLI uses it
+  internally. Browser bundlers substitute throwing/rejecting stubs via the
+  package `browser` map. Typed `KerberosLoaderError`.
+- **Attribute schema enforcement** (Cerbos `schemas` parity). Resource
+  policies now accept a `schemas:` block (`principalSchema` /
+  `resourceSchema` refs with `ignoreWhen.actions` globs), enforced through
+  the new `schemas` engine option: `definitions` maps refs to validators
+  (JSON Schema via `ajv`, Zod, or plain functions), `enforcement` picks
+  `reject` (deny + Cerbos-shaped `validationErrors` on the result) / `warn`
+  (report only) / `none`. Unset ⇒ schema refs stay inert, matching Cerbos's
+  default. Failures always reach `checkResources` results and the audit log;
+  denied actions carry `reason: 'invalid-attributes'` under `includeMeta`.
+  The Cerbos importer now translates `schemas:` blocks verbatim instead of
+  requiring `drop: ['schemas']`.
+- **Cerbos policy importer** — the new **`@alexify/kerberos/cerbos`** subpath
+  turns an existing Cerbos policy repository into Kerberos policies, with zero
+  dependencies: `importCerbosPolicies` (YAML/JSON documents → serialized
+  `{ $expr }` documents for `deserializePolicy`), `celToExpr` (a real CEL
+  parser + translator to the safe-interpreter subset), `parseYamlDocuments`
+  (a YAML-subset parser verified differentially against the reference `yaml`
+  package), and `KerberosImportError`. The importer refuses to guess:
+  unsupported Cerbos constructs (macros, `matches()`, extension functions,
+  `exportVariables`, `REQUIRE_PARENTAL_CONSENT_FOR_ALLOWS`, unknown keys, …)
+  throw named errors instead of being dropped — the only opt-out is
+  `drop: ['schemas']`. Verified end-to-end by running the whole conformance
+  corpus through the importer (`conformance/importer.test.js`): every
+  PDP-pinned decision and query-plan expectation holds for importer-loaded
+  policies. See the new "Importing Cerbos Policies" guide.
 - **Typed authoring.** `Kerberos` and every policy/request/response type are
   now generic over an optional application schema naming resource kinds, their
   actions and attribute bags, and the principal's roles and attributes. The
