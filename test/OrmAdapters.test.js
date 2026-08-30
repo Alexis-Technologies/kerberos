@@ -5,8 +5,19 @@ const jsep = require('jsep');
 jsep.plugins.register(require('@jsep-plugin/object'), require('@jsep-plugin/ternary'), require('@jsep-plugin/new'));
 jsep.addUnaryOp('typeof');
 
-const { queryPlanToPrisma, PlanKind: PrismaPlanKind } = require('@cerbos/orm-prisma');
-const { queryPlanToDrizzle } = require('@cerbos/orm-drizzle');
+// Both Cerbos ORM adapters are CommonJS but depend on the ESM-only
+// @cerbos/core, so merely LOADING them needs Node's require(esm) support
+// (>=20.19 / >=22.12; present-but-flagged on 22.10-22.11). That is a constraint
+// of those third-party packages, not of Kerberos — `toCerbosQueryPlan` itself is
+// version-neutral, and its own suite below runs on every supported Node.
+// Feature-detect instead of parsing versions, so a flagged runtime is read
+// correctly too.
+const ormSkip = process.features.require_module
+  ? false
+  : 'the @cerbos/orm-* chain needs Node require(esm) support (>=20.19)';
+
+const { queryPlanToPrisma, PlanKind: PrismaPlanKind } = ormSkip ? {} : require('@cerbos/orm-prisma');
+const { queryPlanToDrizzle } = ormSkip ? {} : require('@cerbos/orm-drizzle');
 const { sqliteTable, text, integer } = require('drizzle-orm/sqlite-core');
 const { SQLiteSyncDialect } = require('drizzle-orm/sqlite-core');
 
@@ -86,7 +97,7 @@ describe('toCerbosQueryPlan', () => {
   });
 });
 
-describe('@cerbos/orm-prisma accepts Kerberos plans', () => {
+describe('@cerbos/orm-prisma accepts Kerberos plans', { skip: ormSkip }, () => {
   const mapper = {
     'request.resource.attr.ownerId': { field: 'ownerId' },
     'request.resource.attr.status': { field: 'status' },
@@ -183,7 +194,7 @@ describe('@cerbos/orm-prisma accepts Kerberos plans', () => {
   });
 });
 
-describe('@cerbos/orm-drizzle accepts Kerberos plans', () => {
+describe('@cerbos/orm-drizzle accepts Kerberos plans', { skip: ormSkip }, () => {
   const documents = sqliteTable('documents', {
     id: text('id'),
     ownerId: text('owner_id'),
