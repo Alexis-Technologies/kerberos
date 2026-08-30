@@ -27,8 +27,9 @@ Zero runtime dependencies. Measured with `pnpm size` (esbuild browser bundle, fu
 | `@alexify/kerberos` (main entry, query planner included) | 115.6 KB | **31.9 KB** |
 | `@alexify/kerberos/relations` (opt-in ReBAC resolver) | 60.5 KB | 16.3 KB |
 | `@alexify/kerberos/cerbos` (opt-in [Cerbos importer](/guide/cerbos-import)) | 34.0 KB | 10.9 KB |
+| `@alexify/kerberos/loader` (Node-only; browser bundlers get a throwing stub) | 1.0 KB | 0.5 KB |
 
-The `/relations` and `/tests` subpaths are only bundled if you import them. Optional tooling (`jsep`, `zod`, `ajv`, `@sinclair/typebox`, `@opentelemetry/api`) is never included — you install what you use.
+Every subpath (`/relations`, `/cerbos`, `/loader`, `/tests`) is only bundled if you import it. Optional tooling (`jsep`, `zod`, `ajv`, `@sinclair/typebox`, `@opentelemetry/api`) is never included — you install what you use.
 
 ## Browser usage
 

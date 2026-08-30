@@ -24,6 +24,10 @@ const ENTRIES = [
   { label: '/relations subpath', entry: 'relations.js' },
   { label: '/tests subpath', entry: 'tests.js' },
   { label: '/cerbos subpath', entry: 'cerbos.js' },
+  // Node-only at runtime; bundling it proves the `browser` map really does
+  // swap in the throwing stub — a broken map would fail to resolve `node:fs`
+  // here rather than in a consumer's build.
+  { label: '/loader subpath (browser stub)', entry: 'loader.js' },
 ];
 
 async function bundle(entry, minify) {
@@ -48,8 +52,9 @@ async function main() {
   for (const { label, entry } of ENTRIES) {
     const raw = await bundle(entry, false);
     const min = await bundle(entry, true);
-    if (raw.includes('node:crypto') || raw.includes('node:perf_hooks')) {
-      throw new Error(`${entry}: browser bundle unexpectedly contains Node builtins`);
+    const builtin = /\bnode:[a-z_/]+/.exec(raw.toString());
+    if (builtin) {
+      throw new Error(`${entry}: browser bundle unexpectedly contains a Node builtin (${builtin[0]})`);
     }
     rows.push({
       label,

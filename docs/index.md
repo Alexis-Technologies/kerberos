@@ -7,7 +7,7 @@ titleTemplate: Embedded authorization engine for Node.js and the browser
 hero:
   name: Kerberos.js
   text: Authorization that runs inside your app
-  tagline: Cerbos-style RBAC + ABAC policies, Zanzibar-inspired ReBAC relations and Cerbos-compatible query plans — zero dependencies, no server to deploy, ~29 KB min+gzip.
+  tagline: Cerbos-style RBAC + ABAC policies, Zanzibar-inspired ReBAC relations and Cerbos-compatible query plans — zero dependencies, no server to deploy, ~32 KB min+gzip.
   image:
     src: /logo-mark.svg
     alt: Kerberos.js
@@ -25,7 +25,7 @@ hero:
 features:
   - icon: 📭
     title: Zero dependencies
-    details: No runtime dependencies at all. ~29 KB min+gzip for the main entry, 16 KB for the /relations subpath — nothing extra in your lockfile, nothing extra in the process that makes your access decisions.
+    details: No runtime dependencies at all. ~32 KB min+gzip for the main entry, 16 KB for the /relations subpath — nothing extra in your lockfile, nothing extra in the process that makes your access decisions.
     link: /guide/installation#bundle-size
     linkText: Bundle size
   - icon: ⚡

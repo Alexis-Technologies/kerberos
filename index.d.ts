@@ -903,8 +903,11 @@ export type KerberosOptions<S extends KerberosSchema = AnySchema> = ValidationOp
   maxConcurrency?: number;
   /**
    * Evaluation-phase error handling. `'throw'` (default) propagates errors to
-   * the caller; `'deny'` converts them to fail-closed results (`isAllowed` →
-   * false, `checkResources` → empty results). Malformed arguments always throw
+   * the caller; `'deny'` converts them to fail-closed results — `isAllowed` →
+   * `false`, `checkResources` → one all-DENY result per requested resource
+   * (positional parity with the request; entries that cannot be echoed back
+   * from malformed arguments are skipped), `planResources` → a
+   * `KIND_ALWAYS_DENIED` filter. Malformed arguments always throw
    * `KerberosValidationError` regardless of this option.
    */
   onError?: 'throw' | 'deny';

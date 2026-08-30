@@ -6,7 +6,7 @@
 [![dependencies](https://img.shields.io/badge/runtime_dependencies-0-brightgreen)](#bundle-size)
 [![license](https://img.shields.io/npm/l/%40alexify%2Fkerberos)](./LICENSE)
 
-An **embedded, zero-dependency authorization engine** for Node.js and the browser: Cerbos-style policies (RBAC + ABAC), a SpiceDB-inspired "Zanzibar-lite" resolver (ReBAC) and Cerbos-compatible query plans — all in-process, no server to deploy, [~29 KB min+gzip](#bundle-size). The API deliberately stays as close to Cerbos as possible: if you know Cerbos, you already know Kerberos.js.
+An **embedded, zero-dependency authorization engine** for Node.js and the browser: Cerbos-style policies (RBAC + ABAC), a SpiceDB-inspired "Zanzibar-lite" resolver (ReBAC) and Cerbos-compatible query plans — all in-process, no server to deploy, [~32 KB min+gzip](#bundle-size). The API deliberately stays as close to Cerbos as possible: if you know Cerbos, you already know Kerberos.js.
 
 ```javascript
 import { Kerberos, Effect } from '@alexify/kerberos';
@@ -119,8 +119,9 @@ Zero runtime dependencies. Measured with `pnpm size` (esbuild browser bundle, fu
 | `@alexify/kerberos` (main entry, query planner included) | 115.6 KB | **31.9 KB** |
 | `@alexify/kerberos/relations` (opt-in ReBAC resolver) | 60.5 KB | 16.3 KB |
 | `@alexify/kerberos/cerbos` (opt-in [Cerbos importer](#importing-cerbos-policies)) | 34.0 KB | 10.9 KB |
+| `@alexify/kerberos/loader` (Node-only; browser bundlers get a throwing stub) | 1.0 KB | 0.5 KB |
 
-The `/relations`, `/tests` and `/cerbos` subpaths are only bundled if you import them. Optional tooling (`jsep`, `zod`, `ajv`, `@sinclair/typebox`, `@opentelemetry/api`) is never included — you install what you use.
+Every subpath (`/relations`, `/cerbos`, `/loader`, `/tests`) is only bundled if you import it. Optional tooling (`jsep`, `zod`, `ajv`, `@sinclair/typebox`, `@opentelemetry/api`) is never included — you install what you use.
 
 ### Browser usage
 
@@ -545,6 +546,8 @@ All error classes are exported from the main entry. Evaluation-phase errors foll
 | `toCerbosQueryPlan` | Converts a plan to the `@cerbos/core` SDK shape for the [official Cerbos ORM adapters](#using-the-official-cerbos-orm-adapters). |
 | `KerberosValidationError`, `KerberosCacheError`, `KerberosCodecError`, `KerberosExprError`, `KerberosRelationsError` | Typed [error classes](#errors). |
 | `registerAjvKeywords`, `createAjvAdapter` | [Validation](#schema-validation) helpers. |
+| `resolveValidationAdapter`, `toValidationAdapter`, `parseWithValidation` | Backend dispatch used by every DSL module — pick an adapter (explicit → Zod → TypeBox+Ajv → JSON Schema+Ajv → passthrough) and parse with it. |
+| `createCacheReader` | Wraps any `get(key)` store as the engine's read-only [policy fallback layer](#caching--storing-policies). |
 | `JsonSchemas`, `TypeBoxSchemas`, `ZodSchemas`, `KerberosJsonSchemas`, `ResourcePolicyJsonSchemas`, `PrincipalPolicyJsonSchemas`, `RolePolicyJsonSchemas`, … | Schema builders for the three backends. |
 | `ALL_ACTIONS`, `ALL_ROLES`, `ALL_RESOURCES`, `DEFAULT_VERSION`, `BASE_SCOPE` | Wildcard/default tokens (`'*'`, `'default'`, `''`). |
 
@@ -554,7 +557,9 @@ Subpath **`@alexify/kerberos/relations`** (opt-in ReBAC — kept out of the main
 | ------ | ------- |
 | `RelationResolver` | The built-in [Zanzibar-lite resolver](#the-built-in-zanzibar-lite-resolver) (check / list / lookupSubjects / lookupResources). |
 | `RelationSchema` | Compiles the relation-schema DSL standalone (validated schemas reusable across resolvers). |
-| `Relations*Schemas`, parse helpers | Schema builders / parsers for the resolver's shapes (three validation backends). |
+| `Relations*Schemas` | Schema builders for the resolver's shapes (three validation backends). |
+| `parseRelationSchemaShape`, `parseObjectRef`, `parseSubjectRef`, `parseTuple` | Standalone parsers/validators for schema documents, `type:id` refs and tuples. |
+| `buildAdmissionKey` | Builds the `type` + `relation` + `subjectType` admission key the compiled schema indexes by. |
 
 Subpath **`@alexify/kerberos/tests`** (dev/test only — not loaded by the main entry):
 
@@ -570,6 +575,7 @@ Subpath **`@alexify/kerberos/loader`** (Node-only [file/directory loader + versi
 | ------ | ------- |
 | `loadPolicyDirectory`, `loadPolicyFile` | Read Kerberos JSON / Cerbos YAML+JSON policy files (+ `_schemas/`) into constructor inputs. |
 | `createPolicyBundle`, `writePolicyBundle`, `loadPolicyBundle` | Hash-stamped (SHA-256, content-addressed) policy bundles with load-time integrity verification. |
+| `promises` | The [asynchronous driver](#loading-policies-from-files) — the same four functions returning promises, reading files concurrently (`concurrency`, default 64). |
 | `KerberosLoaderError` | Typed error for I/O, format and bundle-integrity failures (carries `file`). |
 
 Subpath **`@alexify/kerberos/cerbos`** (the [Cerbos policy importer](#importing-cerbos-policies) — kept out of the main entry):

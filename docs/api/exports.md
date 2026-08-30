@@ -16,6 +16,8 @@ The full public surface of the package, by entry point.
 | `toCerbosQueryPlan` | Converts a plan to the `@cerbos/core` SDK shape for the [official Cerbos ORM adapters](/guide/query-plans#using-the-official-cerbos-orm-adapters). |
 | `KerberosValidationError`, `KerberosCacheError`, `KerberosCodecError`, `KerberosExprError`, `KerberosRelationsError` | Typed [error classes](/api/errors). |
 | `registerAjvKeywords`, `createAjvAdapter` | [Validation](/guide/schema-validation) helpers. |
+| `resolveValidationAdapter`, `toValidationAdapter`, `parseWithValidation` | Backend dispatch used by every DSL module — pick an adapter (explicit → Zod → TypeBox+Ajv → JSON Schema+Ajv → passthrough) and parse with it. |
+| `createCacheReader` | Wraps any `get(key)` store as the engine's read-only [policy fallback layer](/guide/caching). |
 | `JsonSchemas`, `TypeBoxSchemas`, `ZodSchemas`, `KerberosJsonSchemas`, `ResourcePolicyJsonSchemas`, `PrincipalPolicyJsonSchemas`, `RolePolicyJsonSchemas`, … | Schema builders for the three backends. |
 | `ALL_ACTIONS`, `ALL_ROLES`, `ALL_RESOURCES`, `DEFAULT_VERSION`, `BASE_SCOPE` | Wildcard/default tokens (`'*'`, `'default'`, `''`). |
 
@@ -39,7 +41,9 @@ Opt-in ReBAC — kept out of the main entry so non-ReBAC bundles do not grow:
 | ------ | ------- |
 | `RelationResolver` | The built-in [Zanzibar-lite resolver](/guide/relations-resolver) (check / list / lookupSubjects / lookupResources). |
 | `RelationSchema` | Compiles the relation-schema DSL standalone (validated schemas reusable across resolvers). |
-| `Relations*Schemas`, parse helpers | Schema builders / parsers for the resolver's shapes (three validation backends). |
+| `Relations*Schemas` | Schema builders for the resolver's shapes (three validation backends). |
+| `parseRelationSchemaShape`, `parseObjectRef`, `parseSubjectRef`, `parseTuple` | Standalone parsers/validators for schema documents, `type:id` refs and tuples. |
+| `buildAdmissionKey` | Builds the `type` + `relation` + `subjectType` admission key the compiled schema indexes by. |
 
 ## `@alexify/kerberos/cerbos`
 
@@ -60,6 +64,7 @@ Node-only boot-time [file/directory loader + versioned bundles](/guide/policy-lo
 | ------ | ------- |
 | `loadPolicyDirectory`, `loadPolicyFile` | Read Kerberos JSON / Cerbos YAML+JSON policy files (+ `_schemas/`) into constructor inputs. |
 | `createPolicyBundle`, `writePolicyBundle`, `loadPolicyBundle` | Hash-stamped (SHA-256, content-addressed) policy bundles with load-time integrity verification. |
+| `promises` | The [asynchronous driver](/guide/policy-loader#async-loading-promises) — the same four functions returning promises, reading files concurrently (`concurrency`, default 64). |
 | `KerberosLoaderError` | Typed error for I/O, format and bundle-integrity failures (carries `file`). |
 
 ## `@alexify/kerberos/tests`
