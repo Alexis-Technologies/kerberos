@@ -67,7 +67,7 @@ await kerberos.isAllowed({
 | **DX** | [Pluggable validation](#schema-validation) (Zod / JSON Schema + Ajv / TypeBox), [testing DSL](#testing) (`/tests`), [typed authoring](#typescript) via an optional app schema, [browser build](#browser-usage), [live playground](https://kerberosjs.vercel.app/playground) |
 | **Compatibility** | A [conformance suite](./conformance/) runs one corpus — written in Cerbos's own policy and test formats — against both Kerberos and a real Cerbos PDP in CI; known gaps are listed in [DIVERGENCES.md](./conformance/DIVERGENCES.md) |
 
-> **Version 3.x** — see the [CHANGELOG](./CHANGELOG.md) for everything that changed since `2.0.0`: ReBAC with the built-in Zanzibar-lite resolver (`3.0.0`), OpenTelemetry, the Node/browser runtime split, and Cerbos-compatible query plans via `planResources` (`3.1.0`).
+> **Version 4.x** — see the [CHANGELOG](./CHANGELOG.md) for everything that changed since `3.1.0`: verified Cerbos compatibility (a conformance corpus replayed against a live PDP, plus the `/cerbos` YAML + CEL policy importer), attribute-schema enforcement, policy-as-code tooling (the `/loader` subpath and the `kerberos` CLI), typed policy authoring, and the code-review hardening waves — a `Conditions` fail-open fix, restored Node-ESM named exports, and a synchronous evaluation driver (~2.5× on simple `isAllowed`).
 
 ## Table of Contents
 
@@ -2025,7 +2025,7 @@ CASL is the size floor for a reason (it implements far less); casbin does not ru
 
 ## Changelog
 
-See [CHANGELOG.md](./CHANGELOG.md) for the full history of changes, including the `2.x → 3.x` release notes (ReBAC, OpenTelemetry, runtime split, query plans).
+See [CHANGELOG.md](./CHANGELOG.md) for the full history of changes, including the `3.x → 4.x` release notes (verified Cerbos compatibility, the policy importer, the loader and CLI, and the security/performance hardening waves).
 
 ## License
 

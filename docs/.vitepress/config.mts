@@ -1,8 +1,14 @@
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitepress';
 import { withMermaid } from 'vitepress-plugin-mermaid';
 
 const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
+
+// Read straight from package.json instead of hand-syncing the nav dropdown:
+// the two drifted apart across the v4.0.0 release, and a version label that
+// can lie is worse than no label.
+const { version } = createRequire(import.meta.url)('../../package.json') as { version: string };
 
 /**
  * Supplies the playground with the engine as a browser bundle.
@@ -152,8 +158,7 @@ export default withMermaid(
         { text: 'API', link: '/api/kerberos', activeMatch: '/api/' },
         { text: 'Reference', link: '/reference/plan-operators', activeMatch: '/reference/' },
         {
-          // Hand-synced with package.json "version" — part of the release checklist.
-          text: 'v3.1.0',
+          text: `v${version}`,
           items: [
             { text: 'Changelog', link: `${repo}/blob/main/CHANGELOG.md` },
             { text: 'npm', link: 'https://www.npmjs.com/package/@alexify/kerberos' },

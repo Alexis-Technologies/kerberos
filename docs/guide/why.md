@@ -38,6 +38,6 @@ An **embedded, zero-dependency authorization engine** for Node.js and the browse
 | **Observability** | [Audit logs](/guide/configuration#options) (console / structured / Pino), [OpenTelemetry](/guide/telemetry) traces + metrics, [decision metadata](/guide/decision-metadata) |
 | **DX** | [Pluggable validation](/guide/schema-validation) (Zod / JSON Schema + Ajv / TypeBox), [testing DSL](/guide/testing) (`/tests`), hand-maintained TypeScript types, [browser build](/guide/installation#browser-usage) |
 
-::: tip Version 3.x
-See the [CHANGELOG](https://github.com/Alexis-Technologies/kerberos/blob/main/CHANGELOG.md) for everything that changed since `2.0.0`: ReBAC with the built-in Zanzibar-lite resolver (`3.0.0`), OpenTelemetry, the Node/browser runtime split, and Cerbos-compatible query plans via `planResources` (`3.1.0`).
+::: tip Version 4.x
+See the [CHANGELOG](https://github.com/Alexis-Technologies/kerberos/blob/main/CHANGELOG.md) for everything that changed since `3.1.0`: verified Cerbos compatibility (a conformance corpus replayed against a live PDP, plus the `/cerbos` YAML + CEL policy importer), attribute-schema enforcement, policy-as-code tooling (the `/loader` subpath and the `kerberos` CLI), typed policy authoring, and the code-review hardening waves — a `Conditions` fail-open fix, restored Node-ESM named exports, and a synchronous evaluation driver (~2.5× on simple `isAllowed`).
 :::
