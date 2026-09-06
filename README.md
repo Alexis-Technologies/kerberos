@@ -6,7 +6,7 @@
 [![dependencies](https://img.shields.io/badge/runtime_dependencies-0-brightgreen)](#bundle-size)
 [![license](https://img.shields.io/npm/l/%40alexify%2Fkerberos)](./LICENSE)
 
-An **embedded, zero-dependency authorization engine** for Node.js and the browser: Cerbos-style policies (RBAC + ABAC), a SpiceDB-inspired "Zanzibar-lite" resolver (ReBAC) and Cerbos-compatible query plans — all in-process, no server to deploy, [~32 KB min+gzip](#bundle-size). The API deliberately stays as close to Cerbos as possible: if you know Cerbos, you already know Kerberos.js.
+An **embedded, zero-dependency authorization engine** for Node.js and the browser: Cerbos-style policies (RBAC + ABAC), a SpiceDB-inspired "Zanzibar-lite" resolver (ReBAC) and Cerbos-compatible query plans — all in-process, no server to deploy, [~34 KB min+gzip](#bundle-size). The API deliberately stays as close to Cerbos as possible: if you know Cerbos, you already know Kerberos.js.
 
 ```javascript
 import { Kerberos, Effect } from '@alexify/kerberos';
@@ -78,7 +78,7 @@ await kerberos.isAllowed({
   - [ResourcePolicy](#resourcepolicy) · [PrincipalPolicy](#principalpolicy) · [RolePolicy](#rolepolicy) · [Mixed Policy Evaluation](#mixed-policy-evaluation)
 - [Scopes and Policy Versions](#scopes-and-policy-versions)
 - [API Reference](#api-reference)
-  - [`new Kerberos(...)`](#new-kerberospolicies-derivedroles-options) · [`isAllowed`](#kerberosisallowedargs--promiseboolean) · [`checkResources`](#kerberoscheckresourcesargs-effectasboolean--false--promisecheckresourcesresponse) · [`planResources`](#kerberosplanresourcesargs--promiseplanresourcesresponse) · [Errors](#errors) · [Exports](#exports)
+  - [`new Kerberos(...)`](#new-kerberospolicies-derivedroles-options) · [`isAllowed`](#kerberosisallowedargs--promiseboolean) · [`checkResources`](#kerberoscheckresourcesargs-effectasboolean--false--promisecheckresourcesresponse) · [`planResources`](#kerberosplanresourcesargs--promiseplanresourcesresponse) · [Events](#events-kerberosonevent-listener--this) · [Errors](#errors) · [Exports](#exports)
 - [TypeScript](#typescript)
   - [Declaring a schema](#declaring-a-schema) · [What it buys you](#what-it-buys-you) · [Schema helper types](#schema-helper-types)
 - [Configuration Options](#configuration-options)
@@ -99,6 +99,8 @@ await kerberos.isAllowed({
 - [Schema Validation](#schema-validation)
   - [Zod](#using-zod) · [JSON Schema + Ajv](#using-json-schema--ajv) · [TypeBox + Ajv](#using-typebox--ajv) · [Explicit Builders](#using-explicit-builders) · [Attribute schemas](#attribute-schemas-cerbos-schemas)
 - [OpenTelemetry](#opentelemetry)
+- [Hooks & events](#hooks--events)
+  - [Hooks](#hooks) · [Events](#events) · [Hooks vs events](#hooks-vs-events)
 - [Benchmarks](#benchmarks)
 - [Changelog](#changelog) · [License](#license) · [Used by](#used-by)
 
@@ -116,8 +118,8 @@ Zero runtime dependencies. Measured with `pnpm size` (esbuild browser bundle, fu
 
 | Entry | min | min+gzip |
 | ----- | ---:| --------:|
-| `@alexify/kerberos` (main entry, query planner included) | 115.6 KB | **31.9 KB** |
-| `@alexify/kerberos/relations` (opt-in ReBAC resolver) | 60.5 KB | 16.3 KB |
+| `@alexify/kerberos` (main entry, query planner included) | 127.4 KB | **35.8 KB** |
+| `@alexify/kerberos/relations` (opt-in ReBAC resolver) | 70.9 KB | 19.8 KB |
 | `@alexify/kerberos/cerbos` (opt-in [Cerbos importer](#importing-cerbos-policies)) | 34.0 KB | 10.9 KB |
 | `@alexify/kerberos/loader` (Node-only; browser bundlers get a throwing stub) | 1.0 KB | 0.5 KB |
 
@@ -520,6 +522,14 @@ const plan = await kerberos.planResources({
 // }
 ```
 
+### Events: `kerberos.on(event, listener) => this`
+
+`on`, `once`, `off` and `removeAllListeners(event?)` (all chainable) plus `listenerCount(event)` subscribe to the engine's lifecycle events — `request:start` / `request:end` / `request:error`, `decision`, `plan`, `relations:resolved`, `cache:hit` / `cache:miss` / `cache:error`. Listeners are contained (a throwing listener never affects a decision) and there is no public `emit`. Lifecycle **hooks** (awaited, may veto) are configured through the `hooks` option instead. See [Hooks & events](#events).
+
+```javascript
+kerberos.on('decision', ({ callId, resource, actions }) => metrics.record(callId, resource.kind, actions));
+```
+
 ### Errors
 
 All error classes are exported from the main entry. Evaluation-phase errors follow the [`onError`](#options) option; `KerberosValidationError` always throws.
@@ -531,6 +541,7 @@ All error classes are exported from the main entry. Evaluation-phase errors foll
 | `KerberosCodecError` | A cached policy/tuple document is corrupt or fails to deserialize (for policies it is logged and counts as a miss; for ReBAC tuple documents it throws — see [Dynamic tuples](#dynamic-tuples-cache-backed)). |
 | `KerberosExprError` | A `{ $expr }` string uses a construct outside the [safe allowlist](#allowed-safe-builtins), exceeds codec limits, or fails to parse. |
 | `KerberosRelationsError` | The built-in ReBAC resolver hits `maxDepth`, a throwing caveat, or invalid relation data. |
+| `KerberosHookError` | A lifecycle hook threw, exceeded `hooksTimeoutMs` (`timedOut: true`) or returned an invalid replacement — `hook` names it, `cause` is the original error. Follows `onError` in the engine, always propagates from the resolver; see [Hooks & events](#error-contract). |
 
 ### Exports
 
@@ -544,7 +555,7 @@ All error classes are exported from the main entry. Evaluation-phase errors foll
 | `PlanKind` | `{ AlwaysAllowed, AlwaysDenied, Conditional }` — [query plan](#query-plans-planresources) filter kinds. |
 | `expandRelationOperands` | Materializes ReBAC `relation` operands of a [query plan](#query-plans-planresources) into id filters. |
 | `toCerbosQueryPlan` | Converts a plan to the `@cerbos/core` SDK shape for the [official Cerbos ORM adapters](#using-the-official-cerbos-orm-adapters). |
-| `KerberosValidationError`, `KerberosCacheError`, `KerberosCodecError`, `KerberosExprError`, `KerberosRelationsError` | Typed [error classes](#errors). |
+| `KerberosValidationError`, `KerberosCacheError`, `KerberosCodecError`, `KerberosExprError`, `KerberosRelationsError`, `KerberosHookError` | Typed [error classes](#errors). |
 | `registerAjvKeywords`, `createAjvAdapter` | [Validation](#schema-validation) helpers. |
 | `resolveValidationAdapter`, `toValidationAdapter`, `parseWithValidation` | Backend dispatch used by every DSL module — pick an adapter (explicit → Zod → TypeBox+Ajv → JSON Schema+Ajv → passthrough) and parse with it. |
 | `createCacheReader` | Wraps any `get(key)` store as the engine's read-only [policy fallback layer](#caching--storing-policies). |
@@ -704,6 +715,9 @@ const kerberos = new Kerberos(policies, derivedRoles, {
   cacheRetry: { attempts: 3 }, // Optional: retry policy for transient cache.get failures
   codec, // Optional: (de)serialization codec for dynamic policies ({ jsep } or { deserialize })
   relations, // Optional: ReBAC resolver for relation-backed derived roles
+  hooks: { beforeRequest, afterRequest }, // Optional: lifecycle hooks (awaited; throw to veto, return args to enrich)
+  hooksTimeoutMs: 500, // Optional: a hook that never settles fails as KerberosHookError instead of hanging
+  maxListeners: 10, // Optional: listener-leak warning threshold per event name (0 disables)
   z, // Optional: validate with Zod
   ajv, // Optional: validate with Ajv
   typebox: Type, // Optional: switch Ajv validation to TypeBox builders
@@ -739,6 +753,9 @@ const kerberos = new Kerberos(policies, derivedRoles, {
 - **`codec`** (PolicyCodec): How cached policy documents are transformed before construction: `{ jsep }` enables the built-in safe `$expr` evaluator, `{ deserialize }` plugs in your own logic, and when omitted cached values are passed to policy constructors **as-is** — see [`codec` option — three modes](#codec-option--three-modes).
 - **`schemas`** (`{ enforcement?, definitions? }`): **Attribute schema enforcement** — Cerbos [`schemas`](https://docs.cerbos.dev/cerbos/latest/policies/schemas) parity. Resource policies declare `schemas.principalSchema` / `resourceSchema` refs (with optional `ignoreWhen.actions` globs); this option maps the refs to validators and picks the level: `'reject'` (default when set) denies requests whose attributes fail validation, `'warn'` reports without changing decisions, `'none'` disables (the Cerbos default when unconfigured). Failures are returned as Cerbos-shaped `validationErrors` (`{ path, message, source }`) on `checkResources` results — regardless of `includeMeta` — and reach the audit log. A definition may be a JSON Schema object (compiled with the `ajv` option), a Zod schema, or a validator function. See [Attribute schemas](#attribute-schemas-cerbos-schemas).
 - **`relations`** (KerberosRelationsResolver): ReBAC resolver used by relation-backed derived roles — any object with a `check(args, opts)` method (and an optional batched `list`). See [ReBAC (Relations)](#rebac-relations).
+- **`hooks`** (KerberosHooks): Lifecycle hooks — `beforeRequest`, `afterRequest`, `beforeResource`, `afterResource`, `onError` — awaited inside the request flow. A throwing hook vetoes the request as `KerberosHookError` (following `onError`); `beforeRequest` may return replacement arguments to **enrich** the request (re-validated, marked `enriched` on audit entries, spans and events); `onError`, a failed request's `afterRequest` and a failed resource's `afterResource` are swallowed and never mask the original error. Unknown names / non-functions throw at construction. See [Hooks & events](#hooks--events).
+- **`hooksTimeoutMs`** (`number`, off by default): Bounds every awaited hook invocation; a hook that neither resolves nor rejects fails as `KerberosHookError` (`timedOut: true`, then following that hook's throwing/swallowing rule) instead of hanging authorization — the hook counterpart of `relationsTimeoutMs`.
+- **`maxListeners`** (`number`, default `10`): Listener-leak detection for the events façade — the first subscription past this count on one event name logs a `console.warn` (subscribe once at startup, not per request). Never a limit; `0` disables the warning. The built-in `RelationResolver` accepts the same option.
 - **`z`**: Enables validation using the built-in Zod schema builders.
 - **`ajv`**: Enables validation using the built-in JSON Schema builders compiled with Ajv.
 - **`typebox`**: When used together with `ajv`, switches validation to the built-in TypeBox builders.
@@ -1460,6 +1477,10 @@ The resolver takes the same `telemetry` option as the engine (`{ api }` or `{ tr
 const relations = new RelationResolver({ schema, tuples, telemetry: { api: require('@opentelemetry/api') } });
 ```
 
+### Resolver hooks & events
+
+The resolver accepts a `hooks` option with the request-level subset of the engine's lifecycle hooks — `beforeRequest(ctx)`, `afterRequest(ctx, summary)`, `onError(error, ctx)`, where `ctx = { kind: 'check' | 'list' | 'lookupSubjects' | 'lookupResources', callId, args }` — and emits `request:start` / `request:end` / `request:error`, `relation:checked` (one per relation or permission checked: `{ callId, kind, resource, relation, subject, allowed }`) and `cache:hit` / `cache:miss` / `cache:error` for tuple-document reads (`kind: 'relation'`). There is no `onError` option here, so a throwing `beforeRequest` always propagates as `KerberosHookError` (the engine converts it under its own `onError` when the resolver serves a relation-backed decision). Through the `relations` seam `callId` is the engine's `kerberosCallId`, so resolver events line up with engine events; standalone calls get a generated id. See [Hooks & events](#hooks--events) for the full contract.
+
 ### Dynamic tuples (cache-backed)
 
 Exactly like dynamic policies, tuples can live in your cache/store — Kerberos **only reads**; storage, TTL, invalidation and multi-host sync are the backend's job (keyv → cacheable → qified works here too):
@@ -1966,7 +1987,7 @@ Works out of the box with any registered SDK (e.g. `NodeSDK` from `@opentelemetr
 | `kerberos.request.duration` | Histogram | `ms` | `kerberos.req_kind`, `error` |
 | `kerberos.cache.requests` | Counter | `{request}` | `kerberos.cache.result` (`hit`/`miss`/`error`), `kerberos.cache.kind` (only for ReBAC tuple reads: `relation`) |
 | `kerberos.relations.checks` | Counter | `{check}` | `kerberos.relations.result` (`allow`/`deny`) |
-| `kerberos.observability.failures` | Counter | `{failure}` | `kerberos.observability.sink` (`logger`/`telemetry`) — swallowed sink failures. Authorization is never affected by a broken logger/exporter, but a non-zero rate here means audit or telemetry output is being **lost**; the engine also `console.warn`s once per instance on the first swallowed logger failure. |
+| `kerberos.observability.failures` | Counter | `{failure}` | `kerberos.observability.sink` (`logger`/`telemetry`/`hooks`/`events`) — swallowed sink failures. Authorization is never affected by a broken logger/exporter, but a non-zero rate here means audit or telemetry output is being **lost**; the engine also `console.warn`s once per instance and sink on the first swallowed logger/hook/listener failure. |
 
 > Metric attributes deliberately exclude actions and principals to keep cardinality bounded — they assume a bounded set of resource kinds.
 
@@ -1975,6 +1996,191 @@ Notes:
 - **Identity attributes are on by default** (parity with audit logs). Set `telemetry: { includeIdentity: false }` to strip `kerberos.principal.id` / `kerberos.resource.id` from spans and events when traces are exported to backends where identity data is unwanted.
 - Telemetry failures (a broken tracer, exporter bugs) are swallowed internally — they can never affect authorization results.
 - `@opentelemetry/api` is browser-compatible, so telemetry works in browser builds too.
+
+## Hooks & events
+
+Two complementary ways to plug into the engine's lifecycle:
+
+- **Hooks** are configured up front (the `hooks` option), run **inside** the request flow and are **awaited** — use them to run your own logic around a decision (tenant guards, rate limits, a blocking audit sink that must complete before the response), to **veto** a request by throwing, or to **enrich** it by returning replacement arguments from `beforeRequest`.
+- **Events** are subscribed from outside (`kerberos.on(name, listener)`), fire **synchronously** after the fact and can never affect a decision — use them to feed metrics, alerting or dashboards without parsing audit logs.
+
+Both live on `Kerberos` and on the built-in [`RelationResolver`](#resolver-hooks--events).
+
+### Hooks
+
+```javascript
+const kerberos = new Kerberos(policies, derivedRoles, {
+  onError: 'deny',
+  hooksTimeoutMs: 500, // optional: a hanging hook fails instead of hanging authorization
+  hooks: {
+    // Once per request, after the arguments validated. Throw to veto, return
+    // a replacement to enrich.
+    async beforeRequest(ctx) {
+      if (ctx.args.principal.attr?.suspended) throw new Error('suspended principal');
+      const groups = await directory.groupsOf(ctx.args.principal.id);
+      return { ...ctx.args, principal: { ...ctx.args.principal, roles: [...ctx.args.principal.roles, ...groups] } };
+    },
+    // Once per request — on success, on failure and on the fail-closed path.
+    async afterRequest(ctx, summary) {
+      await audit.write({ callId: ctx.callId, kind: ctx.reqKind, ...summary });
+    },
+    // Around each resource evaluation (isAllowed, checkResources).
+    beforeResource(ctx, info) {
+      metrics.increment('authz.resource', { kind: info.resource.kind });
+    },
+    afterResource(ctx, info, result) {
+      if (result.actions.delete === 'EFFECT_ALLOW') alerts.notify(ctx, info);
+    },
+    // When a request fails — receives the error before afterRequest.
+    onError(error, ctx) {
+      sentry.captureException(error, { extra: { callId: ctx.callId } });
+    },
+  },
+});
+```
+
+| Hook | Signature | When it runs |
+| ---- | --------- | ------------ |
+| `beforeRequest` | `(ctx) => void \| args` | Once per `isAllowed` / `checkResources` / `planResources` call, **after** argument validation and before any evaluation. A returned object [replaces the arguments](#enriching-a-request). |
+| `beforeResource` | `(ctx, info)` | Before each resource evaluation — once for `isAllowed`, once per entry of a `checkResources` batch (never for `planResources`). |
+| `afterResource` | `(ctx, info, result)` | After each resource evaluation — successful, or **failed** (then `result.reason` is set and a throw is swallowed). |
+| `afterRequest` | `(ctx, summary)` | Once per request — on success, on failure, **and** on the `onError: 'deny'` fail-closed path. |
+| `onError` | `(error, ctx)` | When the request fails, before `afterRequest`. |
+
+Hooks may be sync or async; they are awaited. A hook changes the outcome in exactly two ways: by **throwing** (a veto) or — `beforeRequest` only — by **returning a replacement** for the arguments. Every other return value is ignored (an expression-bodied arrow such as `() => metrics.increment()` is safe).
+
+#### What a hook receives
+
+- `ctx` — one **frozen** object shared by every hook of the request: `{ reqKind: 'IsAllowed' | 'CheckResources' | 'PlanResources', callId, reqId?, args, enriched }`. `callId` is the request's `kerberosCallId` (the same one audit logs, telemetry spans and events carry); `args` are the **validated** arguments of the method — the same principal/resource objects the engine evaluates (under Zod, the parsed output; **without a validation backend, the caller's own objects**). After an enrichment `args` reads the replacement and `enriched` is `true`. Assigning `ctx.args` throws in strict mode: mutating the arguments in place is **not** the contract — it leaks into the caller's objects without a validation backend and leaves no trace in the audit log. Enrich by returning a replacement instead.
+- `info` — `{ index, total, resource, actions }` (frozen): the resource's position in the request (`0` of `1` for `isAllowed`), the resource object and the requested actions.
+- `result` — `{ actions: { [action]: 'EFFECT_ALLOW' | 'EFFECT_DENY' }, outputs, validationErrors?, meta?, reason?, errorName? }` (frozen), always with canonical `EFFECT_*` strings (never the `effectAsBoolean` view). For a resource whose evaluation failed, every action is `EFFECT_DENY`, `reason` is `'evaluation-error'` and `errorName` names the error — the same marker the `decision` event and the audit entry carry.
+- `summary` — `{ success, durationMs, error?, failClosed?, enriched? }`. `success` is `false` whenever the request failed, **including** when `onError: 'deny'` converted the failure into a fail-closed result — `failClosed: true` tells the two apart; `enriched: true` says `beforeRequest` replaced the arguments.
+
+#### Enriching a request
+
+`beforeRequest` may return a replacement arguments object (sync or async). The engine re-validates it with the method's own validator (plus the method's invariants — `planResources`' action rules, and a `checkResources` replacement must keep the batch's resource count, since results are positional), then evaluates the replacement instead of the original. Everything downstream sees the enriched request: the decision, the per-resource hooks, the audit entry (`enriched: true`, `principalRoles` are the enriched roles), the span (`kerberos.request.enriched`), the `decision` / `plan` / `request:end` events (`enriched: true`) and `afterRequest`'s summary.
+
+```javascript
+hooks: {
+  async beforeRequest(ctx) {
+    const groups = await directory.groupsOf(ctx.args.principal.id);
+    return { ...ctx.args, principal: { ...ctx.args.principal, roles: [...ctx.args.principal.roles, ...groups] } };
+  },
+}
+```
+
+A replacement that fails validation (or breaks the batch shape) is the **hook's** failure: it surfaces as `KerberosHookError` (`hook: 'beforeRequest'`, `cause` is the `KerberosValidationError`) and follows `onError` like a veto. The caller's original objects are never modified.
+
+#### Execution order
+
+```
+request:start (event)
+  validate arguments                      ← KerberosValidationError: no hook fires
+  beforeRequest(ctx)                      ← throw = veto · return object = enrich
+    beforeResource(ctx, info[0]) → evaluate → afterResource(ctx, info[0], result)
+    beforeResource(ctx, info[1]) → evaluate → afterResource(ctx, info[1], result)
+  decision (event, one per resource)
+  afterRequest(ctx, { success: true })
+request:end (event)
+```
+
+A `checkResources` batch evaluates its resources concurrently (bounded by `maxConcurrency`), so the per-resource hooks of different resources interleave; each resource's `beforeResource`/`afterResource` pair is ordered, and `info.index` is the resource's position, not the invocation order. Per-resource hooks run **inside** the resource's `maxConcurrency` slot, so a slow `afterResource` is back-pressure on the batch.
+
+The failure path:
+
+```
+  beforeRequest(ctx)
+    beforeResource(ctx, info) → evaluate ✖ → afterResource(ctx, info, { reason: 'evaluation-error', … })  ← swallowed
+  request:error (event)
+  onError(error, ctx)                                ← always swallowed
+  afterRequest(ctx, { success: false, error })       ← always swallowed
+request:end (event, success: false)
+→ onError: 'throw' rethrows; onError: 'deny' returns the fail-closed result (summary.failClosed = true)
+```
+
+Inside a `checkResources` batch a failing resource does not fail the request: its `afterResource` sees the fail-closed result, the batch resolves, and `afterRequest` sees `success: true`.
+
+#### Error contract
+
+| Hook that throws | What happens |
+| ---------------- | ------------ |
+| `beforeRequest`, `afterRequest` **after a successful request** | Wrapped in `KerberosHookError` (`hook` names it, `cause` is your error) and handled like any evaluation error: [`onError: 'throw'`](#options) propagates it, `'deny'` returns the fail-closed result. |
+| `beforeRequest` returning an invalid replacement | Same as a throw: `KerberosHookError` with the `KerberosValidationError` as `cause`. |
+| `beforeResource`, `afterResource` inside a `checkResources` batch | Isolated to **that resource**, exactly like an evaluation error: all its actions come back `EFFECT_DENY` with `reason: 'evaluation-error', errorName: 'KerberosHookError'` under `includeMeta`; the other resources are unaffected and the batch resolves (so `afterRequest` sees `success: true`). |
+| `beforeResource`, `afterResource` in `isAllowed` | The single resource *is* the request — follows `onError`. |
+| `afterResource` **after a failed resource**, `afterRequest` **after a failed request**, `onError` | Swallowed: the original error is what surfaces. The failure is counted on `kerberos.observability.failures{kerberos.observability.sink: 'hooks'}` and `console.warn`ed once per instance. |
+| Any hook exceeding `hooksTimeoutMs` | `KerberosHookError` with `timedOut: true`, then the row above that applies to that hook. |
+
+Hooks never run for malformed arguments (`KerberosValidationError`), and the pairing invariant always holds: once `beforeRequest` ran, `onError` (on failure) and `afterRequest` run exactly once — even when the success-path `afterRequest` was itself the failure, it is not re-invoked. Unknown hook names and non-function values are rejected at construction with a `TypeError`. The message of a `KerberosHookError` embeds your hook's error message (and reaches the `request:error` event as a string) — keep secrets out of it.
+
+#### Timeouts
+
+Hooks run inside the request, so a hook that never settles hangs every authorization call behind it. `hooksTimeoutMs` (off by default, like `relationsTimeoutMs`) bounds every hook invocation: on expiry the hook fails as `KerberosHookError { hook, timedOut: true }` and then follows the error contract of that hook — a timed-out `beforeRequest` vetoes (following `onError`), a timed-out `afterResource` in a batch fails that resource, a timed-out `onError` is swallowed. The abandoned hook keeps running in the background; the timeout only unblocks the request. Synchronous hooks are never raced.
+
+#### Performance notes
+
+- Request-level hooks add one awaited call per request; the fully-synchronous evaluation driver (no cache, no relations) stays in use.
+- `beforeResource` / `afterResource` wrap each evaluation in an async frame, so they are the only hooks with a per-resource cost.
+- With no hooks configured the runner is a no-op object and every call site short-circuits on one boolean.
+- With telemetry enabled every hook invocation is recorded on the `kerberos.hooks.duration` histogram (by `kerberos.hook`), so a slow hook is attributable instead of looking like an engine regression.
+
+### Events
+
+```javascript
+kerberos
+  .on('decision', ({ callId, principal, resource, actions }) => {
+    for (const [action, effect] of Object.entries(actions)) {
+      metrics.increment('authz.decisions', { kind: resource.kind, action, effect });
+    }
+  })
+  .on('request:end', ({ reqKind, durationMs, success }) => {
+    metrics.timing('authz.request', durationMs, { reqKind, success });
+  })
+  .on('cache:error', ({ key, errorName }) => alerts.notify(`policy cache read failed: ${key} (${errorName})`));
+```
+
+`on` / `once` / `off` / `removeAllListeners` are chainable; `listenerCount(name)` reports subscriptions. Unknown event names are a type error in TypeScript **and** a `TypeError` at runtime (a typo cannot register a listener that never fires). There is deliberately **no public `emit`** (events are the engine's outbound signal — a consumer must not be able to forge `decision` entries into an audit pipeline) and no bare `'error'` event.
+
+| Event | Payload | When |
+| ----- | ------- | ---- |
+| `request:start` | `{ callId, reqKind, reqId? }` | Before argument validation, once per public call. |
+| `request:end` | `{ callId, reqKind, reqId?, durationMs, success, error?, errorName?, enriched? }` | Always, last. `success: false` on failure — also on the `onError: 'deny'` path. |
+| `request:error` | `{ callId, reqKind, reqId?, error, errorName }` | When the request failed (validation errors included). |
+| `decision` | `{ callId, reqKind, reqId?, index, principal, resource, actions, reason?, errorName?, enriched? }` | One per evaluated resource of `isAllowed` / `checkResources`; fail-closed decisions carry `reason: 'evaluation-error'`. |
+| `plan` | `{ callId, reqKind, reqId?, principal, resource, actions, filterKind, opaqueCount, relationCount, enriched? }` | After `planResources` built its filter. |
+| `relations:resolved` | `{ callId, principal, resource, relations, granted, mode: 'list' \| 'check', durationMs }` | After the `relations` resolver answered for one resource. |
+| `cache:hit` / `cache:miss` / `cache:error` | `{ key, error?, errorName? }` | Per policy-cache read. No `callId`: the lookup path has no request context (parity with the `Cache.*` log entries). |
+
+Rules every payload follows:
+
+- **Correlation** — every request-scoped payload carries the request's `callId` (the `kerberosCallId` of the response, the audit entries and the telemetry span), so a `decision` can be joined to its `request:end` and to the resolver's events (see below). `enriched: true` marks requests whose arguments a `beforeRequest` hook replaced.
+- **Identity only** — `principal` is `{ id, roles }` and `resource` is `{ kind, id, scope?, policyVersion? }`; attribute bags are never included (they may hold secrets). Hooks get the full context; events get correlation data. Unlike telemetry's `includeIdentity`, events are **not** gated: listeners run in-process, so the consumer owns the PII policy — project the payload before shipping it anywhere.
+- **No `Error` objects** — failures are a message string (`error`) plus `errorName`, safe to ship to metrics or alerting as-is.
+- **Fresh objects** — each payload is built for that emission (only when someone listens); mutating it affects nothing.
+- **Contained listeners** — emission is synchronous and fire-and-forget. A listener that throws, or returns a rejecting promise, never affects the decision: the failure is counted on `kerberos.observability.failures{kerberos.observability.sink: 'events'}` and `console.warn`ed once per instance (asynchronously for a rejecting listener — after the response returned).
+- **Cheap and synchronous listeners** — synchronous listeners cost no promise (the emitter only allocates when a listener returns a thenable). An async listener is awaited by nobody: under load its pending work accumulates with no back-pressure, so do the I/O through your own bounded queue, not in the listener.
+
+#### Listener leaks
+
+Subscribing is a startup concern. `on()` inside request handling is the classic leak: the listener list grows without bound and every emission runs all of it. The first subscription past `maxListeners` (default 10, per event name) logs one `console.warn` — never a limit, only a signal; raise `maxListeners` if you really need more, or set it to `0` to disable the warning.
+
+The emitter is a small built-in class, the same on Node.js and in the browser — `Kerberos` is **not** a `node:events` `EventEmitter` (`instanceof EventEmitter`, `events.once(kerberos, …)` or `addListener` do not apply; wrap `on`/`off` if you need them).
+
+#### Resolver events
+
+The built-in `RelationResolver` emits `request:start` / `request:end` / `request:error` (`{ callId, kind: 'check' | 'list' | 'lookupSubjects' | 'lookupResources', … }`), `relation:checked` (`{ callId, kind, resource: { kind, id }, relation, subject, allowed, enriched? }` — one per relation or permission checked) and `cache:hit` / `cache:miss` / `cache:error` for tuple-document reads (`{ key, kind: 'relation', callId, error?, errorName? }`). When the engine calls the resolver through the `relations` seam, `callId` is the engine's `kerberosCallId`, so resolver and engine events line up; standalone calls get a generated id.
+
+### Hooks vs events
+
+| | Hooks | Events |
+| - | ----- | ------ |
+| Registration | `hooks` constructor option, one function per name | `kerberos.on(name, fn)`, any number of listeners |
+| Timing | Awaited inside the request | Synchronous, after the fact |
+| Can change the outcome | Yes — veto by throwing (`KerberosHookError`, follows `onError`) or enrich by returning replacement arguments from `beforeRequest` | Never — failures are contained |
+| Data | Full validated arguments and results (frozen views) | Identity-only payloads |
+| Fires for malformed arguments | No | `request:start` / `request:error` / `request:end` |
+| Bounded by | `hooksTimeoutMs` | nothing — keep listeners synchronous |
+| Typical use | Guards, enrichment, blocking audit | Metrics, alerting, dashboards |
 
 ## Benchmarks
 
@@ -1988,19 +2194,23 @@ Apple Silicon (M-series), Node v24:
 
 | Scenario |  ops/sec |
 | -------- |---------:|
-| `isAllowed` — simple role match | ~800,000 |
-| `isAllowed` — derived roles + variables + condition | ~650,000 |
-| `checkResources` — 10 resources × 3 actions |  ~63,000 |
-| `checkResources` — 10 resources, includeMeta |  ~61,000 |
-| `isAllowed` — role policy + 2-level parentRoles chain | ~480,000 |
-| `isAllowed` — 3-segment scoped request (chain walk) | ~640,000 |
-| `isAllowed` — simple role match + Zod validation | ~470,000 |
-| `isAllowed` — cache-backed dynamic policy (`$expr`, in-memory Map) | ~330,000 |
-| `checkResources` — 50 resources, cache-backed |   ~9,000 |
-| `planResources` — `$expr` policy (variables + deny rule) |  ~72,000 |
-| `relations.check` — direct tuple (flat) | ~760,000 |
-| `relations.check` — deep walk (3 arrows + nested groups) | ~106,000 |
-| `isAllowed` — relation-backed derived role (deep walk) |  ~77,000 |
+| `isAllowed` — simple role match |  ~640,000 |
+| `isAllowed` — derived roles + variables + condition |  ~500,000 |
+| `checkResources` — 10 resources × 3 actions |   ~48,000 |
+| `checkResources` — 10 resources, includeMeta |   ~47,000 |
+| `isAllowed` — role policy + 2-level parentRoles chain |  ~390,000 |
+| `isAllowed` — 3-segment scoped request (chain walk) |  ~430,000 |
+| `isAllowed` — simple role match + Zod validation |  ~400,000 |
+| `isAllowed` — simple role match + 1 sync `decision` listener |  ~590,000 |
+| `isAllowed` — simple role match + request-level hooks |  ~350,000 |
+| `isAllowed` — simple role match + per-resource hooks |  ~310,000 |
+| `checkResources` — 10 resources × 3 actions + `decision` listener |   ~45,000 |
+| `isAllowed` — cache-backed dynamic policy (`$expr`, in-memory Map) |  ~260,000 |
+| `checkResources` — 50 resources, cache-backed |    ~7,400 |
+| `planResources` — `$expr` policy (variables + deny rule) |   ~61,000 |
+| `relations.check` — direct tuple (flat) |  ~730,000 |
+| `relations.check` — deep walk (3 arrows + nested groups) |  ~106,000 |
+| `isAllowed` — relation-backed derived role (deep walk) |   ~70,000 |
 
 `checkResources` evaluates resources **concurrently** (`Promise.allSettled`): with a remote policy store, N resources cost one parallel wave of lookups instead of N sequential round-trips (measured ~8x faster with a 2ms-latency cache and 10 resources), and one failing resource never fails the batch — it fail-closes to `EFFECT_DENY` for its actions only.
 
@@ -2023,7 +2233,7 @@ Bundle size for the browser, measured the same way as the table above (`pnpm siz
 
 | Library | min+gzip |
 | ------- | --------:|
-| `@alexify/kerberos` (main entry) | 31.9 KB |
+| `@alexify/kerberos` (main entry) | 35.8 KB |
 | `@casl/ability` | 6.6 KB |
 | `casbin` | 33.9 KB — does not bundle for the browser (Node builtins); measured as a Node bundle |
 

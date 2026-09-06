@@ -202,6 +202,7 @@ export default withMermaid(
               { text: 'Built-in resolver', link: '/guide/relations-resolver' },
               { text: 'Query plans', link: '/guide/query-plans' },
               { text: 'OpenTelemetry', link: '/guide/telemetry' },
+              { text: 'Hooks & events', link: '/guide/hooks' },
               { text: 'Benchmarks', link: '/guide/benchmarks' },
             ],
           },

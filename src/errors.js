@@ -46,9 +46,30 @@ class KerberosRelationsError extends Error {
   }
 }
 
+/**
+ * Thrown when a user lifecycle hook (`hooks` option) throws, times out
+ * (`hooksTimeoutMs`, `timedOut: true`) or returns an invalid replacement for
+ * the request arguments. Carries the name of the failing hook and the
+ * original error as `cause`. In the engine it follows the `onError` option
+ * like any evaluation-phase error ('throw' propagates, 'deny' fails closed);
+ * the relations resolver always propagates it. Hooks that run on an
+ * already-failed request (`afterRequest` after a failure, `afterResource`
+ * after a failed resource, `onError`) are swallowed instead, so they can
+ * never mask the original error.
+ */
+class KerberosHookError extends Error {
+  constructor(message, options) {
+    super(message, options?.cause !== undefined ? { cause: options.cause } : undefined);
+    this.name = 'KerberosHookError';
+    this.hook = options?.hook ?? null;
+    this.timedOut = options?.timedOut === true;
+  }
+}
+
 module.exports = {
   KerberosCacheError,
   KerberosCodecError,
+  KerberosHookError,
   KerberosRelationsError,
   KerberosValidationError,
 };

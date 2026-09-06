@@ -7,7 +7,28 @@ const { KerberosJsonSchemas, KerberosTypeBoxSchemas, KerberosZodSchemas } = requ
 const { createLoggerWriter } = require('./logging.js');
 const { createTelemetryWriter } = require('./telemetry.js');
 const { createCacheReader } = require('./caching/cache.js');
-const { KerberosCodecError, KerberosRelationsError, KerberosValidationError } = require('./errors.js');
+const { createHookRunner } = require('./hooks.js');
+const { ENGINE_EVENTS, createEventHub } = require('./events.js');
+const {
+  CACHE_EVENTS,
+  beginRun,
+  createLeakReporter,
+  createRun,
+  createSinkFailureReporter,
+  emitRequestEnd,
+  emitRequestError,
+  emitRequestStart,
+  finishRun,
+  principalIdentity,
+  resourceIdentity,
+  withErrorFields,
+} = require('./lifecycle.js');
+const {
+  KerberosCodecError,
+  KerberosHookError,
+  KerberosRelationsError,
+  KerberosValidationError,
+} = require('./errors.js');
 const { createAttributeSchemaRegistry, validateRequestAttributes } = require('./attributeSchemas.js');
 const { createLimiter, settleAll, withTimeout } = require('./async.js');
 const { createSafeExprCodec } = require('./caching/codec.js');
@@ -20,6 +41,18 @@ const { createAjvAdapter, parseWithValidation, registerAjvKeywords } = require('
 const { generateCallId, getNow } = require('./runtime/node.js');
 
 const EMPTY_ROWS = new Map();
+
+// Correlation fields of every engine event payload (the `fieldsOf` of the
+// shared lifecycle emitters in src/lifecycle.js).
+function requestFields(callId, reqKind, reqId) {
+  const fields = { callId, reqKind };
+  if (reqId !== undefined) fields.reqId = reqId;
+  return fields;
+}
+
+function runFields(run) {
+  return requestFields(run.callId, run.reqKind, run.reqId);
+}
 
 function createEmptyPolicyResult() {
   return { effects: new Map(), outputs: new Map(), meta: { actions: {}, effectiveDerivedRoles: [] } };
@@ -216,6 +249,13 @@ class Kerberos {
 
   #cache = createCacheReader(null);
 
+  // Lifecycle hooks (awaited, may veto) and events (sync, fire-and-forget) —
+  // see src/hooks.js / src/events.js. Both default to disabled/no-op objects
+  // so call sites gate on a single boolean.
+  #hooks = createHookRunner(null);
+
+  #events = createEventHub();
+
   /** @type {((json: unknown) => unknown) | null} */
   #codecDeserialize = null;
 
@@ -267,7 +307,14 @@ class Kerberos {
   // on the request flag — this only enriches what the audit sink sees.
   #auditIncludeMeta = false;
 
-  #warnedObservabilityFailure = false;
+  // Swallowed-sink reporter (count + warn once PER sink — a noisy event
+  // listener must not suppress the later, more important audit-logger
+  // warning); built in the constructor once the telemetry writer exists.
+  #reportSinkFailure = null;
+
+  // Opt-in bound on every awaited hook invocation (0 = off), like
+  // `relationsTimeoutMs` for the relations seam.
+  #hooksTimeoutMs = 0;
 
   // Bounds the checkResources batch fan-out (one evaluation chain per
   // resource otherwise launches simultaneously). Infinity = historical
@@ -345,6 +392,9 @@ class Kerberos {
       ajv,
       typebox,
       getCallId,
+      hooks,
+      hooksTimeoutMs,
+      maxListeners,
     } = {
       logger: false,
       telemetry: null,
@@ -362,6 +412,9 @@ class Kerberos {
       ajv: null,
       typebox: null,
       getCallId: null,
+      hooks: null,
+      hooksTimeoutMs: 0,
+      maxListeners: null,
     },
   ) {
     this.#getCallId = Kerberos.generateCallId;
@@ -387,6 +440,19 @@ class Kerberos {
         throw new TypeError('Invalid relationsTimeoutMs option — expected a non-negative finite number');
       }
       this.#relationsTimeoutMs = relationsTimeoutMs;
+    }
+
+    if (hooksTimeoutMs !== undefined && hooksTimeoutMs !== null) {
+      if (typeof hooksTimeoutMs !== 'number' || !Number.isFinite(hooksTimeoutMs) || hooksTimeoutMs < 0) {
+        throw new TypeError('Invalid hooksTimeoutMs option — expected a non-negative finite number');
+      }
+      this.#hooksTimeoutMs = hooksTimeoutMs;
+    }
+
+    if (maxListeners !== undefined && maxListeners !== null) {
+      if (typeof maxListeners !== 'number' || !Number.isInteger(maxListeners) || maxListeners < 0) {
+        throw new TypeError('Invalid maxListeners option — expected a non-negative integer (0 disables the warning)');
+      }
     }
 
     if (audit !== undefined && audit !== null) {
@@ -456,6 +522,27 @@ class Kerberos {
     this.#logger = createLoggerWriter(logger);
     this.#telemetry = createTelemetryWriter(telemetry);
     this.#cache = createCacheReader(cache, cacheRetry);
+    // Built after the telemetry writer so swallowed-sink failures count from
+    // the very first request. The hook runner validates its option (TypeError
+    // on unknown/non-function hooks) — like `onError` above; the hook clock
+    // is only wired when telemetry can record the samples.
+    this.#reportSinkFailure = createSinkFailureReporter({
+      telemetry: this.#telemetry,
+      prefix: 'Kerberos.js',
+      unaffected: 'authorization is unaffected',
+    });
+    this.#hooks = createHookRunner(hooks, {
+      onSwallowed: (error) => this.#observabilityFailure(error, 'hooks'),
+      timeoutMs: this.#hooksTimeoutMs,
+      now: this.#telemetry.enabled ? getNow : null,
+      onTiming: (hookName, duration) => this.#telemetry.recordHookDuration(hookName, duration),
+    });
+    this.#events = createEventHub({
+      allowed: ENGINE_EVENTS,
+      maxListeners: maxListeners ?? undefined,
+      onLeak: createLeakReporter('Kerberos.js'),
+      onSwallowed: (error) => this.#observabilityFailure(error, 'events'),
+    });
 
     if (codec?.deserialize) {
       this.#codecDeserialize = (value) => codec.deserialize(value);
@@ -486,8 +573,16 @@ class Kerberos {
    */
   // Guarded observability signals for cache lookups: a debug log entry plus
   // the kerberos.cache.requests counter with result hit/miss/error.
-  #recordCacheResult(key, result) {
+  #recordCacheResult(key, result, error) {
     this.#telemetry.recordCacheRequest(result);
+    // No callId here on purpose: the lookup path has no request context and
+    // threading one through the chain resolvers is not worth its cost —
+    // parity with the `Cache.*` log entries below, which lack it too.
+    if (this.#events.wants(CACHE_EVENTS[result])) {
+      const payload = { key };
+      if (error !== undefined) withErrorFields(payload, error);
+      this.#events.emit(CACHE_EVENTS[result], payload);
+    }
     // Skip the timestamp + entry allocation when the logger is the disabled
     // no-op writer (the default): a cache-backed batch calls this once per
     // cache.get, so eager construction is pure waste. The telemetry counter
@@ -513,7 +608,7 @@ class Kerberos {
       // unless `cacheRetry.onExhausted: 'miss'` opts into degraded mode below.
       value = await this.#cache.get(key);
     } catch (error) {
-      this.#recordCacheResult(key, 'error');
+      this.#recordCacheResult(key, 'error', error);
       if (this.#cacheOnExhausted === 'miss') {
         // Opt-in degraded mode: the exhausted read counts as a miss so
         // evaluation falls through to the remaining (static) sources. The
@@ -566,15 +661,12 @@ class Kerberos {
       // A corrupt/malformed entry is deterministic (retrying cannot help), so
       // it is logged and treated as a cache miss instead of failing the
       // request — the affected policy simply does not resolve.
-      this.#recordCacheResult(key, 'error');
-      this.#logMethodError(
-        'CacheDeserialize',
-        null,
-        null,
-        new KerberosCodecError(`Failed to deserialize cached policy for key "${key}": ${error.message}`, {
-          cause: error,
-        }),
+      const codecError = new KerberosCodecError(
+        `Failed to deserialize cached policy for key "${key}": ${error.message}`,
+        { cause: error },
       );
+      this.#recordCacheResult(key, 'error', codecError);
+      this.#logMethodError('CacheDeserialize', null, null, codecError);
       return null;
     }
   }
@@ -724,7 +816,8 @@ class Kerberos {
     // previously unattributable from the request span — measure the whole
     // resolution and annotate the span (built-in-resolver metrics stay inside
     // the resolver itself to avoid double counting).
-    const startedAt = this.#telemetry.enabled ? getNow() : 0;
+    const wantsEvent = this.#events.wants('relations:resolved');
+    const startedAt = this.#telemetry.enabled || wantsEvent ? getNow() : 0;
     // Several derived roles may point at the same relation — resolve each
     // relation once.
     const relationNames = [];
@@ -742,7 +835,8 @@ class Kerberos {
       new KerberosRelationsError(`relations.${op} timed out after ${relationsTimeout}ms`);
 
     let granted;
-    if (typeof this.#relations.list === 'function') {
+    const mode = typeof this.#relations.list === 'function' ? 'list' : 'check';
+    if (mode === 'list') {
       const listed = await withTimeout(
         Promise.resolve().then(() =>
           // callId joins resolver-side spans/diagnostics to this decision.
@@ -790,6 +884,17 @@ class Kerberos {
         duration: getNow() - startedAt,
       });
     }
+    if (wantsEvent) {
+      this.#events.emit('relations:resolved', {
+        callId: req.callId,
+        principal: principalIdentity(req.P),
+        resource: resourceIdentity(req.R),
+        relations: relationNames,
+        granted: [...granted],
+        mode,
+        durationMs: getNow() - startedAt,
+      });
+    }
 
     const grantedRoles = [];
     for (const candidate of candidates) {
@@ -823,17 +928,8 @@ class Kerberos {
   // (kerberos.observability.failures) and warn once per instance, so a
   // permanently-broken audit logger is discoverable before someone needs the
   // audit trail.
-  #observabilityFailure(sinkError) {
-    this.#telemetry.recordObservabilityFailure('logger');
-    if (this.#warnedObservabilityFailure) return;
-    this.#warnedObservabilityFailure = true;
-    try {
-      console.warn(
-        `Kerberos.js: the audit logger threw and was swallowed (authorization is unaffected; further warnings suppressed): ${sinkError?.message}`,
-      );
-    } catch {
-      // Even the warning is best-effort.
-    }
+  #observabilityFailure(sinkError, sink = 'logger') {
+    this.#reportSinkFailure(sinkError, sink);
   }
 
   #log(input, reqKind, callId) {
@@ -1614,25 +1710,204 @@ class Kerberos {
   async #runRequest(reqKind, reqId, handler, denyFallback) {
     const startedAt = getNow();
     const callId = this.#getCallId();
+    // Per-request lifecycle record shared with the handler (src/lifecycle.js).
+    // `ctx` is set by #beginRequest once the arguments validated (hooks
+    // enabled) and doubles as the "beforeRequest ran, so afterRequest is owed"
+    // flag.
+    const run = createRun({ reqKind, callId, reqId });
 
     return this.#telemetry.withRequestSpan(reqKind, callId, reqId, async (otel) => {
       try {
         this.#logMethodStart(reqKind, callId, reqId);
-        return await handler(callId, otel);
+        emitRequestStart(this.#events, runFields, run);
+        const result = await handler(callId, otel, run);
+        // The success-path afterRequest runs INSIDE the try: a throwing hook
+        // becomes a KerberosHookError that follows the onError contract like
+        // any evaluation error (from a `finally` it would bypass the catch).
+        if (run.ctx !== null) await finishRun(run, this.#hooks, getNow() - startedAt, null, false);
+        return result;
       } catch (error) {
+        run.error = error;
         this.#logMethodError(reqKind, callId, reqId, error);
         this.#telemetry.recordError(otel, error);
+        emitRequestError(this.#events, runFields, run, error);
         // Malformed arguments are programming errors and always propagate;
         // evaluation-phase errors follow the configured `onError` semantics.
-        if (error instanceof KerberosValidationError) throw error;
-        if (this.#onError === 'deny') return denyFallback(callId, otel, error);
+        const isValidationError = error instanceof KerberosValidationError;
+        const failClosed = !isValidationError && this.#onError === 'deny';
+        // Pairing invariant: once beforeRequest ran, the onError hook and
+        // afterRequest({ success: false }) run exactly once (both swallowed —
+        // they must never mask the original error) — unless the success-path
+        // afterRequest was itself the failure.
+        if (run.ctx !== null && !run.afterFired) {
+          await this.#hooks.onError(error, run.ctx);
+          await finishRun(run, this.#hooks, getNow() - startedAt, error, failClosed);
+        }
+        if (isValidationError) throw error;
+        if (failClosed) return denyFallback(callId, otel, error, run);
         throw error;
       } finally {
         const duration = getNow() - startedAt;
         this.#logMethodFinish(reqKind, callId, reqId, duration);
         this.#telemetry.endRequest(otel, reqKind, duration);
+        emitRequestEnd(this.#events, runFields, run, duration);
       }
     });
+  }
+
+  // Called by each handler right after its LAST argument validation, only
+  // when hooks are enabled: builds the frozen request context every hook of
+  // this request shares and runs beforeRequest (a throw vetoes the request).
+  // Enrichment: a non-undefined return value REPLACES the arguments — it is
+  // re-validated with the method's own validator (plus `check`, the method's
+  // post-validation invariants) and becomes what the handler evaluates; a
+  // replacement that fails validation is the hook's failure (KerberosHookError,
+  // onError contract, pairing invariant). Resolves to the arguments to use.
+  async #beginRequest(run, args, validator, label, check = null) {
+    run.args = args;
+    const replacement = await beginRun(run, this.#hooks, {
+      reqKind: run.reqKind,
+      callId: run.callId,
+      reqId: run.reqId,
+    });
+    // Only a plain object is a replacement; every other return value (the
+    // number a `metrics.increment()` arrow returns, a boolean, null…) keeps the
+    // request — expression-bodied arrows must stay safe to use as hooks.
+    if (replacement === null || typeof replacement !== 'object' || Array.isArray(replacement)) return args;
+    let enriched;
+    try {
+      enriched = this.#parseArgs(validator, label, replacement);
+      if (check !== null) check(enriched);
+    } catch (error) {
+      throw new KerberosHookError(`The beforeRequest hook returned invalid arguments: ${error.message}`, {
+        hook: 'beforeRequest',
+        cause: error,
+      });
+    }
+    run.args = enriched;
+    run.enriched = true;
+    return enriched;
+  }
+
+  // The internal request shape: assembled from ALREADY-validated args (after
+  // an enrichment, the replacement) plus engine-generated fields — the old
+  // buildRequest pass re-parsed the same principal/resource up to two more
+  // times per call. `enriched` rides the request so audit entries and spans
+  // can say the decision was made on replaced arguments.
+  static #buildRequest(principal, resource, actions, parsedArgs, callId, enriched) {
+    const req = {
+      principal,
+      resource,
+      P: principal,
+      R: resource,
+      actions,
+      reqId: parsedArgs.reqId,
+      callId,
+      includeMeta: parsedArgs.includeMeta,
+    };
+    if (enriched) req.enriched = true;
+    return req;
+  }
+
+  // Per-resource hooks around one evaluation: beforeResource → evaluate →
+  // afterResource. Only reached when `hasResourceHooks` (the plain drivers
+  // stay closure-free otherwise). A failing resource (evaluation error or a
+  // vetoing beforeResource) still reaches afterResource with its fail-closed
+  // result — swallowed there, so the original error is what fails the
+  // resource and checkResources' resource-level isolation applies unchanged.
+  async #evaluateWithResourceHooks(run, req, index, total, evaluate) {
+    const info = Object.freeze({ index, total, resource: req.R, actions: req.actions });
+    let evaluated;
+    try {
+      await this.#hooks.beforeResource(run.ctx, info);
+      evaluated = await evaluate();
+    } catch (error) {
+      await this.#hooks.afterResourceFailed(run.ctx, info, Kerberos.#failedResourceHookResult(req.actions, error));
+      throw error;
+    }
+    await this.#hooks.afterResource(run.ctx, info, Kerberos.#resourceHookResult(evaluated));
+    return evaluated;
+  }
+
+  // Hook-facing view of an evaluation: canonical EFFECT_* strings (never the
+  // caller's effectAsBoolean view), outputs as a list, meta/validationErrors
+  // when present. Frozen (shallow): a hook observes a result, it does not
+  // edit the response.
+  static #resourceHookResult({ effects, outputs, meta, validationErrors }) {
+    const actions = {};
+    for (const [action, effect] of effects) actions[action] = effect;
+    const result = { actions: Object.freeze(actions), outputs: [...outputs.values()] };
+    if (validationErrors?.length) result.validationErrors = validationErrors;
+    if (meta) result.meta = meta;
+    return Object.freeze(result);
+  }
+
+  // The fail-closed view of a resource whose evaluation failed — the same
+  // marker the `decision` event and the audit entry carry.
+  static #failedResourceHookResult(requestedActions, error) {
+    const actions = {};
+    for (const action of requestedActions) actions[action] = Effect.Deny;
+    return Object.freeze({
+      actions: Object.freeze(actions),
+      outputs: [],
+      reason: 'evaluation-error',
+      errorName: error?.name,
+    });
+  }
+
+  // One `decision` event per evaluated resource, from the same input shape
+  // the audit logger and the decisions counter consume — so fail-closed
+  // decisions appear in the event stream too (marked `reason`).
+  #emitDecisions(run, input) {
+    if (!this.#events.wants('decision')) return;
+    for (let i = 0; i < input.length; i++) {
+      const { req, result } = input[i];
+      const actions = {};
+      for (const [action, effect] of result.effects) actions[action] = effect;
+      const payload = runFields(run);
+      payload.index = i;
+      payload.principal = principalIdentity(req.P);
+      payload.resource = resourceIdentity(req.R);
+      payload.actions = actions;
+      if (run.enriched) payload.enriched = true;
+      const first = result.meta?.actions?.[req.actions[0]];
+      if (first?.reason === 'evaluation-error') {
+        payload.reason = 'evaluation-error';
+        payload.errorName = first.errorName;
+      }
+      this.#events.emit('decision', payload);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Events façade (see src/events.js). Chainable like EventEmitter; there is
+  // deliberately no public `emit` — events are the engine's outbound signal
+  // and a consumer must not be able to forge `decision` entries into an
+  // audit pipeline.
+  // ---------------------------------------------------------------------------
+
+  on(eventName, listener) {
+    this.#events.on(eventName, listener);
+    return this;
+  }
+
+  once(eventName, listener) {
+    this.#events.once(eventName, listener);
+    return this;
+  }
+
+  off(eventName, listener) {
+    this.#events.off(eventName, listener);
+    return this;
+  }
+
+  removeAllListeners(eventName) {
+    this.#events.removeAllListeners(eventName);
+    return this;
+  }
+
+  listenerCount(eventName) {
+    return this.#events.listenerCount(eventName);
   }
 
   /**
@@ -1651,48 +1926,68 @@ class Kerberos {
     return this.#runRequest(
       reqKind,
       args?.reqId,
-      async (callId, otel) => {
-        const parsedArgs = this.#parseArgs(this.#isAllowedArgsValidator, 'Invalid isAllowed arguments', args);
+      async (callId, otel, run) => {
+        const validated = this.#parseArgs(this.#isAllowedArgsValidator, 'Invalid isAllowed arguments', args);
+        // The fail-closed audit entry needs the request shape even when the
+        // failure is a vetoing beforeRequest — captured before the hook and
+        // updated to the enriched arguments after it.
+        auditContext = { args: validated };
+        const parsedArgs = this.#hooks.enabled
+          ? await this.#beginRequest(run, validated, this.#isAllowedArgsValidator, 'Invalid isAllowed arguments')
+          : validated;
+        auditContext.args = parsedArgs;
 
-        // The request is assembled from the ALREADY-validated args plus
-        // engine-generated fields — re-validating it (the old buildRequest
-        // pass) deep-parsed the same principal/resource up to two more times
-        // per call and, under Zod, split P/principal into different clones.
         // The public static Kerberos.parseRequest keeps full validation for
-        // external callers.
-        const req = {
-          principal: parsedArgs.principal,
-          resource: parsedArgs.resource,
-          P: parsedArgs.principal,
-          R: parsedArgs.resource,
-          actions: [parsedArgs.action],
-          reqId: parsedArgs.reqId,
+        // external callers; internally the validated args are used as-is.
+        const req = Kerberos.#buildRequest(
+          parsedArgs.principal,
+          parsedArgs.resource,
+          [parsedArgs.action],
+          parsedArgs,
           callId,
-          includeMeta: parsedArgs.includeMeta,
-        };
-
-        auditContext = { req, action: parsedArgs.action };
+          run.enriched,
+        );
         const relationsMemo = this.#relations ? new Map() : null;
         // Fully-synchronous configuration (no cache, no relations): the sync
         // driver skips the interior async frames entirely. Otherwise:
         // single-shot call, no lookups memo — #resolvePolicy's fast path
         // skips the memo bookkeeping (batching is checkResources' job).
-        const evaluated =
-          !this.#cache.enabled && !this.#relations
+        // Per-resource hooks wrap either driver in the (async) hook frame.
+        const syncDriver = !this.#cache.enabled && !this.#relations;
+        let evaluated;
+        if (run.ctx !== null && this.#hooks.hasResourceHooks) {
+          evaluated = await this.#evaluateWithResourceHooks(run, req, 0, 1, () =>
+            syncDriver
+              ? this.#evaluatePolicySourcesSync(req)
+              : this.#evaluatePolicySources(req, relationsMemo, null, otel),
+          );
+        } else {
+          evaluated = syncDriver
             ? this.#evaluatePolicySourcesSync(req)
             : await this.#evaluatePolicySources(req, relationsMemo, null, otel);
+        }
         const { effects } = evaluated;
         const isAllowed = effects.get(parsedArgs.action) === Effect.Allow || effects.get(ALL_ACTIONS) === Effect.Allow;
 
         const input = [{ req, result: evaluated }];
         this.#log(input, reqKind, callId);
         this.#telemetry.recordDecisions(otel, input, reqKind);
+        this.#emitDecisions(run, input);
 
         return isAllowed;
       },
-      (callId, otel, error) => {
+      (callId, otel, error, run) => {
         if (auditContext) {
-          const { req, action } = auditContext;
+          const { args: parsedArgs } = auditContext;
+          const { action } = parsedArgs;
+          const req = Kerberos.#buildRequest(
+            parsedArgs.principal,
+            parsedArgs.resource,
+            [action],
+            parsedArgs,
+            callId,
+            run.enriched,
+          );
           const meta = {
             actions: { [action]: { reason: 'evaluation-error', errorName: error?.name } },
             effectiveDerivedRoles: [],
@@ -1700,6 +1995,7 @@ class Kerberos {
           const input = [{ req, result: { effects: new Map([[action, Effect.Deny]]), outputs: new Map(), meta } }];
           this.#log(input, reqKind, callId);
           this.#telemetry.recordDecisions(otel, input, reqKind);
+          this.#emitDecisions(run, input);
         }
         return false;
       },
@@ -1719,8 +2015,20 @@ class Kerberos {
     return this.#runRequest(
       reqKind,
       args?.reqId,
-      async (callId, otel) => {
-        const parsedArgs = this.#parseArgs(this.#checkResourcesArgsValidator, 'Invalid checkResources arguments', args);
+      async (callId, otel, run) => {
+        const validated = this.#parseArgs(this.#checkResourcesArgsValidator, 'Invalid checkResources arguments', args);
+        // An enrichment may replace principal/resources but not the batch
+        // shape: callers index results positionally (results[i] ↔
+        // resources[i]), so the replacement must keep the resource count.
+        const parsedArgs = this.#hooks.enabled
+          ? await this.#beginRequest(
+              run,
+              validated,
+              this.#checkResourcesArgsValidator,
+              'Invalid checkResources arguments',
+              (enriched) => Kerberos.#assertSameBatchShape(validated, enriched),
+            )
+          : validated;
 
         // Requests are assembled from the ALREADY-validated args (the batch
         // validator covered the principal once and every resource entry) —
@@ -1728,16 +2036,7 @@ class Kerberos {
         // 2x per resource on top of that.
         const reqs = [];
         for (const { resource, actions } of parsedArgs.resources) {
-          reqs.push({
-            principal: parsedArgs.principal,
-            resource,
-            P: parsedArgs.principal,
-            R: resource,
-            actions,
-            reqId: parsedArgs.reqId,
-            callId,
-            includeMeta: parsedArgs.includeMeta,
-          });
+          reqs.push(Kerberos.#buildRequest(parsedArgs.principal, resource, actions, parsedArgs, callId, run.enriched));
         }
 
         // Resources evaluate concurrently; allSettled keeps result order and
@@ -1755,7 +2054,9 @@ class Kerberos {
         // take #resolvePolicy's memo-less fast path.
         const lookups = this.#cache.enabled ? new Map() : null;
         let settled;
-        if (!this.#cache.enabled && !this.#relations) {
+        const syncDriver = !this.#cache.enabled && !this.#relations;
+        const resourceHooks = run.ctx !== null && this.#hooks.hasResourceHooks;
+        if (syncDriver && !resourceHooks) {
           // Fully-synchronous configuration: evaluate in a plain loop while
           // preserving the per-resource fail-closed isolation contract via
           // the same settled-shaped outcomes the async wave produces.
@@ -1769,13 +2070,18 @@ class Kerberos {
           }
         } else {
           const limit = Number.isFinite(this.#maxConcurrency) ? createLimiter(this.#maxConcurrency) : null;
+          // Per-resource hooks over a sync configuration: the async wrapper
+          // turns a sync throw into a rejection, keeping the settled shape.
+          const evaluate = syncDriver
+            ? async (req) => this.#evaluatePolicySourcesSync(req)
+            : (req) => this.#evaluatePolicySources(req, relationsMemo, lookups, otel);
           const promises = [];
-          for (const req of reqs) {
-            promises.push(
-              limit
-                ? limit(() => this.#evaluatePolicySources(req, relationsMemo, lookups, otel))
-                : this.#evaluatePolicySources(req, relationsMemo, lookups, otel),
-            );
+          for (let i = 0; i < reqs.length; i++) {
+            const req = reqs[i];
+            const task = resourceHooks
+              ? () => this.#evaluateWithResourceHooks(run, req, i, reqs.length, () => evaluate(req))
+              : () => evaluate(req);
+            promises.push(limit ? limit(task) : task());
           }
           settled = await Promise.allSettled(promises);
         }
@@ -1837,6 +2143,7 @@ class Kerberos {
 
         this.#log(inputForLog, reqKind, callId);
         this.#telemetry.recordDecisions(otel, inputForLog, reqKind);
+        this.#emitDecisions(run, inputForLog);
 
         const response = { results, kerberosCallId: callId };
         if (parsedArgs.reqId) response.reqId = parsedArgs.reqId;
@@ -1866,6 +2173,45 @@ class Kerberos {
         return response;
       },
     );
+  }
+
+  // The planResources action invariants. The schemas keep `action`/`actions`
+  // independently optional; the exactly-one-of rule, the non-empty rule (an
+  // empty conjunction would plan KIND_ALWAYS_ALLOWED — a fail-open) and the
+  // wildcard rejection are enforced here so they also hold without a
+  // validation backend. Returns the action list to plan.
+  static #planActions(parsedArgs) {
+    const hasAction = parsedArgs.action !== undefined;
+    const hasActions = parsedArgs.actions !== undefined;
+    if (hasAction === hasActions) {
+      throw new KerberosValidationError(
+        'Invalid planResources arguments: provide exactly one of "action" or "actions"',
+      );
+    }
+    const actions = hasAction ? [parsedArgs.action] : [...parsedArgs.actions];
+    if (!actions.length) {
+      throw new KerberosValidationError('Invalid planResources arguments: "actions" must not be empty');
+    }
+    for (const action of actions) {
+      if (typeof action !== 'string' || !action.length) {
+        throw new KerberosValidationError('Invalid planResources arguments: actions must be non-empty strings');
+      }
+      if (action === ALL_ACTIONS) {
+        throw new KerberosValidationError(
+          `Invalid planResources arguments: the wildcard action "${ALL_ACTIONS}" cannot be planned`,
+        );
+      }
+    }
+    return actions;
+  }
+
+  // An enriched checkResources batch must keep its shape (positional results).
+  static #assertSameBatchShape(original, enriched) {
+    const expected = original.resources.length;
+    const actual = Array.isArray(enriched.resources) ? enriched.resources.length : -1;
+    if (actual !== expected) {
+      throw new Error(`"resources" must keep the request's ${expected} entries (positional results), got ${actual}`);
+    }
   }
 
   // Response scaffold shared by the success path and the onError:'deny'
@@ -1900,36 +2246,23 @@ class Kerberos {
     return this.#runRequest(
       reqKind,
       args?.reqId,
-      async (callId, otel) => {
-        const parsedArgs = this.#parseArgs(this.#planResourcesArgsValidator, 'Invalid planResources arguments', args);
-
-        // The schemas keep `action`/`actions` independently optional; the
-        // exactly-one-of invariant (and the wildcard rejection) are enforced
-        // here so the rule also holds without a validation backend.
+      async (callId, otel, run) => {
+        const validated = this.#parseArgs(this.#planResourcesArgsValidator, 'Invalid planResources arguments', args);
+        // The action invariants throw KerberosValidationError, which must
+        // never be preceded by beforeRequest — checked before the hook (and
+        // again on an enrichment, where a violation is the hook's failure).
+        Kerberos.#planActions(validated);
+        const parsedArgs = this.#hooks.enabled
+          ? await this.#beginRequest(
+              run,
+              validated,
+              this.#planResourcesArgsValidator,
+              'Invalid planResources arguments',
+              Kerberos.#planActions,
+            )
+          : validated;
         const hasAction = parsedArgs.action !== undefined;
-        const hasActions = parsedArgs.actions !== undefined;
-        if (hasAction === hasActions) {
-          throw new KerberosValidationError(
-            'Invalid planResources arguments: provide exactly one of "action" or "actions"',
-          );
-        }
-        const actions = hasAction ? [parsedArgs.action] : [...parsedArgs.actions];
-        // Guarded here too (not only in the schemas): with no validation
-        // backend an empty list would otherwise plan an empty conjunction —
-        // KIND_ALWAYS_ALLOWED, a fail-open.
-        if (!actions.length) {
-          throw new KerberosValidationError('Invalid planResources arguments: "actions" must not be empty');
-        }
-        for (const action of actions) {
-          if (typeof action !== 'string' || !action.length) {
-            throw new KerberosValidationError('Invalid planResources arguments: actions must be non-empty strings');
-          }
-          if (action === ALL_ACTIONS) {
-            throw new KerberosValidationError(
-              `Invalid planResources arguments: the wildcard action "${ALL_ACTIONS}" cannot be planned`,
-            );
-          }
-        }
+        const actions = Kerberos.#planActions(parsedArgs);
 
         const trace = parsedArgs.includeMeta ? [] : null;
         const sources = await this.#planPolicySources(
@@ -1963,8 +2296,20 @@ class Kerberos {
           opaqueCount: counts.opaque,
           relationCount: counts.relation,
           principalId: parsedArgs.principal.id,
+          enriched: run.enriched,
         });
         this.#logPlanResult(callId, parsedArgs.reqId, parsedArgs.resource.kind, filter, counts, actions);
+        if (this.#events.wants('plan')) {
+          const payload = requestFields(callId, reqKind, parsedArgs.reqId);
+          payload.principal = principalIdentity(parsedArgs.principal);
+          payload.resource = resourceIdentity(parsedArgs.resource);
+          payload.actions = [...actions];
+          payload.filterKind = filter.kind;
+          payload.opaqueCount = counts.opaque;
+          payload.relationCount = counts.relation;
+          if (run.enriched) payload.enriched = true;
+          this.#events.emit('plan', payload);
+        }
 
         const response = Kerberos.#buildPlanResponse(
           callId,

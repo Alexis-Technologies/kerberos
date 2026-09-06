@@ -72,6 +72,9 @@ function buildAuditEntries(input, reqKind, callId) {
         meta: result.meta,
         validationErrors: result.validationErrors,
       };
+      // A `beforeRequest` hook replaced the arguments: the entry records the
+      // ENRICHED principal/resource (what was evaluated) and says so.
+      if (req.enriched) auditEntry.enriched = true;
 
       if (!auditEntry.callId) delete auditEntry.callId;
       if (!auditEntry.reqId) delete auditEntry.reqId;

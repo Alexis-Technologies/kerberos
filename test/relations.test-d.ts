@@ -71,3 +71,43 @@ expectType<string>(buildAdmissionKey('user', null, false, null));
 expectType<{ type: string; id: string }>(parseObjectRef('doc:d1'));
 expectType<{ type: string; id: string; relation: string | null }>(parseSubjectRef('group:eng#member'));
 void parseTuple('doc:d1#viewer@user:u1');
+
+// Resolver hooks and events.
+import type { RelationCheckedEvent, RelationHookContext, RelationResolverHooks } from '../relations.js';
+
+const resolverHooks: RelationResolverHooks = {
+  beforeRequest(ctx) {
+    expectType<RelationHookContext>(ctx);
+    expectType<'check' | 'list' | 'lookupSubjects' | 'lookupResources'>(ctx.kind);
+    expectType<string>(ctx.callId);
+    expectType<boolean>(ctx.enriched);
+    return { ...ctx.args, subject: 'user:sally' };
+  },
+  afterRequest(ctx, summary) {
+    expectType<boolean>(summary.success);
+    expectType<true | undefined>(summary.enriched);
+  },
+  onError(error, ctx) {
+    expectType<unknown>(error);
+  },
+};
+const hookedResolver = new RelationResolver({
+  schema: schemaShape,
+  hooks: resolverHooks,
+  hooksTimeoutMs: 100,
+  maxListeners: 20,
+});
+// @ts-expect-error — per-resource hooks do not exist on the resolver.
+new RelationResolver({ schema: schemaShape, hooks: { beforeResource() {} } });
+
+expectType<RelationResolver>(
+  hookedResolver
+    .on('relation:checked', (event) => {
+      expectType<RelationCheckedEvent>(event);
+      expectType<boolean>(event.allowed);
+    })
+    .once('cache:miss', (event) => expectType<'relation'>(event.kind))
+    .removeAllListeners(),
+);
+// @ts-expect-error — engine-only event names are rejected on the resolver.
+hookedResolver.on('decision', () => {});

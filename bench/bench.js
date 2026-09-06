@@ -169,6 +169,34 @@ async function main() {
     console.log('(zod not installed — skipping the validation-backend scenario)');
   }
 
+  // Hooks/events scenarios: the baseline above is what every request pays
+  // with nothing configured; these measure the seams themselves — a sync
+  // listener (the emitter's promise-free fast path), request-level hooks (one
+  // await per request, sync driver kept) and per-resource hooks (the async
+  // frame around each evaluation).
+  const listened = new Kerberos(simplePolicies, []);
+  listened.on('decision', () => {});
+  results.push(
+    await bench('isAllowed — simple role match + 1 sync decision listener', () =>
+      listened.isAllowed({ principal, action: 'view', resource })),
+  );
+  const requestHooked = new Kerberos(simplePolicies, [], { hooks: { beforeRequest() {}, afterRequest() {} } });
+  results.push(
+    await bench('isAllowed — simple role match + request-level hooks', () =>
+      requestHooked.isAllowed({ principal, action: 'view', resource })),
+  );
+  const resourceHooked = new Kerberos(simplePolicies, [], { hooks: { beforeResource() {}, afterResource() {} } });
+  results.push(
+    await bench('isAllowed — simple role match + per-resource hooks', () =>
+      resourceHooked.isAllowed({ principal, action: 'view', resource })),
+  );
+  const richListened = new Kerberos(richPolicies, [benchDerivedRoles]);
+  richListened.on('decision', () => {});
+  results.push(
+    await bench('checkResources — 10 resources × 3 actions + decision listener', () =>
+      richListened.checkResources({ principal, resources: manyResources })),
+  );
+
   // Cache-backed scenario: dynamic $expr policy resolved through a Map cache.
   let jsep;
   try {

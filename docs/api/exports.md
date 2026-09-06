@@ -14,7 +14,7 @@ The full public surface of the package, by entry point.
 | `PlanKind` | `{ AlwaysAllowed, AlwaysDenied, Conditional }` — [query plan](/guide/query-plans) filter kinds (const object, not an `enum`). |
 | `expandRelationOperands` | Materializes ReBAC `relation` operands of a [query plan](/guide/query-plans) into id filters. |
 | `toCerbosQueryPlan` | Converts a plan to the `@cerbos/core` SDK shape for the [official Cerbos ORM adapters](/guide/query-plans#using-the-official-cerbos-orm-adapters). |
-| `KerberosValidationError`, `KerberosCacheError`, `KerberosCodecError`, `KerberosExprError`, `KerberosRelationsError` | Typed [error classes](/api/errors). |
+| `KerberosValidationError`, `KerberosCacheError`, `KerberosCodecError`, `KerberosExprError`, `KerberosRelationsError`, `KerberosHookError` | Typed [error classes](/api/errors). |
 | `registerAjvKeywords`, `createAjvAdapter` | [Validation](/guide/schema-validation) helpers. |
 | `resolveValidationAdapter`, `toValidationAdapter`, `parseWithValidation` | Backend dispatch used by every DSL module — pick an adapter (explicit → Zod → TypeBox+Ajv → JSON Schema+Ajv → passthrough) and parse with it. |
 | `createCacheReader` | Wraps any `get(key)` store as the engine's read-only [policy fallback layer](/guide/caching). |
@@ -32,6 +32,7 @@ Type-only exports for [typed authoring](/guide/typescript) (erased at runtime):
 | `KerberosPolicy<S>`, `ResourcePolicySchema<S>`, `PrincipalPolicySchema<S>`, `RolePolicySchema<S>`, `DerivedRolesSchema<S>` | Policy document shapes. |
 | `CheckResourcesArgs<S>`, `CheckResourcesEntry<S>`, `CheckResourcesResult<S, E>`, `CheckResourcesResponse<S, E>` | `checkResources` arguments and response. |
 | `PlanResourcesArgs<S, K>`, `PlanResourcesResponse<S>`, `PlanFilter`, `PlanExpressionOperand` | `planResources` arguments and response. |
+| `KerberosHooks<S>`, `KerberosHookContext<S>`, `KerberosRequestSummary`, `KerberosResourceHookInfo<S>`, `KerberosResourceHookResult`, `KerberosEvents` | [Hooks & events](/guide/hooks) contracts (the resolver's live in `relations.d.ts`: `RelationResolverHooks`, `RelationResolverEvents`). |
 
 ## `@alexify/kerberos/relations`
 

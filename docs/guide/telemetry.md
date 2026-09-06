@@ -29,7 +29,7 @@ Works out of the box with any registered SDK (e.g. `NodeSDK` from `@opentelemetr
 | `kerberos.request.duration` | Histogram | `ms` | `kerberos.req_kind`, `error` |
 | `kerberos.cache.requests` | Counter | `{request}` | `kerberos.cache.result` (`hit`/`miss`/`error`), `kerberos.cache.kind` (only for ReBAC tuple reads: `relation`) |
 | `kerberos.relations.checks` | Counter | `{check}` | `kerberos.relations.result` (`allow`/`deny`) |
-| `kerberos.observability.failures` | Counter | `{failure}` | `kerberos.observability.sink` (`logger`/`telemetry`) — swallowed sink failures. Authorization is never affected by a broken logger/exporter, but a non-zero rate here means audit or telemetry output is being **lost**; the engine also `console.warn`s once per instance on the first swallowed logger failure. |
+| `kerberos.observability.failures` | Counter | `{failure}` | `kerberos.observability.sink` (`logger`/`telemetry`/`hooks`/`events`) — swallowed sink failures. Authorization is never affected by a broken logger/exporter, but a non-zero rate here means audit or telemetry output is being **lost**; the engine also `console.warn`s once per instance and sink on the first swallowed logger/hook/listener failure. |
 
 ::: info
 Metric attributes deliberately exclude actions and principals to keep cardinality bounded — they assume a bounded set of resource kinds.

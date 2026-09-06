@@ -648,3 +648,53 @@ describe('Resilience', () => {
     });
   });
 });
+
+describe('Resilience — lifecycle hooks', () => {
+  const { KerberosHookError } = require('../src/index.js');
+
+  it("hook failures follow onError ('throw' propagates KerberosHookError, 'deny' fails closed)", async () => {
+    const hooks = {
+      beforeRequest() {
+        throw new Error('veto');
+      },
+    };
+    const throwing = new Kerberos(policies, [], { hooks });
+    await assert.rejects(() => throwing.isAllowed({ principal, action: 'view', resource }), KerberosHookError);
+    await assert.rejects(
+      () => throwing.checkResources({ principal, resources: [{ resource, actions: ['view'] }] }),
+      KerberosHookError,
+    );
+
+    const denying = new Kerberos(policies, [], { hooks, onError: 'deny' });
+    assert.equal(await denying.isAllowed({ principal, action: 'view', resource }), false);
+    const response = await denying.checkResources({ principal, resources: [{ resource, actions: ['view'] }] });
+    assert.deepEqual(
+      response.results.map((result) => result.actions.view),
+      [Effect.Deny],
+    );
+    const plan = await denying.planResources({ principal, resource: { kind: 'expense' }, action: 'view' });
+    assert.equal(plan.filter.kind, 'KIND_ALWAYS_DENIED');
+  });
+
+  it('malformed arguments still throw KerberosValidationError before any hook runs', async () => {
+    const { z } = require('zod');
+    let fired = false;
+    const kerberos = new Kerberos(policies, [], {
+      z,
+      onError: 'deny',
+      hooks: {
+        beforeRequest() {
+          fired = true;
+        },
+      },
+    });
+    await assert.rejects(() => kerberos.isAllowed({ principal, resource }), KerberosValidationError);
+    assert.equal(fired, false);
+  });
+
+  it('rejects malformed hooks options at construction', () => {
+    assert.throws(() => new Kerberos(policies, [], { hooks: 'nope' }), TypeError);
+    assert.throws(() => new Kerberos(policies, [], { hooks: { beforeAll() {} } }), TypeError);
+    assert.throws(() => new Kerberos(policies, [], { hooks: { onError: 1 } }), TypeError);
+  });
+});

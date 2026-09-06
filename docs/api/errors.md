@@ -9,3 +9,4 @@ All error classes are exported from the main entry. Evaluation-phase errors foll
 | `KerberosCodecError` | A cached policy/tuple document is corrupt or fails to deserialize (for policies it is logged and counts as a miss; for ReBAC tuple documents it throws — see [Dynamic tuples](/guide/relations-resolver#dynamic-tuples-cache-backed)). |
 | `KerberosExprError` | A `{ $expr }` string uses a construct outside the [safe allowlist](/reference/safe-builtins), exceeds codec limits, or fails to parse. |
 | `KerberosRelationsError` | The built-in ReBAC resolver hits `maxDepth`, a throwing caveat, or invalid relation data. |
+| `KerberosHookError` | A lifecycle hook threw, exceeded `hooksTimeoutMs` (`timedOut: true`) or returned an invalid replacement — `hook` names it, `cause` is the original error. Follows `onError` in the engine, always propagates from the resolver; see [Hooks & events](/guide/hooks#error-contract). |

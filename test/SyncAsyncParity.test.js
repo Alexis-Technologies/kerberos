@@ -149,3 +149,45 @@ describe('sync/async evaluation driver parity', () => {
     assert.deepEqual(await syncEngine.checkResources(batch), await asyncEngine.checkResources(batch));
   });
 });
+
+describe('sync/async driver parity with lifecycle hooks', () => {
+  const batch = {
+    principal: principalsPolicy.sally,
+    resources: [
+      { resource: resourcesPolicy.expense1, actions: ['view', 'delete', 'approve'] },
+      { resource: { id: 'nothing', kind: 'unknown-kind' }, actions: ['view'] },
+    ],
+    includeMeta: true,
+  };
+  const single = { principal: principalsPolicy.sally, action: 'view', resource: resourcesPolicy.expense1 };
+
+  it('request-level hooks keep the sync driver and produce identical responses', async () => {
+    const plain = new Kerberos([expensePolicy], [commonRolesPolicy], { getCallId: () => 'call-parity' });
+    const seen = [];
+    const hooked = new Kerberos([expensePolicy], [commonRolesPolicy], {
+      getCallId: () => 'call-parity',
+      hooks: { beforeRequest: () => seen.push('before'), afterRequest: () => seen.push('after') },
+    });
+    assert.deepEqual(await hooked.checkResources(batch), await plain.checkResources(batch));
+    assert.equal(await hooked.isAllowed(single), await plain.isAllowed(single));
+    assert.deepEqual(seen, ['before', 'after', 'before', 'after']);
+  });
+
+  it('per-resource hooks (async form over a sync config) stay byte-identical to the plain engine', async () => {
+    const plain = new Kerberos([expensePolicy], [commonRolesPolicy], { getCallId: () => 'call-parity' });
+    const cached = new Kerberos([expensePolicy], [commonRolesPolicy], {
+      cache: alwaysMissCache,
+      cacheRetry: { attempts: 1 },
+      getCallId: () => 'call-parity',
+      hooks: { beforeResource() {}, afterResource() {} },
+    });
+    const hooked = new Kerberos([expensePolicy], [commonRolesPolicy], {
+      getCallId: () => 'call-parity',
+      hooks: { beforeResource() {}, afterResource() {} },
+    });
+    const expected = await plain.checkResources(batch);
+    assert.deepEqual(await hooked.checkResources(batch), expected);
+    assert.deepEqual(await cached.checkResources(batch), expected);
+    assert.equal(await hooked.isAllowed(single), await plain.isAllowed(single));
+  });
+});
