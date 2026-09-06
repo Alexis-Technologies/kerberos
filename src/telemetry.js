@@ -64,6 +64,7 @@ function createDisabledTelemetryWriter() {
     recordRelationCheck() {},
     recordRelationResolution() {},
     recordObservabilityFailure() {},
+    recordHookDuration() {},
     endRequest() {},
   };
 }
@@ -99,6 +100,7 @@ function createTelemetryWriter(telemetry) {
   let cacheRequestsCounter = null;
   let relationChecksCounter = null;
   let observabilityFailuresCounter = null;
+  let hooksDurationHistogram = null;
   if (hasMethod(meter, 'createCounter') && hasMethod(meter, 'createHistogram')) {
     try {
       decisionsCounter = meter.createCounter('kerberos.decisions', {
@@ -126,6 +128,11 @@ function createTelemetryWriter(telemetry) {
         description:
           'Swallowed logger/telemetry/hooks/events sink failures, by kerberos.observability.sink — a non-zero rate means audit or telemetry output is being lost while authorization keeps working',
       });
+      hooksDurationHistogram = meter.createHistogram('kerberos.hooks.duration', {
+        unit: 'ms',
+        description:
+          'Wall time of each awaited lifecycle hook invocation, by kerberos.hook — hooks run inside the request, so this is their share of kerberos.request.duration',
+      });
     } catch {
       decisionsCounter = null;
       plansCounter = null;
@@ -133,6 +140,7 @@ function createTelemetryWriter(telemetry) {
       cacheRequestsCounter = null;
       relationChecksCounter = null;
       observabilityFailuresCounter = null;
+      hooksDurationHistogram = null;
     }
   }
 
@@ -231,6 +239,9 @@ function createTelemetryWriter(telemetry) {
         if (span && includeIdentity && input[0]?.req.P.id) {
           span.setAttribute?.('kerberos.principal.id', input[0].req.P.id);
         }
+        // A beforeRequest hook replaced the arguments: the span says the
+        // decision was made on enriched input.
+        if (span && input[0]?.req.enriched) span.setAttribute?.('kerberos.request.enriched', true);
 
         for (const { req, result } of input) {
           for (const action of req.actions) {
@@ -275,6 +286,7 @@ function createTelemetryWriter(telemetry) {
         span.setAttribute?.('kerberos.plan.actions_count', plan.actionsCount);
         span.setAttribute?.('kerberos.plan.opaque_count', plan.opaqueCount);
         span.setAttribute?.('kerberos.plan.relation_count', plan.relationCount);
+        if (plan.enriched) span.setAttribute?.('kerberos.request.enriched', true);
         if (includeIdentity && plan.principalId) span.setAttribute?.('kerberos.principal.id', plan.principalId);
       } catch {
         // Telemetry must never break authorization.
@@ -361,6 +373,21 @@ function createTelemetryWriter(telemetry) {
         observabilityFailuresCounter?.add(1, { 'kerberos.observability.sink': sink });
       } catch {
         // Nothing left to do — the swallow contract still holds.
+      }
+    },
+
+    /**
+     * Records one awaited hook invocation on the kerberos.hooks.duration
+     * histogram (by hook name). Hooks run INSIDE the request, so this is the
+     * part of kerberos.request.duration a slow beforeRequest accounts for —
+     * without it a hook regression looks like an engine regression.
+     */
+    recordHookDuration(hookName, duration) {
+      try {
+        hooksDurationHistogram?.record(duration, { 'kerberos.hook': hookName });
+      } catch {
+        // Telemetry must never break authorization.
+        countSelfFailure();
       }
     },
 

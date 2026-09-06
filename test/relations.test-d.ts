@@ -80,15 +80,23 @@ const resolverHooks: RelationResolverHooks = {
     expectType<RelationHookContext>(ctx);
     expectType<'check' | 'list' | 'lookupSubjects' | 'lookupResources'>(ctx.kind);
     expectType<string>(ctx.callId);
+    expectType<boolean>(ctx.enriched);
+    return { ...ctx.args, subject: 'user:sally' };
   },
   afterRequest(ctx, summary) {
     expectType<boolean>(summary.success);
+    expectType<true | undefined>(summary.enriched);
   },
   onError(error, ctx) {
     expectType<unknown>(error);
   },
 };
-const hookedResolver = new RelationResolver({ schema: schemaShape, hooks: resolverHooks });
+const hookedResolver = new RelationResolver({
+  schema: schemaShape,
+  hooks: resolverHooks,
+  hooksTimeoutMs: 100,
+  maxListeners: 20,
+});
 // @ts-expect-error — per-resource hooks do not exist on the resolver.
 new RelationResolver({ schema: schemaShape, hooks: { beforeResource() {} } });
 

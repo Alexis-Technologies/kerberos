@@ -505,6 +505,54 @@ describe('Telemetry wave-2 observability', () => {
     assert.deepEqual(sinks, ['events', 'hooks']);
   });
 
+  it('records every awaited hook invocation on kerberos.hooks.duration (by hook name)', async () => {
+    const { exporter, reader, meter } = createMetricSetup();
+    const kerberos = new Kerberos(policies, [], {
+      telemetry: { meter },
+      hooks: {
+        beforeRequest: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 2));
+        },
+        afterResource() {},
+        onError() {},
+      },
+    });
+    await kerberos.isAllowed({ principal, action: 'view', resource });
+    await kerberos.checkResources({
+      principal,
+      resources: [
+        { resource, actions: ['view'] },
+        { resource, actions: ['edit'] },
+      ],
+    });
+
+    const metrics = await collectMetrics(reader, exporter);
+    const points = metrics['kerberos.hooks.duration'].dataPoints;
+    const byHook = {};
+    for (const point of points) byHook[point.attributes['kerberos.hook']] = point.value;
+    assert.deepEqual(Object.keys(byHook).sort(), ['afterResource', 'beforeRequest']);
+    assert.equal(byHook.beforeRequest.count, 2);
+    assert.ok(byHook.beforeRequest.sum >= 2);
+    assert.equal(byHook.afterResource.count, 3);
+    // Hooks that were configured but never ran (onError) record nothing.
+    assert.equal('onError' in byHook, false);
+  });
+
+  it('marks spans of enriched requests with kerberos.request.enriched', async () => {
+    const { exporter, tracer } = createTraceSetup();
+    const kerberos = new Kerberos(policies, [], {
+      telemetry: { tracer },
+      hooks: { beforeRequest: (ctx) => ({ ...ctx.args }) },
+    });
+    await kerberos.isAllowed({ principal, action: 'view', resource });
+    await kerberos.planResources({ principal, resource: { kind: 'expense' }, action: 'view' });
+    const spans = exporter.getFinishedSpans();
+    assert.deepEqual(
+      spans.map((span) => span.attributes['kerberos.request.enriched']),
+      [true, true],
+    );
+  });
+
   it('keeps hooks and events working when every telemetry method throws', async () => {
     const telemetry = {
       tracer: {

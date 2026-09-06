@@ -1,28 +1,45 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert').strict;
 
-const { Emitter, createEventHub } = require('../src/events.js');
+const { DEFAULT_MAX_LISTENERS, ENGINE_EVENTS, Emitter, RESOLVER_EVENTS, createEventHub } = require('../src/events.js');
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-describe('Emitter (metautil copy)', () => {
-  it('calls listeners in registration order with the payload', async () => {
+describe('Emitter', () => {
+  it('calls listeners synchronously, in registration order, with the payload', async () => {
     const emitter = new Emitter();
     const seen = [];
     emitter.on('x', (value) => seen.push(['a', value]));
     emitter.on('x', (value) => seen.push(['b', value]));
-    await emitter.emit('x', 42);
+    const pending = emitter.emit('x', 42);
+    // Synchronous: both ran before the returned promise was even awaited.
     assert.deepEqual(seen, [
       ['a', 42],
       ['b', 42],
     ]);
+    assert.equal(await pending, undefined);
   });
 
-  it('fires once-listeners exactly once and drops them', async () => {
+  it('allocates no promise for synchronous listeners (the fast path)', () => {
+    const emitter = new Emitter();
+    emitter.on('x', () => {});
+    emitter.on('x', () => 42);
+    emitter.on('x', () => null);
+    const first = emitter.emit('x');
+    const second = emitter.emit('x');
+    // The same shared, already-resolved promise comes back for every
+    // all-sync emission — no per-emit allocation.
+    assert.equal(first, second);
+    assert.equal(emitter.emit('nobody'), first);
+  });
+
+  it('fires once-listeners exactly once, dropping them before they run (re-entrancy safe)', async () => {
     const emitter = new Emitter();
     let calls = 0;
     emitter.once('x', () => {
       calls += 1;
+      // A re-entrant emission from inside the once-listener must not fire it again.
+      emitter.emit('x');
     });
     emitter.on('x', () => {});
     await emitter.emit('x');
@@ -34,8 +51,10 @@ describe('Emitter (metautil copy)', () => {
   it('drops the event entirely when its only listener was a once-listener', async () => {
     const emitter = new Emitter();
     emitter.once('x', () => {});
+    assert.equal(emitter.hasListeners(), true);
     await emitter.emit('x');
-    assert.deepEqual(emitter.eventNames(), []);
+    assert.equal(emitter.hasListeners(), false);
+    assert.equal(emitter.listenerCount('x'), 0);
   });
 
   it('snapshots the listener list per emit', async () => {
@@ -45,10 +64,24 @@ describe('Emitter (metautil copy)', () => {
       seen.push('first');
       emitter.on('x', () => seen.push('added-during-emit'));
     });
+    emitter.on('x', () => seen.push('second'));
     await emitter.emit('x');
-    assert.deepEqual(seen, ['first']);
+    assert.deepEqual(seen, ['first', 'second']);
     await emitter.emit('x');
-    assert.deepEqual(seen, ['first', 'first', 'added-during-emit']);
+    assert.deepEqual(seen, ['first', 'second', 'first', 'second', 'added-during-emit']);
+  });
+
+  it('a single listener that unsubscribes itself during the emission still ran once', async () => {
+    const emitter = new Emitter();
+    let calls = 0;
+    const listener = () => {
+      calls += 1;
+      emitter.off('x', listener);
+    };
+    emitter.on('x', listener);
+    await emitter.emit('x');
+    await emitter.emit('x');
+    assert.equal(calls, 1);
   });
 
   it('allows duplicate registrations (Node parity — called once per registration)', async () => {
@@ -65,32 +98,35 @@ describe('Emitter (metautil copy)', () => {
     assert.equal(emitter.listenerCount('x'), 1);
   });
 
-  it('resolves immediately when nothing listens', async () => {
+  it('collects sync throws without a microtask, and settles every async listener before rejecting', async () => {
     const emitter = new Emitter();
-    assert.equal(await emitter.emit('nobody'), undefined);
-  });
-
-  it('keeps the original semantics for a bare "error" emit without listeners', () => {
-    const emitter = new Emitter();
-    assert.throws(() => emitter.emit('error', new Error('x')), /Unhandled error/);
-  });
-
-  it('settles every listener, then rejects with an AggregateError carrying each failure', async () => {
-    const emitter = new Emitter();
-    const seen = [];
     emitter.on('x', () => {
       throw new Error('sync boom');
     });
-    emitter.on('x', async () => {
+    emitter.on('x', () => {
+      throw new Error('sync boom 2');
+    });
+    await assert.rejects(
+      () => emitter.emit('x'),
+      (error) =>
+        error instanceof AggregateError && error.errors.map((e) => e.message).join(',') === 'sync boom,sync boom 2',
+    );
+
+    const mixed = new Emitter();
+    const seen = [];
+    mixed.on('x', () => {
+      throw new Error('sync boom');
+    });
+    mixed.on('x', async () => {
       await tick();
       throw new Error('async boom');
     });
-    emitter.on('x', async () => {
+    mixed.on('x', async () => {
       await tick();
       seen.push('third ran to completion');
     });
     await assert.rejects(
-      () => emitter.emit('x'),
+      () => mixed.emit('x'),
       (error) =>
         error instanceof AggregateError &&
         error.errors.map((reason) => reason.message).join(',') === 'sync boom,async boom' &&
@@ -99,7 +135,7 @@ describe('Emitter (metautil copy)', () => {
     assert.deepEqual(seen, ['third ran to completion']);
   });
 
-  it('off removes one registration and ignores unknown listeners/events', () => {
+  it('off removes one registration and ignores unknown listeners/events; clear() drops one or all', () => {
     const emitter = new Emitter();
     const listener = () => {};
     emitter.on('x', listener);
@@ -108,48 +144,34 @@ describe('Emitter (metautil copy)', () => {
     assert.equal(emitter.listenerCount('x'), 1);
     emitter.off('x', listener);
     assert.equal(emitter.listenerCount('x'), 0);
-    assert.deepEqual(emitter.eventNames(), []);
-  });
+    assert.equal(emitter.hasListeners(), false);
 
-  it('off without a listener drops the event; clear() drops everything', () => {
-    const emitter = new Emitter();
     emitter.on('x', () => {});
     emitter.on('y', () => {});
-    emitter.off('x');
-    assert.deepEqual(emitter.eventNames(), ['y']);
-    emitter.on('x', () => {});
     emitter.clear('x');
-    assert.deepEqual(emitter.eventNames(), ['y']);
+    assert.equal(emitter.listenerCount('x'), 0);
+    assert.equal(emitter.listenerCount('y'), 1);
     emitter.clear();
-    assert.deepEqual(emitter.eventNames(), []);
-  });
-
-  it('exposes listeners/listenerCount/eventNames/toPromise', async () => {
-    const emitter = new Emitter();
-    const listener = () => {};
-    emitter.on('x', listener);
-    assert.deepEqual(emitter.listeners('x'), [listener]);
-    assert.deepEqual(emitter.listeners('nope'), []);
-    assert.equal(emitter.listenerCount('nope'), 0);
-    assert.deepEqual(emitter.eventNames(), ['x']);
-    const pending = emitter.toPromise('ready');
-    await emitter.emit('ready', 'go');
-    assert.equal(await pending, 'go');
-    assert.throws(() => emitter.listeners(), /Expected eventName/);
-    assert.throws(() => emitter.listenerCount(), /Expected eventName/);
+    assert.equal(emitter.hasListeners(), false);
   });
 });
 
 describe('createEventHub', () => {
-  it('wants() stays false (and cheap) until a listener is attached', () => {
+  it('wants() and active stay false (and cheap) until a listener is attached, and reset when it is removed', () => {
     const hub = createEventHub({ onSwallowed() {} });
     assert.equal(hub.active, false);
     assert.equal(hub.wants('decision'), false);
-    hub.on('decision', () => {});
+    const listener = () => {};
+    hub.on('decision', listener);
     assert.equal(hub.active, true);
     assert.equal(hub.wants('decision'), true);
     assert.equal(hub.wants('plan'), false);
     assert.equal(hub.listenerCount('decision'), 1);
+    hub.off('decision', listener);
+    assert.equal(hub.active, false);
+    hub.on('decision', listener);
+    hub.removeAllListeners();
+    assert.equal(hub.active, false);
   });
 
   it('rejects non-function listeners on on/once/off', () => {
@@ -158,6 +180,21 @@ describe('createEventHub', () => {
       assert.throws(() => hub[method]('decision', 'nope'), TypeError);
       assert.throws(() => hub[method]('decision'), TypeError);
     }
+  });
+
+  it('rejects unknown event names when an allowed list is configured (a typo must not register a dead listener)', () => {
+    const hub = createEventHub({ allowed: ENGINE_EVENTS });
+    const listener = () => {};
+    for (const method of ['on', 'once', 'off']) {
+      assert.throws(() => hub[method]('decison', listener), /unknown event "decison" \(expected one of request:start/);
+    }
+    assert.throws(() => hub.listenerCount('nope'), TypeError);
+    assert.throws(() => hub.removeAllListeners('nope'), TypeError);
+    hub.on('decision', listener);
+    hub.removeAllListeners();
+    // Without a list every name is accepted (the resolver passes its own).
+    createEventHub().on('anything', listener);
+    assert.deepEqual([...RESOLVER_EVENTS].includes('relation:checked'), true);
   });
 
   it('hands every listener failure (sync throw and async rejection) to onSwallowed', async () => {
@@ -175,13 +212,6 @@ describe('createEventHub', () => {
     assert.deepEqual(swallowed, ['decision:sync', 'decision:async']);
   });
 
-  it('swallows a synchronous emit throw too', async () => {
-    const swallowed = [];
-    const hub = createEventHub({ onSwallowed: (error, name) => swallowed.push(`${name}:${error.message}`) });
-    hub.emit('error', new Error('x'));
-    assert.deepEqual(swallowed, ['error:Unhandled error']);
-  });
-
   it('survives a throwing onSwallowed and works without one', async () => {
     const hub = createEventHub({
       onSwallowed() {
@@ -192,11 +222,13 @@ describe('createEventHub', () => {
       throw new Error('boom');
     });
     hub.emit('x', {});
-    hub.emit('error', new Error('x'));
     await tick();
 
     const silent = createEventHub();
     silent.on('x', () => {
+      throw new Error('boom');
+    });
+    silent.on('x', async () => {
       throw new Error('boom');
     });
     silent.emit('x', {});
@@ -216,5 +248,39 @@ describe('createEventHub', () => {
     assert.equal(hub.listenerCount('c'), 1);
     hub.removeAllListeners();
     assert.equal(hub.listenerCount('c'), 0);
+  });
+
+  it('warns once per event name when the listener count passes maxListeners (default 10), never throws', () => {
+    const leaks = [];
+    const hub = createEventHub({ onLeak: (name, count, max) => leaks.push([name, count, max]) });
+    assert.equal(DEFAULT_MAX_LISTENERS, 10);
+    for (let i = 0; i < 12; i++) hub.on('decision', () => {});
+    for (let i = 0; i < 12; i++) hub.once('plan', () => {});
+    assert.deepEqual(leaks, [
+      ['decision', 11, 10],
+      ['plan', 11, 10],
+    ]);
+    assert.equal(hub.listenerCount('decision'), 12);
+
+    const custom = createEventHub({ maxListeners: 2, onLeak: (name, count) => leaks.push([name, count]) });
+    custom.on('x', () => {});
+    custom.on('x', () => {});
+    assert.equal(leaks.length, 2);
+    custom.on('x', () => {});
+    assert.deepEqual(leaks.at(-1), ['x', 3]);
+
+    const off = createEventHub({ maxListeners: 0, onLeak: () => leaks.push('never') });
+    for (let i = 0; i < 20; i++) off.on('x', () => {});
+    assert.equal(leaks.length, 3);
+
+    const broken = createEventHub({
+      maxListeners: 1,
+      onLeak() {
+        throw new Error('reporter down');
+      },
+    });
+    broken.on('x', () => {});
+    broken.on('x', () => {});
+    assert.equal(broken.listenerCount('x'), 2);
   });
 });

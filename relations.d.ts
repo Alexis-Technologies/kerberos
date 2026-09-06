@@ -15,25 +15,35 @@ import type {
 export type RelationRequestKind = 'check' | 'list' | 'lookupSubjects' | 'lookupResources';
 
 /**
- * Context shared by every hook of one resolver call: the method, the
- * correlation id (the engine's `kerberosCallId` when called through the
- * `relations` seam, a generated one for standalone calls) and the VALIDATED
- * arguments object.
+ * Context shared by every hook of one resolver call — one frozen object: the
+ * method, the correlation id (the engine's `kerberosCallId` when called
+ * through the `relations` seam, a generated one for standalone calls) and the
+ * VALIDATED arguments object. After `beforeRequest` returned a replacement,
+ * `args` reads the replacement and `enriched` is true.
  */
-export type RelationHookContext = { kind: RelationRequestKind; callId: string; args: Record<string, unknown> };
+export type RelationHookContext = {
+  kind: RelationRequestKind;
+  callId: string;
+  readonly args: Record<string, unknown>;
+  readonly enriched: boolean;
+};
 
-export type RelationRequestSummary = { success: boolean; durationMs: number; error?: unknown };
+export type RelationRequestSummary = { success: boolean; durationMs: number; error?: unknown; enriched?: true };
 
 /**
  * Resolver lifecycle hooks (request-level only — see the engine's
  * `KerberosHooks` for the contract). The resolver has no `onError` option, so
  * a throwing `beforeRequest` / successful-call `afterRequest` always
  * propagates as `KerberosHookError`; `onError` and a failed call's
- * `afterRequest` are swallowed. Validated at construction with a `TypeError`
- * (unknown keys, non-function values), like the engine's option.
+ * `afterRequest` are swallowed. `beforeRequest` may return a replacement
+ * arguments object (re-validated; resolved instead of the original).
+ * Validated at construction with a `TypeError` (unknown keys, non-function
+ * values), like the engine's option; `hooksTimeoutMs` bounds every call.
  */
 export type RelationResolverHooks = {
-  beforeRequest?: (ctx: RelationHookContext) => void | Promise<void>;
+  beforeRequest?: (
+    ctx: RelationHookContext,
+  ) => void | Record<string, unknown> | Promise<void | Record<string, unknown>>;
   afterRequest?: (ctx: RelationHookContext, summary: RelationRequestSummary) => void | Promise<void>;
   onError?: (error: unknown, ctx: RelationHookContext) => void | Promise<void>;
 };
@@ -44,6 +54,8 @@ export type RelationRequestEndEvent = RelationRequestEventBase & {
   success: boolean;
   error?: string;
   errorName?: string;
+  /** Set when a `beforeRequest` hook replaced the arguments. */
+  enriched?: true;
 };
 export type RelationRequestErrorEvent = RelationRequestEventBase & { error: string; errorName?: string };
 export type RelationCheckedEvent = RelationRequestEventBase & {
@@ -52,6 +64,7 @@ export type RelationCheckedEvent = RelationRequestEventBase & {
   /** Canonical subject string (`'user:u1'`, `'group:eng#member'`). */
   subject: string;
   allowed: boolean;
+  enriched?: true;
 };
 /** Tuple-document cache reads; `callId` correlates them with the resolver call (null when none). */
 export type RelationCacheEvent = {
@@ -235,6 +248,10 @@ export type RelationResolverOptions = ValidationOptions & {
   maxConcurrency?: number;
   /** Lifecycle hooks around every public call (see {@link RelationResolverHooks}). */
   hooks?: RelationResolverHooks | null;
+  /** Bounds every awaited hook invocation (`KerberosHookError`, `timedOut: true`). Off by default. */
+  hooksTimeoutMs?: number | null;
+  /** Listener-leak warning threshold per event name (default 10; `0` disables). Never a limit. */
+  maxListeners?: number | null;
 };
 
 /**
@@ -304,7 +321,7 @@ export class RelationResolver {
     },
     opts?: RelationCallOptions,
   ): Promise<string[]>;
-  /** Subscribes to a resolver event (see {@link RelationResolverEvents}). Chainable; unknown event names are type errors. */
+  /** Subscribes to a resolver event (see {@link RelationResolverEvents}). Chainable; unknown event names are type errors (and a `TypeError` at runtime). */
   on<E extends keyof RelationResolverEvents>(event: E, listener: RelationResolverEvents[E]): this;
   once<E extends keyof RelationResolverEvents>(event: E, listener: RelationResolverEvents[E]): this;
   off<E extends keyof RelationResolverEvents>(event: E, listener: RelationResolverEvents[E]): this;

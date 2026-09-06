@@ -785,16 +785,21 @@ export class KerberosRelationsError extends Error {
 }
 
 /**
- * Thrown when a lifecycle hook (`hooks` option) throws. `hook` names the
- * failing hook and `cause` carries the original error. In the engine it
- * follows the `onError` option like any evaluation-phase error; the built-in
- * relations resolver always propagates it. Hooks that run on an already-failed
- * request (`afterRequest` with `success: false`, `onError`) are swallowed
- * instead and never mask the original error.
+ * Thrown when a lifecycle hook (`hooks` option) throws, times out
+ * (`hooksTimeoutMs` — `timedOut: true`) or returns an invalid replacement for
+ * the request arguments (`cause` is then the `KerberosValidationError`).
+ * `hook` names the failing hook and `cause` carries the original error. In
+ * the engine it follows the `onError` option like any evaluation-phase error;
+ * the built-in relations resolver always propagates it. Hooks that run on an
+ * already-failed request or resource (`afterRequest` with `success: false`,
+ * `afterResource` with a `reason`, `onError`) are swallowed instead and never
+ * mask the original error.
  */
 export class KerberosHookError extends Error {
   name: 'KerberosHookError';
   hook: KerberosHookName | null;
+  /** True when the hook exceeded `hooksTimeoutMs`. */
+  timedOut: boolean;
   cause?: unknown;
 }
 
@@ -804,16 +809,37 @@ export type KerberosHookName = 'beforeRequest' | 'afterRequest' | 'beforeResourc
 export type KerberosRequestKind = 'IsAllowed' | 'CheckResources' | 'PlanResources';
 
 /**
- * The context every hook of one request shares: the request kind, the
- * `kerberosCallId` correlation id, the caller's `reqId` and the VALIDATED
- * arguments of the method (the same objects the engine evaluates — read-only
- * by convention, they are neither cloned nor frozen). Discriminated on
- * `reqKind`, so `ctx.args` narrows to that method's argument shape.
+ * The context every hook of one request shares — one frozen object: the
+ * request kind, the `kerberosCallId` correlation id, the caller's `reqId` and
+ * `args`, the VALIDATED arguments the engine evaluates (without a validation
+ * backend these are the caller's own objects). After `beforeRequest` returned
+ * a replacement, `args` reads the replacement and `enriched` is true.
+ * Assigning `ctx.args` throws in strict mode — mutation is not the contract;
+ * enrich by returning a replacement. Discriminated on `reqKind`, so
+ * `ctx.args` narrows to that method's argument shape.
  */
 export type KerberosHookContext<S extends KerberosSchema = AnySchema> =
-  | { reqKind: 'IsAllowed'; callId: string; reqId?: string; args: IsAllowedArgs<S> }
-  | { reqKind: 'CheckResources'; callId: string; reqId?: string; args: CheckResourcesArgs<S> }
-  | { reqKind: 'PlanResources'; callId: string; reqId?: string; args: PlanResourcesArgs<S> };
+  | { reqKind: 'IsAllowed'; callId: string; reqId?: string; readonly args: IsAllowedArgs<S>; readonly enriched: boolean }
+  | {
+      reqKind: 'CheckResources';
+      callId: string;
+      reqId?: string;
+      readonly args: CheckResourcesArgs<S>;
+      readonly enriched: boolean;
+    }
+  | {
+      reqKind: 'PlanResources';
+      callId: string;
+      reqId?: string;
+      readonly args: PlanResourcesArgs<S>;
+      readonly enriched: boolean;
+    };
+
+/** The argument shapes a `beforeRequest` hook may return as a replacement (matching the request's `reqKind`). */
+export type KerberosRequestArgs<S extends KerberosSchema = AnySchema> =
+  | IsAllowedArgs<S>
+  | CheckResourcesArgs<S>
+  | PlanResourcesArgs<S>;
 
 /** Outcome handed to `afterRequest`. */
 export type KerberosRequestSummary = {
@@ -824,6 +850,8 @@ export type KerberosRequestSummary = {
   error?: unknown;
   /** Set when the failure was converted into a fail-closed result (`onError: 'deny'`). */
   failClosed?: true;
+  /** Set when `beforeRequest` replaced the arguments. */
+  enriched?: true;
 };
 
 /** Which resource of the request a per-resource hook is firing for. */
@@ -835,35 +863,55 @@ export type KerberosResourceHookInfo<S extends KerberosSchema = AnySchema> = {
   actions: string[];
 };
 
-/** Evaluation result handed to `afterResource` — canonical `EFFECT_*` strings, never the `effectAsBoolean` view. */
+/**
+ * Evaluation result handed to `afterResource` — canonical `EFFECT_*` strings,
+ * never the `effectAsBoolean` view; frozen (shallow). A resource whose
+ * evaluation failed (or whose `beforeResource` threw) still reaches
+ * `afterResource` with its fail-closed view: every action `EFFECT_DENY`,
+ * `reason: 'evaluation-error'` and the error's `errorName` — the same marker
+ * the `decision` event and the audit entry carry.
+ */
 export type KerberosResourceHookResult = {
   actions: Record<string, Effect>;
   outputs: unknown[];
   validationErrors?: AttributeValidationError[];
   meta?: CheckResourcesResult['meta'];
+  reason?: 'evaluation-error';
+  errorName?: string;
 };
 
 /**
  * Lifecycle hooks — configured up front, AWAITED inside the request flow
- * (sync or async functions; the return value is ignored). A hook vetoes by
- * throwing: `beforeRequest`, `beforeResource`, `afterResource` and a
- * successful request's `afterRequest` surface as `KerberosHookError` and
- * follow `onError` (`'throw'` propagates, `'deny'` fails closed); inside a
- * `checkResources` batch a throwing per-resource hook only fails THAT
- * resource (all its actions DENY with `reason: 'evaluation-error'`).
- * `onError` and `afterRequest` after a failed request are swallowed (counted
- * under `kerberos.observability.failures{sink: 'hooks'}`, warned once).
- * Malformed arguments (`KerberosValidationError`) fire no hook at all.
- * Unknown keys or non-function values are rejected at construction.
+ * (sync or async functions). A hook vetoes by throwing: `beforeRequest`,
+ * `beforeResource`, `afterResource` and a successful request's
+ * `afterRequest` surface as `KerberosHookError` and follow `onError`
+ * (`'throw'` propagates, `'deny'` fails closed); inside a `checkResources`
+ * batch a throwing per-resource hook only fails THAT resource (all its
+ * actions DENY with `reason: 'evaluation-error'`). `onError`, `afterRequest`
+ * after a failed request and `afterResource` after a failed resource are
+ * swallowed (counted under `kerberos.observability.failures{sink: 'hooks'}`,
+ * warned once). `beforeRequest` may ENRICH the request by returning a
+ * replacement arguments object (re-validated; evaluated instead of the
+ * original; marked `enriched` on the audit entry, the span, the events and
+ * the summary) — every other return value is ignored. Malformed arguments
+ * (`KerberosValidationError`) fire no hook at all. Unknown keys or
+ * non-function values are rejected at construction; `hooksTimeoutMs` bounds
+ * every invocation.
  */
 export type KerberosHooks<S extends KerberosSchema = AnySchema> = {
-  /** Once per request, after argument validation and before any evaluation. */
-  beforeRequest?: (ctx: KerberosHookContext<S>) => void | Promise<void>;
+  /**
+   * Once per request, after argument validation and before any evaluation.
+   * Return a replacement arguments object to enrich the request (an invalid
+   * one fails the request as `KerberosHookError`); return nothing to keep it.
+   */
+  beforeRequest?: (
+    ctx: KerberosHookContext<S>,
+  ) => void | KerberosRequestArgs<S> | Promise<void | KerberosRequestArgs<S>>;
   /** Once per request, on success, failure AND the `onError: 'deny'` fallback path. */
   afterRequest?: (ctx: KerberosHookContext<S>, summary: KerberosRequestSummary) => void | Promise<void>;
   /** Before each resource evaluation (`isAllowed`, `checkResources`; not `planResources`). Forces the async evaluation driver. */
   beforeResource?: (ctx: KerberosHookContext<S>, info: KerberosResourceHookInfo<S>) => void | Promise<void>;
-  /** After each successful resource evaluation. */
+  /** After each resource evaluation — successful (throwing vetoes) or failed (`result.reason`; a throw is swallowed). */
   afterResource?: (
     ctx: KerberosHookContext<S>,
     info: KerberosResourceHookInfo<S>,
@@ -887,6 +935,8 @@ export type KerberosRequestEndEvent = KerberosRequestEventBase & {
   success: boolean;
   error?: string;
   errorName?: string;
+  /** Set when a `beforeRequest` hook replaced the arguments. */
+  enriched?: true;
 };
 export type KerberosDecisionEvent = KerberosRequestEventBase & {
   /** Position of the resource in the request. */
@@ -897,6 +947,8 @@ export type KerberosDecisionEvent = KerberosRequestEventBase & {
   /** Present for fail-closed decisions (a resource whose evaluation threw). */
   reason?: 'evaluation-error';
   errorName?: string;
+  /** Set when a `beforeRequest` hook replaced the arguments (the decision was made on the enriched request). */
+  enriched?: true;
 };
 export type KerberosPlanEvent = KerberosRequestEventBase & {
   principal: KerberosEventPrincipal;
@@ -905,6 +957,7 @@ export type KerberosPlanEvent = KerberosRequestEventBase & {
   filterKind: PlanKind;
   opaqueCount: number;
   relationCount: number;
+  enriched?: true;
 };
 export type KerberosRelationsResolvedEvent = {
   callId: string;
@@ -1084,6 +1137,19 @@ export type KerberosOptions<S extends KerberosSchema = AnySchema> = ValidationOp
    * `beforeResource`/`afterResource` switch evaluation to the async driver.
    */
   hooks?: KerberosHooks<S> | null;
+  /**
+   * Bounds every awaited hook invocation; a hook that neither resolves nor
+   * rejects fails as `KerberosHookError` (`timedOut: true`, following the
+   * hook's throwing/swallowing rule) instead of hanging authorization. Off by
+   * default (`0`), like `relationsTimeoutMs`.
+   */
+  hooksTimeoutMs?: number | null;
+  /**
+   * Listener-leak detection for the events façade: the first subscription
+   * past this count (per event name) logs one warning — subscribe once at
+   * startup, not per request. Never a limit. Default 10; `0` disables.
+   */
+  maxListeners?: number | null;
 };
 
 /** One Cerbos-shaped attribute validation failure. */
@@ -1310,7 +1376,7 @@ export class Kerberos<S extends KerberosSchema = AnySchema> {
   /** Validates `planResources` arguments with the configured backend. */
   static parsePlanResourcesArgs(args: unknown, options?: ValidationOptions & { schema?: unknown }): Record<string, unknown>;
   isAllowed<K extends ResourceKindOf<S>>(args: IsAllowedArgs<S, K>): Promise<boolean>;
-  /** Subscribes to a lifecycle event (see {@link KerberosEvents}). Chainable; unknown event names are type errors. */
+  /** Subscribes to a lifecycle event (see {@link KerberosEvents}). Chainable; unknown event names are type errors (and a `TypeError` at runtime). */
   on<E extends keyof KerberosEvents>(event: E, listener: KerberosEvents[E]): this;
   once<E extends keyof KerberosEvents>(event: E, listener: KerberosEvents[E]): this;
   off<E extends keyof KerberosEvents>(event: E, listener: KerberosEvents[E]): this;

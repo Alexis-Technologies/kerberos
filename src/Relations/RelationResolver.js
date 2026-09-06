@@ -12,21 +12,31 @@ const { createLimiter, settleAll } = require('../async.js');
 const { createLoggerWriter } = require('../logging.js');
 const { createTelemetryWriter } = require('../telemetry.js');
 const { RESOLVER_HOOKS, createHookRunner } = require('../hooks.js');
-const { createEventHub } = require('../events.js');
-const { KerberosCodecError, KerberosRelationsError } = require('../errors.js');
+const { RESOLVER_EVENTS, createEventHub } = require('../events.js');
+const {
+  CACHE_EVENTS,
+  beginRun,
+  createLeakReporter,
+  createRun,
+  createSinkFailureReporter,
+  emitRequestEnd,
+  emitRequestError,
+  emitRequestStart,
+  finishRun,
+  withErrorFields,
+} = require('../lifecycle.js');
+const { KerberosCodecError, KerberosHookError, KerberosRelationsError } = require('../errors.js');
 const { resolveValidationAdapter } = require('../validation');
 // Platform runtime: bundlers swap this for `./runtime/browser.js` via the
 // package.json `browser` field map when targeting the browser.
 const { generateCallId, getNow } = require('../runtime/node.js');
 
-// Observability sinks whose failures are swallowed + counted + warned once.
-const SINK_LABELS = { logger: 'diagnostics logger', hooks: 'lifecycle hook', events: 'event listener' };
+// Swallowed-sink labels (the resolver's logger is a diagnostics sink, not an
+// audit sink) and the correlation fields of every resolver event payload.
+const SINK_LABELS = Object.freeze({ logger: 'diagnostics logger', hooks: 'lifecycle hook', events: 'event listener' });
 
-const CACHE_EVENTS = { hit: 'cache:hit', miss: 'cache:miss', error: 'cache:error' };
-
-// Event payloads never carry Error objects: message string + name only.
-function errorText(error) {
-  return error instanceof Error ? error.message : String(error);
+function runFields(run) {
+  return { callId: run.callId, kind: run.kind };
 }
 
 // SpiceDB uses the same default: depth is the only recursion guard — a
@@ -148,7 +158,10 @@ class RelationResolver {
 
   #events = createEventHub();
 
-  #warnedSinks = new Set();
+  // Swallowed-sink reporter (count + warn once per sink); see src/lifecycle.js.
+  #reportSinkFailure = null;
+
+  #hooksTimeoutMs = 0;
 
   #includeIdentity = true;
 
@@ -249,6 +262,8 @@ class RelationResolver {
       maxConcurrency,
       onTruncated,
       hooks,
+      hooksTimeoutMs,
+      maxListeners,
       z,
       ajv,
       typebox,
@@ -262,6 +277,19 @@ class RelationResolver {
 
     if (onTruncated !== undefined && onTruncated !== null && onTruncated !== 'ignore' && onTruncated !== 'throw') {
       throw new KerberosRelationsError(`Invalid onTruncated option "${onTruncated}" — expected 'ignore' or 'throw'`);
+    }
+
+    // Same contract (and TypeError, like the engine) as the `hooks` option.
+    if (hooksTimeoutMs !== undefined && hooksTimeoutMs !== null) {
+      if (typeof hooksTimeoutMs !== 'number' || !Number.isFinite(hooksTimeoutMs) || hooksTimeoutMs < 0) {
+        throw new TypeError('Invalid hooksTimeoutMs option — expected a non-negative finite number');
+      }
+      this.#hooksTimeoutMs = hooksTimeoutMs;
+    }
+    if (maxListeners !== undefined && maxListeners !== null) {
+      if (typeof maxListeners !== 'number' || !Number.isInteger(maxListeners) || maxListeners < 0) {
+        throw new TypeError('Invalid maxListeners option — expected a non-negative integer (0 disables the warning)');
+      }
     }
 
     this.#schema = schema instanceof RelationSchema ? schema : new RelationSchema(schema, { z, ajv, typebox, codec });
@@ -285,11 +313,25 @@ class RelationResolver {
     this.#telemetry = createTelemetryWriter(telemetry);
     // The runner validates the option (TypeError on unknown/non-function
     // hooks, like the engine's — not KerberosRelationsError).
+    this.#reportSinkFailure = createSinkFailureReporter({
+      telemetry: this.#telemetry,
+      prefix: 'Kerberos.js relations',
+      labels: SINK_LABELS,
+      unaffected: 'resolution is unaffected',
+    });
     this.#hooks = createHookRunner(hooks, {
       allowed: RESOLVER_HOOKS,
       onSwallowed: (error) => this.#observabilityFailure(error, 'hooks'),
+      timeoutMs: this.#hooksTimeoutMs,
+      now: this.#telemetry.enabled ? getNow : null,
+      onTiming: (hookName, duration) => this.#telemetry.recordHookDuration(hookName, duration),
     });
-    this.#events = createEventHub({ onSwallowed: (error) => this.#observabilityFailure(error, 'events') });
+    this.#events = createEventHub({
+      allowed: RESOLVER_EVENTS,
+      maxListeners: maxListeners ?? undefined,
+      onLeak: createLeakReporter('Kerberos.js relations'),
+      onSwallowed: (error) => this.#observabilityFailure(error, 'events'),
+    });
     this.#includeIdentity = telemetry?.includeIdentity !== false;
     this.#subjectType = subjectType;
     if (typeof mapPrincipal === 'function') this.#mapPrincipal = mapPrincipal;
@@ -508,13 +550,13 @@ class RelationResolver {
       'check',
       async (otel, run) => {
         if (!args || typeof args !== 'object') throw new KerberosRelationsError('check requires an arguments object');
-        const parsed = this.#parseArgs(this.#checkArgsValidator, 'Invalid check arguments', args);
+        const validated = this.#parseArgs(this.#checkArgsValidator, 'Invalid check arguments', args);
+        const parsed = await this.#beginRun(run, validated, this.#checkArgsValidator, 'Invalid check arguments');
 
         const name = resolveName(parsed, 'check');
         const resource = this.#normalizeResource(parsed.resource);
         const subject = this.#normalizeSubject(parsed);
         this.#assertCheckable(resource.type, name, 'check');
-        if (run !== null && this.#hooks.enabled) await this.#beginRun(run, parsed);
 
         const session = this.#createSession(parsed, opts, run);
         const allowed = await this.#checkInternal(resource, name, subject, session, this.#limits.maxDepth);
@@ -546,7 +588,8 @@ class RelationResolver {
       'list',
       async (otel, run) => {
         if (!args || typeof args !== 'object') throw new KerberosRelationsError('list requires an arguments object');
-        const parsed = this.#parseArgs(this.#listArgsValidator, 'Invalid list arguments', args);
+        const validated = this.#parseArgs(this.#listArgsValidator, 'Invalid list arguments', args);
+        const parsed = await this.#beginRun(run, validated, this.#listArgsValidator, 'Invalid list arguments');
         const names = parsed.relations;
         if (!Array.isArray(names) || !names.length) {
           throw new KerberosRelationsError('list requires a non-empty "relations" array');
@@ -555,7 +598,6 @@ class RelationResolver {
         const resource = this.#normalizeResource(parsed.resource);
         const subject = this.#normalizeSubject(parsed);
         for (const name of names) this.#assertCheckable(resource.type, name, 'list');
-        if (run !== null && this.#hooks.enabled) await this.#beginRun(run, parsed);
 
         const session = this.#createSession(parsed, opts, run);
         const granted = new Set();
@@ -595,12 +637,17 @@ class RelationResolver {
         if (!args || typeof args !== 'object') {
           throw new KerberosRelationsError('lookupSubjects requires an arguments object');
         }
-        const parsed = this.#parseArgs(this.#lookupSubjectsArgsValidator, 'Invalid lookupSubjects arguments', args);
+        const validated = this.#parseArgs(this.#lookupSubjectsArgsValidator, 'Invalid lookupSubjects arguments', args);
+        const parsed = await this.#beginRun(
+          run,
+          validated,
+          this.#lookupSubjectsArgsValidator,
+          'Invalid lookupSubjects arguments',
+        );
 
         const name = resolveName(parsed, 'lookupSubjects');
         const resource = this.#normalizeResource(parsed.resource);
         this.#assertCheckable(resource.type, name, 'lookupSubjects');
-        if (run !== null && this.#hooks.enabled) await this.#beginRun(run, parsed);
 
         const session = this.#createSession(parsed, opts, run);
         const collected = await this.#collectSubjectsInternal(resource, name, session, this.#limits.maxDepth);
@@ -660,7 +707,17 @@ class RelationResolver {
         if (!args || typeof args !== 'object') {
           throw new KerberosRelationsError('lookupResources requires an arguments object');
         }
-        const parsed = this.#parseArgs(this.#lookupResourcesArgsValidator, 'Invalid lookupResources arguments', args);
+        const validated = this.#parseArgs(
+          this.#lookupResourcesArgsValidator,
+          'Invalid lookupResources arguments',
+          args,
+        );
+        const parsed = await this.#beginRun(
+          run,
+          validated,
+          this.#lookupResourcesArgsValidator,
+          'Invalid lookupResources arguments',
+        );
 
         const name = resolveName(parsed, 'lookupResources');
         const subject = this.#normalizeSubject(parsed);
@@ -674,7 +731,6 @@ class RelationResolver {
             'lookupResources over cache-backed tuples requires reverseIndex: true and backend-maintained "rel:rev:<subject>" reverse documents',
           );
         }
-        if (run !== null && this.#hooks.enabled) await this.#beginRun(run, parsed);
 
         const session = this.#createSession(parsed, opts, run);
         const ids = await this.#lookupResourcesInternal(subject, resourceType, name, session, this.#limits.maxDepth);
@@ -703,7 +759,8 @@ class RelationResolver {
 
   #runInstrumented(reqKind, kind, handler, callId = null) {
     // Nothing observing: run the handler directly — no span, no `run` record,
-    // no async wrapper (the handler receives `run: null`).
+    // no async wrapper (the handler receives `run: null`). `events.active` is
+    // derived from live subscriptions, so unsubscribing restores this path.
     if (!this.#telemetry.enabled && !this.#hooks.enabled && !this.#events.active) return handler(null, null);
 
     const startedAt = getNow();
@@ -711,73 +768,72 @@ class RelationResolver {
     // relations seam) joins resolver spans/hooks/events to the authorization
     // decision they served even when span parent-child nesting is
     // unavailable; standalone calls get a generated one so all three agree.
-    const resolvedCallId = callId ?? generateCallId();
-    const run = { kind, callId: resolvedCallId, ctx: null, afterFired: false, error: null };
-    return this.#telemetry.withRequestSpan(reqKind, resolvedCallId, null, async (otel) => {
+    const run = createRun({ kind, callId: callId ?? generateCallId() });
+    return this.#telemetry.withRequestSpan(reqKind, run.callId, null, async (otel) => {
       try {
-        if (this.#events.wants('request:start')) this.#events.emit('request:start', { callId: resolvedCallId, kind });
+        emitRequestStart(this.#events, runFields, run);
         const result = await handler(otel, run);
         // Success-path afterRequest inside the try: its KerberosHookError
         // takes the same path as any other failure (no `onError` option
         // here — it always propagates).
-        if (run.ctx !== null) await this.#finishRun(run, startedAt, null);
+        if (run.ctx !== null) await finishRun(run, this.#hooks, getNow() - startedAt, null, false);
         return result;
       } catch (error) {
         run.error = error;
         this.#telemetry.recordError(otel, error);
-        if (this.#events.wants('request:error')) {
-          this.#events.emit('request:error', {
-            callId: resolvedCallId,
-            kind,
-            error: errorText(error),
-            errorName: error?.name,
-          });
-        }
+        emitRequestError(this.#events, runFields, run, error);
         // Pairing invariant (see the engine): onError + afterRequest run
         // exactly once after beforeRequest, both swallowed.
         if (run.ctx !== null && !run.afterFired) {
           await this.#hooks.onError(error, run.ctx);
-          await this.#finishRun(run, startedAt, error);
+          await finishRun(run, this.#hooks, getNow() - startedAt, error, false);
         }
         throw error;
       } finally {
         const duration = getNow() - startedAt;
         this.#telemetry.endRequest(otel, reqKind, duration);
-        if (this.#events.wants('request:end')) {
-          const payload = { callId: resolvedCallId, kind, durationMs: duration, success: run.error === null };
-          if (run.error !== null) {
-            payload.error = errorText(run.error);
-            payload.errorName = run.error?.name;
-          }
-          this.#events.emit('request:end', payload);
-        }
+        emitRequestEnd(this.#events, runFields, run, duration);
       }
     });
   }
 
-  // Called after a public method's LAST validation step (hooks enabled).
-  #beginRun(run, args) {
-    run.ctx = { kind: run.kind, callId: run.callId, args };
-    return this.#hooks.beforeRequest(run.ctx);
-  }
-
-  #finishRun(run, startedAt, error) {
-    run.afterFired = true;
-    const summary = { success: error === null, durationMs: getNow() - startedAt };
-    if (error !== null) summary.error = error;
-    return this.#hooks.afterRequest(run.ctx, summary);
+  // Called by each public method right after its argument validation and
+  // BEFORE normalization: runs beforeRequest (hooks enabled) and applies an
+  // enrichment — a returned replacement is re-validated with the method's
+  // validator and becomes what the method resolves; an invalid replacement is
+  // the hook's failure (KerberosHookError, always propagates here). Resolves
+  // to the arguments to use; a no-op on the fast path (`run === null`).
+  async #beginRun(run, args, validator, label) {
+    if (run === null || !this.#hooks.enabled) return args;
+    run.args = args;
+    const replacement = await beginRun(run, this.#hooks, { kind: run.kind, callId: run.callId });
+    // Only a plain object is a replacement; every other return value (the
+    // number a `metrics.increment()` arrow returns, a boolean, null…) keeps the
+    // request — expression-bodied arrows must stay safe to use as hooks.
+    if (replacement === null || typeof replacement !== 'object' || Array.isArray(replacement)) return args;
+    let enriched;
+    try {
+      enriched = this.#parseArgs(validator, label, replacement);
+    } catch (error) {
+      throw new KerberosHookError(`The beforeRequest hook returned invalid arguments: ${error.message}`, {
+        hook: 'beforeRequest',
+        cause: error,
+      });
+    }
+    run.args = enriched;
+    run.enriched = true;
+    return enriched;
   }
 
   #emitRelationChecked(run, resource, name, subject, allowed) {
     if (run === null || !this.#events.wants('relation:checked')) return;
-    this.#events.emit('relation:checked', {
-      callId: run.callId,
-      kind: run.kind,
-      resource: { kind: resource.type, id: resource.id },
-      relation: name,
-      subject: subjectToString(subject),
-      allowed,
-    });
+    const payload = runFields(run);
+    payload.resource = { kind: resource.type, id: resource.id };
+    payload.relation = name;
+    payload.subject = subjectToString(subject);
+    payload.allowed = allowed;
+    if (run.enriched) payload.enriched = true;
+    this.#events.emit('relation:checked', payload);
   }
 
   // Cache-read observability: the kerberos.cache.requests counter (kind
@@ -787,27 +843,15 @@ class RelationResolver {
     this.#telemetry.recordCacheRequest(result, CACHE_KIND_RELATION);
     if (!this.#events.wants(CACHE_EVENTS[result])) return;
     const payload = { key, kind: CACHE_KIND_RELATION, callId: session?.callId ?? null };
-    if (error !== undefined) {
-      payload.error = errorText(error);
-      payload.errorName = error?.name;
-    }
+    if (error !== undefined) withErrorFields(payload, error);
     this.#events.emit(CACHE_EVENTS[result], payload);
   }
 
   // Swallowed sink failures stay swallowed but must not be invisible: count
   // them on the telemetry channel and warn once per sink (same contract as
-  // the engine's #observabilityFailure).
+  // the engine's #observabilityFailure, one implementation in src/lifecycle.js).
   #observabilityFailure(sinkError, sink) {
-    this.#telemetry.recordObservabilityFailure(sink);
-    if (this.#warnedSinks.has(sink)) return;
-    this.#warnedSinks.add(sink);
-    try {
-      console.warn(
-        `Kerberos.js relations: the ${SINK_LABELS[sink] ?? sink} threw and was swallowed (resolution is unaffected; further warnings suppressed): ${sinkError?.message}`,
-      );
-    } catch {
-      // Even the warning is best-effort.
-    }
+    this.#reportSinkFailure(sinkError, sink);
   }
 
   // ---------------------------------------------------------------------------

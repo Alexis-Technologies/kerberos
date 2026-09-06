@@ -274,11 +274,21 @@ describe('engine hooks — error contract', () => {
     await assert.rejects(() => kerberos.isAllowed({ principal, action: 'view', resource: brokenResource }), {
       message: 'condition boom',
     });
-    assert.deepEqual(names(), ['beforeRequest', 'beforeResource', 'onError', 'afterRequest']);
-    const [, error, ctx] = calls[2];
+    // The failed resource still reaches afterResource — with its fail-closed
+    // view, marked like the decision event and the audit entry.
+    assert.deepEqual(names(), ['beforeRequest', 'beforeResource', 'afterResource', 'onError', 'afterRequest']);
+    const [, , , failedResult] = calls[2];
+    assert.deepEqual(failedResult, {
+      actions: { view: Effect.Deny },
+      outputs: [],
+      reason: 'evaluation-error',
+      errorName: 'Error',
+    });
+    assert.ok(Object.isFrozen(failedResult));
+    const [, error, ctx] = calls[3];
     assert.equal(error.message, 'condition boom');
     assert.equal(ctx.reqKind, 'IsAllowed');
-    const [, , summary] = calls[3];
+    const [, , summary] = calls[4];
     assert.equal(summary.success, false);
     assert.equal(summary.error, error);
     assert.equal('failClosed' in summary, false);
@@ -288,8 +298,8 @@ describe('engine hooks — error contract', () => {
     const { calls, hooks, names } = recorder();
     const kerberos = engine(hooks, { onError: 'deny' });
     assert.equal(await kerberos.isAllowed({ principal, action: 'view', resource: brokenResource }), false);
-    assert.deepEqual(names(), ['beforeRequest', 'beforeResource', 'onError', 'afterRequest']);
-    const [, , summary] = calls[3];
+    assert.deepEqual(names(), ['beforeRequest', 'beforeResource', 'afterResource', 'onError', 'afterRequest']);
+    const [, , summary] = calls[4];
     assert.deepEqual([summary.success, summary.failClosed, summary.error.message], [false, true, 'condition boom']);
   });
 
@@ -376,7 +386,7 @@ describe('engine hooks — error contract', () => {
         message: 'condition boom',
       });
     });
-    assert.deepEqual(names(), ['beforeRequest', 'beforeResource', 'onError', 'afterRequest']);
+    assert.deepEqual(names(), ['beforeRequest', 'beforeResource', 'afterResource', 'onError', 'afterRequest']);
   });
 
   it('checkResources isolates a throwing per-resource hook to that resource', async () => {
@@ -444,7 +454,14 @@ describe('engine hooks — error contract', () => {
       response.results.map((result) => result.actions.view),
       [Effect.Allow, Effect.Deny],
     );
-    assert.deepEqual(names(), ['beforeRequest', 'beforeResource', 'beforeResource', 'afterResource', 'afterRequest']);
+    assert.deepEqual(names(), [
+      'beforeRequest',
+      'beforeResource',
+      'beforeResource',
+      'afterResource',
+      'afterResource',
+      'afterRequest',
+    ]);
   });
 });
 
@@ -580,6 +597,388 @@ describe('RelationResolver hooks', () => {
     await assert.rejects(
       () => resolver.check({ resource: 'doc:d1', permission: 'view', subject: 'user:sally' }),
       (error) => error instanceof KerberosHookError && error.hook === 'afterRequest',
+    );
+  });
+});
+
+describe('engine hooks — enrichment (a returned replacement)', () => {
+  const guest = { id: 'guest', roles: ['GUEST'] };
+  const promote = (ctx) => ({ ...ctx.args, principal: { ...ctx.args.principal, roles: ['USER'] } });
+
+  it('a plain object returned by beforeRequest replaces the arguments in every method', async () => {
+    const { calls, hooks } = recorder({ beforeRequest: promote });
+    const kerberos = engine(hooks);
+
+    assert.equal(await kerberos.isAllowed({ principal: guest, action: 'view', resource }), true);
+    const ctx = calls[0][1];
+    assert.ok(Object.isFrozen(ctx));
+    // The SAME frozen ctx reflects the replacement to the later hooks.
+    assert.deepEqual(ctx.args.principal.roles, ['USER']);
+    assert.equal(ctx.enriched, true);
+    assert.equal(calls.at(-1)[1], ctx);
+    assert.equal(calls.at(-1)[2].enriched, true);
+    assert.deepEqual(calls[1][2].resource, resource);
+
+    const response = await kerberos.checkResources({ principal: guest, resources: [{ resource, actions: ['view'] }] });
+    assert.equal(response.results[0].actions.view, Effect.Allow);
+
+    const plan = await kerberos.planResources({ principal: guest, resource: { kind: 'expense' }, action: 'view' });
+    assert.equal(plan.filter.kind, 'KIND_ALWAYS_ALLOWED');
+  });
+
+  it('without a replacement ctx.enriched is false, the summary carries no marker and ctx.args is the validated input', async () => {
+    const { calls, hooks } = recorder();
+    const kerberos = engine(hooks);
+    await kerberos.isAllowed({ principal, action: 'view', resource });
+    assert.equal(calls[0][1].enriched, false);
+    assert.equal(calls[0][1].args.principal, principal);
+    assert.equal('enriched' in calls.at(-1)[2], false);
+  });
+
+  it('never touches the caller’s objects (without a validation backend ctx.args IS the caller’s object)', async () => {
+    const caller = { id: 'guest', roles: ['GUEST'] };
+    const hooks = {
+      beforeRequest: (ctx) => ({
+        ...ctx.args,
+        principal: { ...ctx.args.principal, roles: [...ctx.args.principal.roles, 'USER'] },
+      }),
+    };
+    assert.equal(await engine(hooks).isAllowed({ principal: caller, action: 'view', resource }), true);
+    assert.deepEqual(caller.roles, ['GUEST']);
+  });
+
+  it('ignores non-object return values, so expression-bodied arrows stay safe as hooks', async () => {
+    for (const value of [1, 'x', true, null, [1, 2]]) {
+      const kerberos = engine({ beforeRequest: () => value });
+      assert.equal(await kerberos.isAllowed({ principal, action: 'view', resource }), true);
+    }
+    const seen = [];
+    assert.equal(
+      await engine({ beforeRequest: () => seen.push('before') }).isAllowed({ principal, action: 'view', resource }),
+      true,
+    );
+    assert.deepEqual(seen, ['before']);
+  });
+
+  it('ctx is frozen: assigning ctx.args is a no-op (sloppy mode) or a TypeError (strict mode) — never a contract', async () => {
+    const sloppy = engine({
+      beforeRequest(ctx) {
+        ctx.args = { principal: guest, action: 'view', resource };
+        assert.equal(ctx.args.principal, principal);
+      },
+    });
+    assert.equal(await sloppy.isAllowed({ principal, action: 'view', resource }), true);
+    const strict = engine({
+      beforeRequest(ctx) {
+        'use strict';
+        ctx.args = { principal: guest, action: 'view', resource };
+      },
+    });
+    await assert.rejects(
+      () => strict.isAllowed({ principal, action: 'view', resource }),
+      (error) =>
+        error instanceof KerberosHookError && error.hook === 'beforeRequest' && error.cause instanceof TypeError,
+    );
+  });
+
+  it('an invalid replacement is the hook’s failure: KerberosHookError with the validation error as cause', async () => {
+    const { calls, hooks, names } = recorder({ beforeRequest: () => ({ principal: { id: 'x' } }) });
+    const kerberos = engine(hooks, { z });
+    await assert.rejects(
+      () => kerberos.isAllowed({ principal, action: 'view', resource }),
+      (error) =>
+        error instanceof KerberosHookError &&
+        error.hook === 'beforeRequest' &&
+        error.cause instanceof KerberosValidationError &&
+        /returned invalid arguments/.test(error.message),
+    );
+    // The pairing invariant holds: beforeRequest ran, so onError + afterRequest do.
+    assert.deepEqual(names(), ['beforeRequest', 'onError', 'afterRequest']);
+    assert.equal(calls[2][2].success, false);
+    assert.equal(calls[2][2].error.hook, 'beforeRequest');
+    // Under onError: 'deny' it fails closed like any evaluation error.
+    assert.equal(await engine(hooks, { z, onError: 'deny' }).isAllowed({ principal, action: 'view', resource }), false);
+  });
+
+  it('a checkResources replacement must keep the batch shape; planResources re-checks the action invariants', async () => {
+    const reshape = engine({ beforeRequest: (ctx) => ({ ...ctx.args, resources: [] }) });
+    await assert.rejects(
+      () => reshape.checkResources({ principal, resources: [{ resource, actions: ['view'] }] }),
+      (error) => error instanceof KerberosHookError && /must keep the request's 1 entries/.test(error.message),
+    );
+    const wildcard = engine({ beforeRequest: (ctx) => ({ ...ctx.args, action: '*' }) });
+    await assert.rejects(
+      () => wildcard.planResources({ principal, resource: { kind: 'expense' }, action: 'view' }),
+      (error) =>
+        error instanceof KerberosHookError &&
+        error.cause instanceof KerberosValidationError &&
+        /wildcard action/.test(error.cause.message),
+    );
+    // The original invariants still fire as plain validation errors (no hook).
+    const { calls, hooks } = recorder({ beforeRequest: promote });
+    await assert.rejects(
+      () => engine(hooks).planResources({ principal, resource: { kind: 'expense' }, actions: [] }),
+      KerberosValidationError,
+    );
+    assert.deepEqual(calls, []);
+  });
+
+  it('marks enriched decisions in the audit log, the decision/plan/request:end events and the deny fallback', async () => {
+    const entries = [];
+    const logger = { info: (entry) => entries.push(entry), debug() {}, error() {} };
+    const events = [];
+    const kerberos = engine({ beforeRequest: promote }, { logger });
+    kerberos
+      .on('decision', (event) => events.push(event))
+      .on('plan', (event) => events.push(event))
+      .on('request:end', (event) => events.push(event));
+
+    await kerberos.isAllowed({ principal: guest, action: 'view', resource });
+    await kerberos.planResources({ principal: guest, resource: { kind: 'expense' }, action: 'view' });
+    assert.equal(entries[0].enriched, true);
+    assert.deepEqual(entries[0].principalRoles, ['USER']);
+    assert.deepEqual(
+      events.map((event) => event.enriched),
+      [true, true, true, true],
+    );
+
+    // A plain request carries no marker key at all.
+    events.length = 0;
+    entries.length = 0;
+    const plain = engine({ afterRequest() {} }, { logger });
+    plain.on('decision', (event) => events.push(event));
+    await plain.isAllowed({ principal, action: 'view', resource });
+    assert.equal('enriched' in entries[0], false);
+    assert.equal('enriched' in events[0], false);
+
+    // Fail-closed audit entry after a veto still describes the enriched request.
+    entries.length = 0;
+    const vetoing = engine(
+      {
+        beforeRequest(ctx) {
+          if (ctx.args.principal.id === 'guest') return promote(ctx);
+          throw new Error('veto');
+        },
+      },
+      { logger, onError: 'deny' },
+    );
+    assert.equal(await vetoing.isAllowed({ principal, action: 'view', resource }), false);
+    assert.equal(entries[0].effect, Effect.Deny);
+    assert.equal(entries[0].meta.actions.view.errorName, 'KerberosHookError');
+  });
+});
+
+describe('engine hooks — afterResource on a failed resource', () => {
+  it('checkResources: the failed resource reaches afterResource with its fail-closed result; the others are unaffected', async () => {
+    const { calls, hooks } = recorder();
+    const response = await engine(hooks).checkResources({
+      principal,
+      resources: [
+        { resource, actions: ['view'] },
+        { resource: brokenResource, actions: ['view', 'edit'] },
+      ],
+    });
+    assert.deepEqual(
+      response.results.map((result) => result.actions),
+      [{ view: Effect.Allow }, { view: Effect.Deny, edit: Effect.Deny }],
+    );
+    const afters = calls.filter((call) => call[0] === 'afterResource');
+    assert.equal(afters.length, 2);
+    const failed = afters.find((call) => call[2].index === 1)[3];
+    assert.deepEqual(failed, {
+      actions: { view: Effect.Deny, edit: Effect.Deny },
+      outputs: [],
+      reason: 'evaluation-error',
+      errorName: 'Error',
+    });
+    assert.equal('reason' in afters.find((call) => call[2].index === 0)[3], false);
+  });
+
+  it('a vetoing beforeResource still reaches afterResource (errorName: KerberosHookError)', async () => {
+    const { calls, hooks } = recorder({
+      beforeResource() {
+        throw new Error('resource veto');
+      },
+    });
+    assert.equal(await engine(hooks, { onError: 'deny' }).isAllowed({ principal, action: 'view', resource }), false);
+    const after = calls.find((call) => call[0] === 'afterResource');
+    assert.equal(after[3].errorName, 'KerberosHookError');
+  });
+
+  it('an afterResource that throws on the failure path is swallowed (warned once) — the resource’s own error surfaces', async () => {
+    const { hooks } = recorder({
+      afterResource(ctx, info, result) {
+        if (result.reason) throw new Error('after boom');
+      },
+    });
+    const warnings = await withPatchedWarn(async () => {
+      for (let i = 0; i < 2; i++) {
+        await assert.rejects(() => engine(hooks).isAllowed({ principal, action: 'view', resource: brokenResource }), {
+          message: 'condition boom',
+        });
+      }
+    });
+    // Two engines → the warning is per instance; each warned once.
+    assert.equal(warnings.length, 2);
+    assert.match(warnings[0], /the lifecycle hook threw/);
+  });
+
+  it('hands frozen views to the per-resource hooks', async () => {
+    const { calls, hooks } = recorder();
+    await engine(hooks).isAllowed({ principal, action: 'view', resource });
+    const [, , info] = calls.find((call) => call[0] === 'beforeResource');
+    const [, , , result] = calls.find((call) => call[0] === 'afterResource');
+    assert.ok(Object.isFrozen(info));
+    assert.ok(Object.isFrozen(result));
+    assert.ok(Object.isFrozen(result.actions));
+  });
+});
+
+describe('engine hooks — hooksTimeoutMs', () => {
+  const hang = () => new Promise(() => {});
+
+  it('rejects malformed values', () => {
+    for (const value of [-1, Number.NaN, Number.POSITIVE_INFINITY, '20']) {
+      assert.throws(() => new Kerberos(policies, [], { hooksTimeoutMs: value }), TypeError);
+    }
+    // 0 / null keep the timeout off.
+    assert.ok(new Kerberos(policies, [], { hooksTimeoutMs: 0, hooks: { beforeRequest() {} } }));
+    assert.ok(new Kerberos(policies, [], { hooksTimeoutMs: null }));
+  });
+
+  it('a hanging beforeRequest fails as KerberosHookError { timedOut: true } and follows onError', async () => {
+    const { calls, hooks, names } = recorder({ beforeRequest: hang });
+    await assert.rejects(
+      () => engine(hooks, { hooksTimeoutMs: 20 }).isAllowed({ principal, action: 'view', resource }),
+      (error) =>
+        error instanceof KerberosHookError &&
+        error.hook === 'beforeRequest' &&
+        error.timedOut === true &&
+        /timed out after 20ms/.test(error.message),
+    );
+    assert.deepEqual(names(), ['beforeRequest', 'onError', 'afterRequest']);
+    assert.equal(calls[1][1].timedOut, true);
+    calls.length = 0;
+    assert.equal(
+      await engine(hooks, { hooksTimeoutMs: 20, onError: 'deny' }).isAllowed({ principal, action: 'view', resource }),
+      false,
+    );
+    assert.equal(calls.at(-1)[2].failClosed, true);
+  });
+
+  it('a hanging per-resource hook only fails its resource; a hanging failure-path hook is swallowed', async () => {
+    const { hooks } = recorder({
+      afterResource(ctx, info) {
+        if (info.index === 1) return hang();
+        return undefined;
+      },
+      onError: hang,
+    });
+    const kerberos = engine(hooks, { hooksTimeoutMs: 20 });
+    const response = await kerberos.checkResources({
+      principal,
+      includeMeta: true,
+      resources: [
+        { resource, actions: ['view'] },
+        { resource: { id: 'expense2', kind: 'expense' }, actions: ['view'] },
+      ],
+    });
+    assert.deepEqual(
+      response.results.map((result) => result.actions.view),
+      [Effect.Allow, Effect.Deny],
+    );
+    assert.equal(response.results[1].meta.actions.view.errorName, 'KerberosHookError');
+
+    // onError hangs on a failed request: swallowed after the timeout, counted, warned.
+    const warnings = await withPatchedWarn(async () => {
+      await assert.rejects(() => kerberos.isAllowed({ principal, action: 'view', resource: brokenResource }), {
+        message: 'condition boom',
+      });
+    });
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /timed out after 20ms/);
+  });
+
+  it('synchronous hooks and hooks that resolve in time are unaffected', async () => {
+    const { hooks, names } = recorder({
+      beforeRequest: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      },
+    });
+    assert.equal(await engine(hooks, { hooksTimeoutMs: 200 }).isAllowed({ principal, action: 'view', resource }), true);
+    assert.deepEqual(names(), ['beforeRequest', 'beforeResource', 'afterResource', 'afterRequest']);
+  });
+});
+
+describe('RelationResolver hooks — enrichment and timeout', () => {
+  const schema = {
+    relationSchema: {
+      definitions: {
+        user: {},
+        doc: { relations: { viewer: ['user'] }, permissions: { view: 'viewer' } },
+      },
+    },
+  };
+  const tuples = [{ resource: 'doc:d1', relation: 'viewer', subject: 'user:sally' }];
+
+  it('a returned replacement is what the resolver resolves; ctx is frozen and reflects it', async () => {
+    const calls = [];
+    const resolver = new RelationResolver({
+      schema,
+      tuples,
+      hooks: {
+        beforeRequest(ctx) {
+          calls.push(ctx);
+          return { ...ctx.args, subject: 'user:sally' };
+        },
+        afterRequest(ctx, summary) {
+          calls.push(summary);
+        },
+      },
+    });
+    assert.equal(await resolver.check({ resource: 'doc:d1', permission: 'view', subject: 'user:nobody' }), true);
+    assert.ok(Object.isFrozen(calls[0]));
+    assert.equal(calls[0].args.subject, 'user:sally');
+    assert.equal(calls[0].enriched, true);
+    assert.equal(calls[1].enriched, true);
+    assert.deepEqual(
+      await resolver.list({ resource: 'doc:d1', relations: ['view'], subject: 'user:nobody' }),
+      new Set(['view']),
+    );
+    assert.deepEqual(await resolver.lookupSubjects({ resource: 'doc:d1', permission: 'view' }), ['user:sally']);
+    assert.deepEqual(
+      await resolver.lookupResources({ subject: 'user:nobody', permission: 'view', resourceType: 'doc' }),
+      ['doc:d1'],
+    );
+  });
+
+  it('an invalid replacement always propagates as KerberosHookError (cause: the validation error)', async () => {
+    const resolver = new RelationResolver({
+      schema,
+      tuples,
+      z,
+      hooks: { beforeRequest: () => ({ resource: 42, permission: 'view', subject: 'user:sally' }) },
+    });
+    await assert.rejects(
+      () => resolver.check({ resource: 'doc:d1', permission: 'view', subject: 'user:sally' }),
+      (error) =>
+        error instanceof KerberosHookError &&
+        error.hook === 'beforeRequest' &&
+        /returned invalid arguments/.test(error.message),
+    );
+  });
+
+  it('hooksTimeoutMs bounds resolver hooks too', async () => {
+    assert.throws(() => new RelationResolver({ schema, tuples, hooksTimeoutMs: -1 }), TypeError);
+    const resolver = new RelationResolver({
+      schema,
+      tuples,
+      hooksTimeoutMs: 20,
+      hooks: { beforeRequest: () => new Promise(() => {}) },
+    });
+    await assert.rejects(
+      () => resolver.check({ resource: 'doc:d1', permission: 'view', subject: 'user:sally' }),
+      (error) => error instanceof KerberosHookError && error.timedOut === true,
     );
   });
 });

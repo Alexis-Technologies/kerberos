@@ -502,3 +502,81 @@ describe('engine events — listener safety and subscription API', () => {
     assert.throws(() => kerberos.off('decision'), TypeError);
   });
 });
+
+describe('engine events — subscription guards', () => {
+  it('rejects unknown event names with a TypeError on on/once/off/listenerCount/removeAllListeners', () => {
+    const kerberos = engine();
+    const listener = () => {};
+    for (const method of ['on', 'once', 'off']) {
+      assert.throws(() => kerberos[method]('decison', listener), /unknown event "decison" \(expected one of/);
+    }
+    assert.throws(() => kerberos.listenerCount('nope'), TypeError);
+    assert.throws(() => kerberos.removeAllListeners('nope'), TypeError);
+    kerberos.removeAllListeners();
+    for (const name of ENGINE_EVENTS) kerberos.on(name, listener);
+    const resolver = new RelationResolver({ schema: { relationSchema: { definitions: { user: {} } } } });
+    assert.throws(() => resolver.on('decision', listener), TypeError);
+    resolver.on('relation:checked', listener);
+  });
+
+  it('warns once per event name past maxListeners (default 10); 0 disables; malformed values throw', async () => {
+    assert.throws(() => engine({ maxListeners: -1 }), TypeError);
+    assert.throws(() => engine({ maxListeners: 1.5 }), TypeError);
+    const warnings = await withPatchedWarn(async () => {
+      const kerberos = engine();
+      for (let i = 0; i < 12; i++) kerberos.on('decision', () => {});
+      for (let i = 0; i < 12; i++) kerberos.on('plan', () => {});
+      assert.equal(kerberos.listenerCount('decision'), 12);
+      const quiet = engine({ maxListeners: 0 });
+      for (let i = 0; i < 30; i++) quiet.on('decision', () => {});
+      const custom = engine({ maxListeners: 2 });
+      custom.on('decision', () => {}).on('decision', () => {});
+      custom.on('decision', () => {});
+      const resolver = new RelationResolver({ schema: { relationSchema: { definitions: { user: {} } } } });
+      for (let i = 0; i < 11; i++) resolver.on('cache:hit', () => {});
+    });
+    assert.equal(warnings.length, 4);
+    assert.match(
+      warnings[0],
+      /^Kerberos\.js: possible listener leak — 11 listeners on "decision" \(maxListeners: 10\)/,
+    );
+    assert.match(warnings[1], /"plan"/);
+    assert.match(warnings[2], /3 listeners on "decision" \(maxListeners: 2\)/);
+    assert.match(warnings[3], /^Kerberos\.js relations: possible listener leak/);
+  });
+
+  it('unsubscribing restores the no-listener state (wants() false, nothing emitted)', async () => {
+    const kerberos = engine();
+    const seen = [];
+    const listener = (event) => seen.push(event);
+    kerberos.on('decision', listener);
+    await kerberos.isAllowed({ principal, action: 'view', resource });
+    kerberos.off('decision', listener);
+    await kerberos.isAllowed({ principal, action: 'view', resource });
+    assert.equal(seen.length, 1);
+    assert.equal(kerberos.listenerCount('decision'), 0);
+  });
+});
+
+describe('RelationResolver events — enrichment marker', () => {
+  it('relation:checked and request:end carry enriched: true when beforeRequest replaced the arguments', async () => {
+    const resolver = new RelationResolver({
+      schema: {
+        relationSchema: {
+          definitions: { user: {}, doc: { relations: { viewer: ['user'] }, permissions: { view: 'viewer' } } },
+        },
+      },
+      tuples: [{ resource: 'doc:d1', relation: 'viewer', subject: 'user:sally' }],
+      hooks: { beforeRequest: (ctx) => ({ ...ctx.args, subject: 'user:sally' }) },
+    });
+    const { events } = subscribeAll(resolver, ['relation:checked', 'request:end']);
+    await resolver.check({ resource: 'doc:d1', permission: 'view', subject: 'user:nobody' });
+    assert.deepEqual(
+      events.map((event) => [event.name, event.payload.enriched, event.payload.subject ?? event.payload.success]),
+      [
+        ['relation:checked', true, 'user:sally'],
+        ['request:end', true, true],
+      ],
+    );
+  });
+});

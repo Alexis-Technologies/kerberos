@@ -148,14 +148,19 @@ const hooks: KerberosHooks = {
   beforeRequest(ctx) {
     expectType<KerberosHookContext>(ctx);
     expectType<string>(ctx.callId);
+    expectType<boolean>(ctx.enriched);
     if (ctx.reqKind === 'IsAllowed') expectType<string>(ctx.args.action);
     if (ctx.reqKind === 'CheckResources') expectType<number>(ctx.args.resources.length);
     if (ctx.reqKind === 'PlanResources') expectType<'PlanResources'>(ctx.reqKind);
+    // Enrichment: a replacement arguments object may be returned (sync or async).
+    if (ctx.reqKind === 'IsAllowed') return { ...ctx.args, principal: { id: 'x', roles: ['USER'] } };
+    return undefined;
   },
   async afterRequest(ctx, summary) {
     expectType<KerberosRequestSummary>(summary);
     expectType<boolean>(summary.success);
     expectType<true | undefined>(summary.failClosed);
+    expectType<true | undefined>(summary.enriched);
   },
   beforeResource(ctx, info) {
     expectType<KerberosResourceHookInfo>(info);
@@ -164,15 +169,22 @@ const hooks: KerberosHooks = {
   afterResource(ctx, info, result) {
     expectType<KerberosResourceHookResult>(result);
     expectType<Effect>(result.actions.view);
+    expectType<'evaluation-error' | undefined>(result.reason);
   },
   onError(error, ctx) {
     expectType<unknown>(error);
     expectType<string>(ctx.callId);
   },
 };
-const hookedEngine = new Kerberos([mutablePolicy], [mutableDerivedRoles], { hooks });
+const hookedEngine = new Kerberos([mutablePolicy], [mutableDerivedRoles], {
+  hooks,
+  hooksTimeoutMs: 500,
+  maxListeners: 0,
+});
 // @ts-expect-error — unknown hook names are rejected.
 new Kerberos([mutablePolicy], [mutableDerivedRoles], { hooks: { beforeAll() {} } });
+// @ts-expect-error — ctx is frozen: args is read-only.
+new Kerberos([mutablePolicy], [mutableDerivedRoles], { hooks: { beforeRequest: (ctx) => void (ctx.args = ctx.args) } });
 
 expectType<Kerberos>(
   hookedEngine
@@ -181,7 +193,10 @@ expectType<Kerberos>(
       expectType<string>(event.callId);
       expectType<Record<string, Effect>>(event.actions);
     })
-    .once('request:end', (event) => expectType<boolean>(event.success))
+    .once('request:end', (event) => {
+      expectType<boolean>(event.success);
+      expectType<true | undefined>(event.enriched);
+    })
     .off('plan', () => {})
     .removeAllListeners('cache:hit')
     .removeAllListeners(),
@@ -195,3 +210,4 @@ hookedEngine.on('decision', 'nope');
 const hookError = new KerberosHookError('x');
 expectType<'KerberosHookError'>(hookError.name);
 expectType<'beforeRequest' | 'afterRequest' | 'beforeResource' | 'afterResource' | 'onError' | null>(hookError.hook);
+expectType<boolean>(hookError.timedOut);
