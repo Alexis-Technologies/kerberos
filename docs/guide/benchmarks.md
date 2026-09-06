@@ -10,19 +10,23 @@ Apple Silicon (M-series), Node v24:
 
 | Scenario |  ops/sec |
 | -------- |---------:|
-| `isAllowed` — simple role match | ~800,000 |
-| `isAllowed` — derived roles + variables + condition | ~650,000 |
-| `checkResources` — 10 resources × 3 actions |  ~63,000 |
-| `checkResources` — 10 resources, includeMeta |  ~61,000 |
-| `isAllowed` — role policy + 2-level parentRoles chain | ~480,000 |
-| `isAllowed` — 3-segment scoped request (chain walk) | ~640,000 |
-| `isAllowed` — simple role match + Zod validation | ~470,000 |
-| `isAllowed` — cache-backed dynamic policy (`$expr`, in-memory Map) | ~330,000 |
-| `checkResources` — 50 resources, cache-backed |   ~9,000 |
-| `planResources` — `$expr` policy (variables + deny rule) |  ~72,000 |
-| `relations.check` — direct tuple (flat) | ~760,000 |
-| `relations.check` — deep walk (3 arrows + nested groups) | ~106,000 |
-| `isAllowed` — relation-backed derived role (deep walk) |  ~77,000 |
+| `isAllowed` — simple role match |  ~640,000 |
+| `isAllowed` — derived roles + variables + condition |  ~500,000 |
+| `checkResources` — 10 resources × 3 actions |   ~48,000 |
+| `checkResources` — 10 resources, includeMeta |   ~47,000 |
+| `isAllowed` — role policy + 2-level parentRoles chain |  ~390,000 |
+| `isAllowed` — 3-segment scoped request (chain walk) |  ~430,000 |
+| `isAllowed` — simple role match + Zod validation |  ~400,000 |
+| `isAllowed` — simple role match + 1 sync `decision` listener |  ~590,000 |
+| `isAllowed` — simple role match + request-level hooks |  ~350,000 |
+| `isAllowed` — simple role match + per-resource hooks |  ~310,000 |
+| `checkResources` — 10 resources × 3 actions + `decision` listener |   ~45,000 |
+| `isAllowed` — cache-backed dynamic policy (`$expr`, in-memory Map) |  ~260,000 |
+| `checkResources` — 50 resources, cache-backed |    ~7,400 |
+| `planResources` — `$expr` policy (variables + deny rule) |   ~61,000 |
+| `relations.check` — direct tuple (flat) |  ~730,000 |
+| `relations.check` — deep walk (3 arrows + nested groups) |  ~106,000 |
+| `isAllowed` — relation-backed derived role (deep walk) |   ~70,000 |
 
 `checkResources` evaluates resources **concurrently** (`Promise.allSettled`): with a remote policy store, N resources cost one parallel wave of lookups instead of N sequential round-trips (measured ~8x faster with a 2ms-latency cache and 10 resources), and one failing resource never fails the batch — it fail-closes to `EFFECT_DENY` for its actions only.
 
@@ -45,7 +49,7 @@ Bundle size for the browser, measured the same way as the table above (`pnpm siz
 
 | Library | min+gzip |
 | ------- | --------:|
-| `@alexify/kerberos` (main entry) | 34.2 KB |
+| `@alexify/kerberos` (main entry) | 35.8 KB |
 | `@casl/ability` | 6.6 KB |
 | `casbin` | 33.9 KB — does not bundle for the browser (Node builtins); measured as a Node bundle |
 

@@ -31,7 +31,7 @@ Key facts:
 - [Built-in resolver](https://kerberosjs.vercel.app/guide/relations-resolver): The Zanzibar-lite `RelationResolver` — schema DSL, caveats, lookupSubjects/lookupResources, consistency limits.
 - [Query Plans](https://kerberosjs.vercel.app/guide/query-plans): `planResources` — turning policies into a database filter instead of over-fetching.
 - [OpenTelemetry](https://kerberosjs.vercel.app/guide/telemetry): Opt-in spans and metrics that can never affect a decision.
-- [Hooks & events](https://kerberosjs.vercel.app/guide/hooks): Lifecycle hooks (`beforeRequest` / `afterRequest` / `beforeResource` / `afterResource` / `onError`, awaited, may veto) and synchronous events (`decision`, `request:*`, `plan`, `cache:*`, `relations:resolved`) on the engine and the relations resolver.
+- [Hooks & events](https://kerberosjs.vercel.app/guide/hooks): Lifecycle hooks (`beforeRequest` / `afterRequest` / `beforeResource` / `afterResource` / `onError`, awaited; veto by throwing, enrich by returning replacement arguments, bounded by `hooksTimeoutMs`) and synchronous events (`decision`, `request:*`, `plan`, `cache:*`, `relations:resolved`) on the engine and the relations resolver.
 - [Benchmarks](https://kerberosjs.vercel.app/guide/benchmarks): Ops/sec numbers and how to reproduce them.
 
 ## API

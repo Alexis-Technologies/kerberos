@@ -74,7 +74,7 @@ const plan = await kerberos.planResources({
 
 ## Events: `kerberos.on(event, listener) => this`
 
-`on`, `once`, `off` and `removeAllListeners(event?)` (all chainable) plus `listenerCount(event)` subscribe to the engine's lifecycle events — `request:start` / `request:end` / `request:error`, `decision`, `plan`, `relations:resolved`, `cache:hit` / `cache:miss` / `cache:error`. Listeners are contained (a throwing listener never affects a decision) and there is no public `emit`. Lifecycle **hooks** (awaited, may veto) are configured through the `hooks` option instead. See [Hooks & events](/guide/hooks#events).
+`on`, `once`, `off` and `removeAllListeners(event?)` (all chainable) plus `listenerCount(event)` subscribe to the engine's lifecycle events — `request:start` / `request:end` / `request:error`, `decision`, `plan`, `relations:resolved`, `cache:hit` / `cache:miss` / `cache:error`. Listeners are contained (a throwing listener never affects a decision), unknown event names throw a `TypeError`, the first subscription past `maxListeners` (default 10) warns about a likely leak, and there is no public `emit`. Lifecycle **hooks** (awaited, may veto or enrich) are configured through the `hooks` option instead. See [Hooks & events](/guide/hooks#events).
 
 ```javascript
 kerberos.on('decision', ({ callId, resource, actions }) => metrics.record(callId, resource.kind, actions));

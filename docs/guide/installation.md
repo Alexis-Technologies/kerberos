@@ -24,8 +24,8 @@ Zero runtime dependencies. Measured with `pnpm size` (esbuild browser bundle, fu
 
 | Entry | min | min+gzip |
 | ----- | ---:| --------:|
-| `@alexify/kerberos` (main entry, query planner included) | 122.7 KB | **34.2 KB** |
-| `@alexify/kerberos/relations` (opt-in ReBAC resolver) | 66.6 KB | 18.3 KB |
+| `@alexify/kerberos` (main entry, query planner included) | 127.4 KB | **35.8 KB** |
+| `@alexify/kerberos/relations` (opt-in ReBAC resolver) | 70.9 KB | 19.8 KB |
 | `@alexify/kerberos/cerbos` (opt-in [Cerbos importer](/guide/cerbos-import)) | 34.0 KB | 10.9 KB |
 | `@alexify/kerberos/loader` (Node-only; browser bundlers get a throwing stub) | 1.0 KB | 0.5 KB |
 
