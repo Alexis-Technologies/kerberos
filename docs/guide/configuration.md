@@ -11,6 +11,7 @@ const kerberos = new Kerberos(policies, derivedRoles, {
   cacheRetry: { attempts: 3 }, // Optional: retry policy for transient cache.get failures
   codec, // Optional: (de)serialization codec for dynamic policies ({ jsep } or { deserialize })
   relations, // Optional: ReBAC resolver for relation-backed derived roles
+  hooks: { beforeRequest, afterRequest }, // Optional: lifecycle hooks (awaited; a throwing hook vetoes the request)
   z, // Optional: validate with Zod
   ajv, // Optional: validate with Ajv
   typebox: Type, // Optional: switch Ajv validation to TypeBox builders
@@ -46,6 +47,7 @@ const kerberos = new Kerberos(policies, derivedRoles, {
 - **`codec`** (PolicyCodec): How cached policy documents are transformed before construction: `{ jsep }` enables the built-in safe `$expr` evaluator, `{ deserialize }` plugs in your own logic, and when omitted cached values are passed to policy constructors **as-is** — see [`codec` option — three modes](/guide/caching#codec-option-three-modes).
 - **`schemas`** (`{ enforcement?, definitions? }`): **Attribute schema enforcement** — Cerbos [`schemas`](https://docs.cerbos.dev/cerbos/latest/policies/schemas) parity. Resource policies declare `schemas.principalSchema` / `resourceSchema` refs (with optional `ignoreWhen.actions` globs); this option maps the refs to validators and picks the level: `'reject'` (default when set) denies requests whose attributes fail validation, `'warn'` reports without changing decisions, `'none'` disables (the Cerbos default when unconfigured). Failures are returned as Cerbos-shaped `validationErrors` (`{ path, message, source }`) on `checkResources` results — regardless of `includeMeta` — and reach the audit log. A definition may be a JSON Schema object (compiled with the `ajv` option), a Zod schema, or a validator function. See [Attribute schemas](/guide/schema-validation#attribute-schemas-cerbos-schemas).
 - **`relations`** (KerberosRelationsResolver): ReBAC resolver used by relation-backed derived roles — any object with a `check(args, opts)` method (and an optional batched `list`). See [ReBAC (Relations)](/guide/rebac).
+- **`hooks`** (KerberosHooks): Lifecycle hooks — `beforeRequest`, `afterRequest`, `beforeResource`, `afterResource`, `onError` — awaited inside the request flow. A throwing hook vetoes the request as `KerberosHookError` (following `onError`); `onError` and a failed request's `afterRequest` are swallowed and never mask the original error. Unknown names / non-functions throw at construction. See [Hooks & events](/guide/hooks).
 - **`z`**: Enables validation using the built-in Zod schema builders.
 - **`ajv`**: Enables validation using the built-in JSON Schema builders compiled with Ajv.
 - **`typebox`**: When used together with `ajv`, switches validation to the built-in TypeBox builders.

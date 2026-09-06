@@ -11,11 +11,23 @@ const { createCacheReader } = require('../caching/cache.js');
 const { createLimiter, settleAll } = require('../async.js');
 const { createLoggerWriter } = require('../logging.js');
 const { createTelemetryWriter } = require('../telemetry.js');
+const { RESOLVER_HOOKS, createHookRunner } = require('../hooks.js');
+const { createEventHub } = require('../events.js');
 const { KerberosCodecError, KerberosRelationsError } = require('../errors.js');
 const { resolveValidationAdapter } = require('../validation');
 // Platform runtime: bundlers swap this for `./runtime/browser.js` via the
 // package.json `browser` field map when targeting the browser.
-const { getNow } = require('../runtime/node.js');
+const { generateCallId, getNow } = require('../runtime/node.js');
+
+// Observability sinks whose failures are swallowed + counted + warned once.
+const SINK_LABELS = { logger: 'diagnostics logger', hooks: 'lifecycle hook', events: 'event listener' };
+
+const CACHE_EVENTS = { hit: 'cache:hit', miss: 'cache:miss', error: 'cache:error' };
+
+// Event payloads never carry Error objects: message string + name only.
+function errorText(error) {
+  return error instanceof Error ? error.message : String(error);
+}
 
 // SpiceDB uses the same default: depth is the only recursion guard — a
 // visited-set is deliberately NOT used because it is semantically unsound in
@@ -130,6 +142,14 @@ class RelationResolver {
 
   #telemetry;
 
+  // Lifecycle hooks (request-level only: beforeRequest/afterRequest/onError)
+  // and events — same factories as the engine (src/hooks.js, src/events.js).
+  #hooks = createHookRunner(null);
+
+  #events = createEventHub();
+
+  #warnedSinks = new Set();
+
   #includeIdentity = true;
 
   // Decision-memo scoping (see #createSession): caveat outcomes depend on the
@@ -228,6 +248,7 @@ class RelationResolver {
       maxResults,
       maxConcurrency,
       onTruncated,
+      hooks,
       z,
       ajv,
       typebox,
@@ -262,6 +283,13 @@ class RelationResolver {
     this.#reader = createCacheReader(cache, cacheRetry);
     this.#log = createLoggerWriter(logger);
     this.#telemetry = createTelemetryWriter(telemetry);
+    // The runner validates the option (TypeError on unknown/non-function
+    // hooks, like the engine's — not KerberosRelationsError).
+    this.#hooks = createHookRunner(hooks, {
+      allowed: RESOLVER_HOOKS,
+      onSwallowed: (error) => this.#observabilityFailure(error, 'hooks'),
+    });
+    this.#events = createEventHub({ onSwallowed: (error) => this.#observabilityFailure(error, 'events') });
     this.#includeIdentity = telemetry?.includeIdentity !== false;
     this.#subjectType = subjectType;
     if (typeof mapPrincipal === 'function') this.#mapPrincipal = mapPrincipal;
@@ -477,7 +505,8 @@ class RelationResolver {
     // error span and a duration sample too.
     return this.#runInstrumented(
       'RelationsCheck',
-      async (otel) => {
+      'check',
+      async (otel, run) => {
         if (!args || typeof args !== 'object') throw new KerberosRelationsError('check requires an arguments object');
         const parsed = this.#parseArgs(this.#checkArgsValidator, 'Invalid check arguments', args);
 
@@ -485,10 +514,12 @@ class RelationResolver {
         const resource = this.#normalizeResource(parsed.resource);
         const subject = this.#normalizeSubject(parsed);
         this.#assertCheckable(resource.type, name, 'check');
+        if (run !== null && this.#hooks.enabled) await this.#beginRun(run, parsed);
 
-        const session = this.#createSession(parsed, opts);
+        const session = this.#createSession(parsed, opts, run);
         const allowed = await this.#checkInternal(resource, name, subject, session, this.#limits.maxDepth);
         this.#telemetry.recordRelationCheck(allowed);
+        this.#emitRelationChecked(run, resource, name, subject, allowed);
         this.#setSpanAttributes(otel, resource.type, name, {
           'kerberos.allowed': allowed,
           subjectKey: subjectToString(subject),
@@ -512,7 +543,8 @@ class RelationResolver {
   async list(args, opts = {}) {
     return this.#runInstrumented(
       'RelationsList',
-      async (otel) => {
+      'list',
+      async (otel, run) => {
         if (!args || typeof args !== 'object') throw new KerberosRelationsError('list requires an arguments object');
         const parsed = this.#parseArgs(this.#listArgsValidator, 'Invalid list arguments', args);
         const names = parsed.relations;
@@ -523,12 +555,14 @@ class RelationResolver {
         const resource = this.#normalizeResource(parsed.resource);
         const subject = this.#normalizeSubject(parsed);
         for (const name of names) this.#assertCheckable(resource.type, name, 'list');
+        if (run !== null && this.#hooks.enabled) await this.#beginRun(run, parsed);
 
-        const session = this.#createSession(parsed, opts);
+        const session = this.#createSession(parsed, opts, run);
         const granted = new Set();
         for (const name of names) {
           const allowed = await this.#checkInternal(resource, name, subject, session, this.#limits.maxDepth);
           this.#telemetry.recordRelationCheck(allowed);
+          this.#emitRelationChecked(run, resource, name, subject, allowed);
           if (allowed) granted.add(name);
         }
         this.#setSpanAttributes(otel, resource.type, null, {
@@ -556,7 +590,8 @@ class RelationResolver {
   async lookupSubjects(args, opts = {}) {
     return this.#runInstrumented(
       'RelationsLookupSubjects',
-      async (otel) => {
+      'lookupSubjects',
+      async (otel, run) => {
         if (!args || typeof args !== 'object') {
           throw new KerberosRelationsError('lookupSubjects requires an arguments object');
         }
@@ -565,8 +600,9 @@ class RelationResolver {
         const name = resolveName(parsed, 'lookupSubjects');
         const resource = this.#normalizeResource(parsed.resource);
         this.#assertCheckable(resource.type, name, 'lookupSubjects');
+        if (run !== null && this.#hooks.enabled) await this.#beginRun(run, parsed);
 
-        const session = this.#createSession(parsed, opts);
+        const session = this.#createSession(parsed, opts, run);
         const collected = await this.#collectSubjectsInternal(resource, name, session, this.#limits.maxDepth);
 
         const subjectTypeFilter = typeof parsed.subjectType === 'string' ? parsed.subjectType : null;
@@ -619,7 +655,8 @@ class RelationResolver {
   async lookupResources(args, opts = {}) {
     return this.#runInstrumented(
       'RelationsLookupResources',
-      async (otel) => {
+      'lookupResources',
+      async (otel, run) => {
         if (!args || typeof args !== 'object') {
           throw new KerberosRelationsError('lookupResources requires an arguments object');
         }
@@ -637,8 +674,9 @@ class RelationResolver {
             'lookupResources over cache-backed tuples requires reverseIndex: true and backend-maintained "rel:rev:<subject>" reverse documents',
           );
         }
+        if (run !== null && this.#hooks.enabled) await this.#beginRun(run, parsed);
 
-        const session = this.#createSession(parsed, opts);
+        const session = this.#createSession(parsed, opts, run);
         const ids = await this.#lookupResourcesInternal(subject, resourceType, name, session, this.#limits.maxDepth);
         const sortedIds = [...ids].sort();
         const truncated = sortedIds.length > this.#limits.maxResults;
@@ -663,23 +701,141 @@ class RelationResolver {
   // run the handler directly (zero instrumentation overhead).
   // -------------------------------------------------------------------------
 
-  #runInstrumented(reqKind, handler, callId = null) {
-    if (!this.#telemetry.enabled) return handler(null);
+  #runInstrumented(reqKind, kind, handler, callId = null) {
+    // Nothing observing: run the handler directly — no span, no `run` record,
+    // no async wrapper (the handler receives `run: null`).
+    if (!this.#telemetry.enabled && !this.#hooks.enabled && !this.#events.active) return handler(null, null);
 
     const startedAt = getNow();
     // callId (from opts, e.g. the engine's kerberosCallId through the
-    // relations seam) joins resolver spans to the authorization decision they
-    // served even when span parent-child nesting is unavailable.
-    return this.#telemetry.withRequestSpan(reqKind, callId, null, async (otel) => {
+    // relations seam) joins resolver spans/hooks/events to the authorization
+    // decision they served even when span parent-child nesting is
+    // unavailable; standalone calls get a generated one so all three agree.
+    const resolvedCallId = callId ?? generateCallId();
+    const run = { kind, callId: resolvedCallId, ctx: null, afterFired: false, error: null };
+    return this.#telemetry.withRequestSpan(reqKind, resolvedCallId, null, async (otel) => {
       try {
-        return await handler(otel);
+        if (this.#events.wants('request:start')) this.#events.emit('request:start', { callId: resolvedCallId, kind });
+        const result = await handler(otel, run);
+        // Success-path afterRequest inside the try: its KerberosHookError
+        // takes the same path as any other failure (no `onError` option
+        // here — it always propagates).
+        if (run.ctx !== null) await this.#finishRun(run, startedAt, null);
+        return result;
       } catch (error) {
+        run.error = error;
         this.#telemetry.recordError(otel, error);
+        if (this.#events.wants('request:error')) {
+          this.#events.emit('request:error', {
+            callId: resolvedCallId,
+            kind,
+            error: errorText(error),
+            errorName: error?.name,
+          });
+        }
+        // Pairing invariant (see the engine): onError + afterRequest run
+        // exactly once after beforeRequest, both swallowed.
+        if (run.ctx !== null && !run.afterFired) {
+          await this.#hooks.onError(error, run.ctx);
+          await this.#finishRun(run, startedAt, error);
+        }
         throw error;
       } finally {
-        this.#telemetry.endRequest(otel, reqKind, getNow() - startedAt);
+        const duration = getNow() - startedAt;
+        this.#telemetry.endRequest(otel, reqKind, duration);
+        if (this.#events.wants('request:end')) {
+          const payload = { callId: resolvedCallId, kind, durationMs: duration, success: run.error === null };
+          if (run.error !== null) {
+            payload.error = errorText(run.error);
+            payload.errorName = run.error?.name;
+          }
+          this.#events.emit('request:end', payload);
+        }
       }
     });
+  }
+
+  // Called after a public method's LAST validation step (hooks enabled).
+  #beginRun(run, args) {
+    run.ctx = { kind: run.kind, callId: run.callId, args };
+    return this.#hooks.beforeRequest(run.ctx);
+  }
+
+  #finishRun(run, startedAt, error) {
+    run.afterFired = true;
+    const summary = { success: error === null, durationMs: getNow() - startedAt };
+    if (error !== null) summary.error = error;
+    return this.#hooks.afterRequest(run.ctx, summary);
+  }
+
+  #emitRelationChecked(run, resource, name, subject, allowed) {
+    if (run === null || !this.#events.wants('relation:checked')) return;
+    this.#events.emit('relation:checked', {
+      callId: run.callId,
+      kind: run.kind,
+      resource: { kind: resource.type, id: resource.id },
+      relation: name,
+      subject: subjectToString(subject),
+      allowed,
+    });
+  }
+
+  // Cache-read observability: the kerberos.cache.requests counter (kind
+  // 'relation') plus the cache:* event, correlated through the session's
+  // callId (the engine's kerberosCallId when called through the seam).
+  #recordCacheResult(session, key, result, error) {
+    this.#telemetry.recordCacheRequest(result, CACHE_KIND_RELATION);
+    if (!this.#events.wants(CACHE_EVENTS[result])) return;
+    const payload = { key, kind: CACHE_KIND_RELATION, callId: session?.callId ?? null };
+    if (error !== undefined) {
+      payload.error = errorText(error);
+      payload.errorName = error?.name;
+    }
+    this.#events.emit(CACHE_EVENTS[result], payload);
+  }
+
+  // Swallowed sink failures stay swallowed but must not be invisible: count
+  // them on the telemetry channel and warn once per sink (same contract as
+  // the engine's #observabilityFailure).
+  #observabilityFailure(sinkError, sink) {
+    this.#telemetry.recordObservabilityFailure(sink);
+    if (this.#warnedSinks.has(sink)) return;
+    this.#warnedSinks.add(sink);
+    try {
+      console.warn(
+        `Kerberos.js relations: the ${SINK_LABELS[sink] ?? sink} threw and was swallowed (resolution is unaffected; further warnings suppressed): ${sinkError?.message}`,
+      );
+    } catch {
+      // Even the warning is best-effort.
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Events façade (see src/events.js) — chainable, no public `emit`.
+  // ---------------------------------------------------------------------------
+
+  on(eventName, listener) {
+    this.#events.on(eventName, listener);
+    return this;
+  }
+
+  once(eventName, listener) {
+    this.#events.once(eventName, listener);
+    return this;
+  }
+
+  off(eventName, listener) {
+    this.#events.off(eventName, listener);
+    return this;
+  }
+
+  removeAllListeners(eventName) {
+    this.#events.removeAllListeners(eventName);
+    return this;
+  }
+
+  listenerCount(eventName) {
+    return this.#events.listenerCount(eventName);
   }
 
   // `subjectKey`/`resourceId` are identity attributes, gated on the same
@@ -813,9 +969,12 @@ class RelationResolver {
   // Same object references → same identity tokens → full sharing (the engine
   // reuses one principal object and one memo across a whole checkResources
   // batch); different references → isolated inner Maps instead of stale reuse.
-  #createSession(args, opts) {
+  #createSession(args, opts, run = null) {
     const principal = args.principal && typeof args.principal === 'object' ? args.principal : null;
     const context = args.context && typeof args.context === 'object' ? args.context : null;
+    // Correlation id for cache:* events raised during this call (the run's
+    // resolved id, or the caller's when the fast path skipped the run record).
+    const callId = run !== null ? run.callId : (opts?.callId ?? null);
 
     const memo = opts?.memo;
     if (!(memo instanceof Map)) {
@@ -825,7 +984,7 @@ class RelationResolver {
       // key prefixes (`check|`/`doc|`/...) already keep entries apart, and a
       // private session has exactly one resolver/principal/context.
       const single = new Map();
-      return { shared: single, decisions: single, principal, context };
+      return { shared: single, decisions: single, principal, context, callId };
     }
 
     let shared = memo.get(this.#sharedKey);
@@ -849,7 +1008,7 @@ class RelationResolver {
       memo.set(decisionsKey, decisions);
     }
 
-    return { shared, decisions, principal, context };
+    return { shared, decisions, principal, context, callId };
   }
 
   // -------------------------------------------------------------------------
@@ -861,8 +1020,9 @@ class RelationResolver {
     if (!this.#log.enabled) return;
     try {
       this.#log.debug({ timestamp: new Date().toISOString(), ...entry }, message);
-    } catch {
+    } catch (sinkError) {
       // Diagnostics must never affect resolution.
+      this.#observabilityFailure(sinkError, 'logger');
     }
   }
 
@@ -870,8 +1030,9 @@ class RelationResolver {
     if (!this.#log.enabled) return;
     try {
       this.#log.error({ timestamp: new Date().toISOString(), ...entry }, message);
-    } catch {
+    } catch (sinkError) {
       // Diagnostics must never affect resolution.
+      this.#observabilityFailure(sinkError, 'logger');
     }
   }
 
@@ -929,7 +1090,7 @@ class RelationResolver {
     return index;
   }
 
-  async #readCachedEntries(type, id, relation) {
+  async #readCachedEntries(type, id, relation, session) {
     const key = `rel:${type}:${id}:${relation}`;
     let value;
     try {
@@ -937,11 +1098,11 @@ class RelationResolver {
       // reader's retry loop) and propagates to the caller.
       value = await this.#reader.get(key);
     } catch (error) {
-      this.#telemetry.recordCacheRequest('error', CACHE_KIND_RELATION);
+      this.#recordCacheResult(session, key, 'error', error);
       throw error;
     }
     if (value === undefined || value === null) {
-      this.#telemetry.recordCacheRequest('miss', CACHE_KIND_RELATION);
+      this.#recordCacheResult(session, key, 'miss');
       return EMPTY_ENTRIES;
     }
 
@@ -965,7 +1126,7 @@ class RelationResolver {
         }
         entries.push(entry);
       }
-      this.#telemetry.recordCacheRequest('hit', CACHE_KIND_RELATION);
+      this.#recordCacheResult(session, key, 'hit');
       return entries;
     } catch (error) {
       // A corrupt document THROWS (typed) instead of resolving as empty: in
@@ -973,12 +1134,15 @@ class RelationResolver {
       // WIDEN access (a real editor gains read_only when the editor document
       // fails to parse). Errors are never read as an answer — they propagate
       // per the engine's onError semantics. Genuine absence (miss) stays empty.
-      this.#telemetry.recordCacheRequest('error', CACHE_KIND_RELATION);
+      const codecError = new KerberosCodecError(`Corrupt relation document for "${key}": ${error.message}`, {
+        cause: error,
+      });
+      this.#recordCacheResult(session, key, 'error', codecError);
       this.#logError(
         { event: 'Relations.corruptDocument', key, errorMessage: error.message },
         `Kerberos.js relations: corrupt relation document for "${key}"`,
       );
-      throw new KerberosCodecError(`Corrupt relation document for "${key}": ${error.message}`, { cause: error });
+      throw codecError;
     }
   }
 
@@ -1014,11 +1178,11 @@ class RelationResolver {
     return this.#memoizeShared(session, docKey, () => {
       const staticEntries = this.#forwardIndex.get(`${type}:${id}#${relation}`);
       if (staticEntries) return Promise.resolve(staticEntries);
-      return this.#reader.enabled ? this.#readCachedEntries(type, id, relation) : EMPTY_ENTRIES_PROMISE;
+      return this.#reader.enabled ? this.#readCachedEntries(type, id, relation, session) : EMPTY_ENTRIES_PROMISE;
     });
   }
 
-  async #loadReverseEntries(subjectKey) {
+  async #loadReverseEntries(subjectKey, session) {
     const staticEntries = this.#ensureReverseStaticIndex().get(subjectKey) ?? EMPTY_ENTRIES;
     if (!this.#reader.enabled || !this.#reverseIndex) return staticEntries;
 
@@ -1030,11 +1194,11 @@ class RelationResolver {
     try {
       value = await this.#reader.get(key);
     } catch (error) {
-      this.#telemetry.recordCacheRequest('error', CACHE_KIND_RELATION);
+      this.#recordCacheResult(session, key, 'error', error);
       throw error;
     }
     if (value === undefined || value === null) {
-      this.#telemetry.recordCacheRequest('miss', CACHE_KIND_RELATION);
+      this.#recordCacheResult(session, key, 'miss');
       return staticEntries;
     }
 
@@ -1058,7 +1222,7 @@ class RelationResolver {
         }
         parsed.push(entry);
       }
-      this.#telemetry.recordCacheRequest('hit', CACHE_KIND_RELATION);
+      this.#recordCacheResult(session, key, 'hit');
       if (!staticEntries.length) return parsed;
       for (const entry of staticEntries) entries.push(entry);
       for (const entry of parsed) entries.push(entry);
@@ -1066,18 +1230,21 @@ class RelationResolver {
     } catch (error) {
       // Same rule as forward documents: corrupt data throws instead of
       // silently narrowing the reverse index (which would drop candidates).
-      this.#telemetry.recordCacheRequest('error', CACHE_KIND_RELATION);
+      const codecError = new KerberosCodecError(`Corrupt reverse document for "${key}": ${error.message}`, {
+        cause: error,
+      });
+      this.#recordCacheResult(session, key, 'error', codecError);
       this.#logError(
         { event: 'Relations.corruptDocument', key, errorMessage: error.message },
         `Kerberos.js relations: corrupt reverse document for "${key}"`,
       );
-      throw new KerberosCodecError(`Corrupt reverse document for "${key}": ${error.message}`, { cause: error });
+      throw codecError;
     }
   }
 
   // Promise-memoized like forward documents (reverse reads never recurse).
   #readReverseEntries(subjectKey, session) {
-    return this.#memoizeShared(session, `rev|${subjectKey}`, () => this.#loadReverseEntries(subjectKey));
+    return this.#memoizeShared(session, `rev|${subjectKey}`, () => this.#loadReverseEntries(subjectKey, session));
   }
 
   // -------------------------------------------------------------------------

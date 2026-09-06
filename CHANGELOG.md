@@ -5,6 +5,28 @@ All notable changes to **`@alexify/kerberos`** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.0] - 2026-09-06
+
+Lifecycle hooks and events: run your own logic inside the request flow (and
+veto it), or subscribe to decisions without parsing audit logs — the same
+hooks/events split migronaut uses, on both the engine and the built-in
+relations resolver.
+
+### Added
+
+- **Lifecycle hooks (`hooks` option).** `beforeRequest(ctx)`, `afterRequest(ctx, summary)`, `beforeResource(ctx, info)`, `afterResource(ctx, info, result)` and `onError(error, ctx)` — awaited user callbacks around every `isAllowed` / `checkResources` / `planResources` call. `ctx` carries the request kind, the `kerberosCallId` and the validated arguments; `summary` reports `success`/`durationMs`/`error`/`failClosed`. Error contract: a throwing `beforeRequest`/`beforeResource`/`afterResource` (or a successful request's `afterRequest`) vetoes as `KerberosHookError` and follows `onError` (`'deny'` fails closed; inside a batch a per-resource hook only fails that resource); `onError` and a failed request's `afterRequest` are swallowed so they never mask the cause. Malformed arguments fire no hook. Per-resource hooks are the only ones that leave the synchronous evaluation driver (`test/SyncAsyncParity.test.js` pins byte-identical responses either way). Pinned by `test/Hooks.test.js`.
+- **Events.** `kerberos.on/once/off/removeAllListeners/listenerCount` (chainable, no public `emit`): `request:start` / `request:end` / `request:error`, `decision` (one per resource, fail-closed ones marked `reason: 'evaluation-error'`), `plan`, `relations:resolved`, `cache:hit` / `cache:miss` / `cache:error`. Synchronous, fire-and-forget; payloads are fresh identity-only objects (never attribute bags or `Error` instances) stamped with the request's `callId`. A throwing or rejecting listener is contained and can never affect a decision. The emitter is a platform-neutral copy of metautil's `Emitter` (`src/events.js`) — the same class on Node.js and in the browser, no `node:events`. Pinned by `test/Events.test.js` and `test/Emitter.test.js`.
+- **Resolver hooks & events.** `RelationResolver` accepts the request-level hooks (`beforeRequest`/`afterRequest`/`onError`, `KerberosHookError` always propagates — no `onError` option there) and emits `request:*`, `relation:checked` and `cache:*` (`kind: 'relation'`, correlated by the engine's `callId` through the `relations` seam).
+- **`KerberosHookError`** (main entry): `hook` names the failing hook, `cause` carries the original error.
+- **Observability sinks.** `kerberos.observability.failures` now also counts swallowed `hooks` and `events` failures under `kerberos.observability.sink`.
+- **Types.** `KerberosHooks`, `KerberosHookContext` (discriminated on `reqKind`), `KerberosRequestSummary`, `KerberosResourceHookInfo`, `KerberosResourceHookResult`, `KerberosEvents` and the typed `on/once/off` overloads (a typo'd event name is a type error); `RelationResolverHooks` / `RelationResolverEvents` on the `/relations` subpath; `IsAllowedArgs` is now a named type.
+
+### Changed
+
+- The swallowed-sink `console.warn` names the sink (`audit logger` / `lifecycle hook` / `event listener`) and warns once **per sink** instead of once per instance.
+- `RelationResolver`: standalone calls without `opts.callId` get a generated correlation id on their span, hooks and events when telemetry, hooks or listeners are active; diagnostics-logger failures are now counted under the `logger` sink and warned once (previously silent).
+- Bundle size (`pnpm size`): main entry 31.9 → 34.2 KB min+gzip, `/relations` 16.3 → 18.3 KB.
+
 ## [4.0.0] - 2026-08-30
 
 Code-review hardening waves (0–4): the Conditions inherited-key fail-open fix,

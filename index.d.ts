@@ -785,6 +785,165 @@ export class KerberosRelationsError extends Error {
 }
 
 /**
+ * Thrown when a lifecycle hook (`hooks` option) throws. `hook` names the
+ * failing hook and `cause` carries the original error. In the engine it
+ * follows the `onError` option like any evaluation-phase error; the built-in
+ * relations resolver always propagates it. Hooks that run on an already-failed
+ * request (`afterRequest` with `success: false`, `onError`) are swallowed
+ * instead and never mask the original error.
+ */
+export class KerberosHookError extends Error {
+  name: 'KerberosHookError';
+  hook: KerberosHookName | null;
+  cause?: unknown;
+}
+
+export type KerberosHookName = 'beforeRequest' | 'afterRequest' | 'beforeResource' | 'afterResource' | 'onError';
+
+/** Which public method a hook or event belongs to. */
+export type KerberosRequestKind = 'IsAllowed' | 'CheckResources' | 'PlanResources';
+
+/**
+ * The context every hook of one request shares: the request kind, the
+ * `kerberosCallId` correlation id, the caller's `reqId` and the VALIDATED
+ * arguments of the method (the same objects the engine evaluates — read-only
+ * by convention, they are neither cloned nor frozen). Discriminated on
+ * `reqKind`, so `ctx.args` narrows to that method's argument shape.
+ */
+export type KerberosHookContext<S extends KerberosSchema = AnySchema> =
+  | { reqKind: 'IsAllowed'; callId: string; reqId?: string; args: IsAllowedArgs<S> }
+  | { reqKind: 'CheckResources'; callId: string; reqId?: string; args: CheckResourcesArgs<S> }
+  | { reqKind: 'PlanResources'; callId: string; reqId?: string; args: PlanResourcesArgs<S> };
+
+/** Outcome handed to `afterRequest`. */
+export type KerberosRequestSummary = {
+  /** False when the request failed — including when `onError: 'deny'` converted the failure into a fail-closed result. */
+  success: boolean;
+  durationMs: number;
+  /** The evaluation error (on failure). */
+  error?: unknown;
+  /** Set when the failure was converted into a fail-closed result (`onError: 'deny'`). */
+  failClosed?: true;
+};
+
+/** Which resource of the request a per-resource hook is firing for. */
+export type KerberosResourceHookInfo<S extends KerberosSchema = AnySchema> = {
+  /** Zero-based position in the request's resources (always 0 of 1 for `isAllowed`). */
+  index: number;
+  total: number;
+  resource: RequestResource<S>;
+  actions: string[];
+};
+
+/** Evaluation result handed to `afterResource` — canonical `EFFECT_*` strings, never the `effectAsBoolean` view. */
+export type KerberosResourceHookResult = {
+  actions: Record<string, Effect>;
+  outputs: unknown[];
+  validationErrors?: AttributeValidationError[];
+  meta?: CheckResourcesResult['meta'];
+};
+
+/**
+ * Lifecycle hooks — configured up front, AWAITED inside the request flow
+ * (sync or async functions; the return value is ignored). A hook vetoes by
+ * throwing: `beforeRequest`, `beforeResource`, `afterResource` and a
+ * successful request's `afterRequest` surface as `KerberosHookError` and
+ * follow `onError` (`'throw'` propagates, `'deny'` fails closed); inside a
+ * `checkResources` batch a throwing per-resource hook only fails THAT
+ * resource (all its actions DENY with `reason: 'evaluation-error'`).
+ * `onError` and `afterRequest` after a failed request are swallowed (counted
+ * under `kerberos.observability.failures{sink: 'hooks'}`, warned once).
+ * Malformed arguments (`KerberosValidationError`) fire no hook at all.
+ * Unknown keys or non-function values are rejected at construction.
+ */
+export type KerberosHooks<S extends KerberosSchema = AnySchema> = {
+  /** Once per request, after argument validation and before any evaluation. */
+  beforeRequest?: (ctx: KerberosHookContext<S>) => void | Promise<void>;
+  /** Once per request, on success, failure AND the `onError: 'deny'` fallback path. */
+  afterRequest?: (ctx: KerberosHookContext<S>, summary: KerberosRequestSummary) => void | Promise<void>;
+  /** Before each resource evaluation (`isAllowed`, `checkResources`; not `planResources`). Forces the async evaluation driver. */
+  beforeResource?: (ctx: KerberosHookContext<S>, info: KerberosResourceHookInfo<S>) => void | Promise<void>;
+  /** After each successful resource evaluation. */
+  afterResource?: (
+    ctx: KerberosHookContext<S>,
+    info: KerberosResourceHookInfo<S>,
+    result: KerberosResourceHookResult,
+  ) => void | Promise<void>;
+  /** When the request fails — receives the error before `afterRequest`. Always swallowed. */
+  onError?: (error: unknown, ctx: KerberosHookContext<S>) => void | Promise<void>;
+};
+
+/** Identity-only projections carried by event payloads (never the attribute bags). */
+export type KerberosEventPrincipal = { id: string; roles: string[] };
+export type KerberosEventResource = { kind: string; id: string; scope?: string; policyVersion?: string };
+
+export type KerberosRequestEventBase = { callId: string; reqKind: KerberosRequestKind; reqId?: string };
+
+export type KerberosRequestStartEvent = KerberosRequestEventBase;
+export type KerberosRequestErrorEvent = KerberosRequestEventBase & { error: string; errorName?: string };
+export type KerberosRequestEndEvent = KerberosRequestEventBase & {
+  durationMs: number;
+  /** False on failure — also when `onError: 'deny'` returned a fail-closed result. */
+  success: boolean;
+  error?: string;
+  errorName?: string;
+};
+export type KerberosDecisionEvent = KerberosRequestEventBase & {
+  /** Position of the resource in the request. */
+  index: number;
+  principal: KerberosEventPrincipal;
+  resource: KerberosEventResource;
+  actions: Record<string, Effect>;
+  /** Present for fail-closed decisions (a resource whose evaluation threw). */
+  reason?: 'evaluation-error';
+  errorName?: string;
+};
+export type KerberosPlanEvent = KerberosRequestEventBase & {
+  principal: KerberosEventPrincipal;
+  resource: { kind: string; id?: string; scope?: string; policyVersion?: string };
+  actions: string[];
+  filterKind: PlanKind;
+  opaqueCount: number;
+  relationCount: number;
+};
+export type KerberosRelationsResolvedEvent = {
+  callId: string;
+  principal: KerberosEventPrincipal;
+  resource: KerberosEventResource;
+  relations: string[];
+  granted: string[];
+  /** Which resolver method served the request (`list` when the resolver has one). */
+  mode: 'list' | 'check';
+  durationMs: number;
+};
+/** Policy-cache reads carry no `callId`: the lookup path has no request context. */
+export type KerberosCacheEvent = { key: string; error?: string; errorName?: string };
+
+/**
+ * Events emitted by {@link Kerberos}. Subscribe with `kerberos.on(name, …)` to
+ * feed metrics or alerting without parsing audit logs. Emission is
+ * synchronous and fire-and-forget: a listener that throws (or returns a
+ * rejecting promise) is contained, counted under
+ * `kerberos.observability.failures{sink: 'events'}` and warned once — it can
+ * never affect a decision. Every request-scoped payload carries the
+ * `kerberosCallId` of its request; payloads are fresh plain objects that never
+ * contain `Error` instances or attribute bags. There is deliberately no
+ * `'error'` event and no public `emit`.
+ */
+export type KerberosEvents = {
+  'request:start': (event: KerberosRequestStartEvent) => void;
+  'request:end': (event: KerberosRequestEndEvent) => void;
+  'request:error': (event: KerberosRequestErrorEvent) => void;
+  /** One per evaluated resource (fail-closed decisions included). */
+  decision: (event: KerberosDecisionEvent) => void;
+  plan: (event: KerberosPlanEvent) => void;
+  'relations:resolved': (event: KerberosRelationsResolvedEvent) => void;
+  'cache:hit': (event: KerberosCacheEvent) => void;
+  'cache:miss': (event: KerberosCacheEvent) => void;
+  'cache:error': (event: KerberosCacheEvent) => void;
+};
+
+/**
  * Creates the built-in security-first policy codec.
  *
  * Requires a pre-configured `jsep` instance (analogous to how `ajv` is
@@ -919,6 +1078,12 @@ export type KerberosOptions<S extends KerberosSchema = AnySchema> = ValidationOp
    */
   schemas?: KerberosAttributeSchemasOptions | null;
   getCallId?: () => string;
+  /**
+   * Lifecycle hooks (see {@link KerberosHooks}): awaited user callbacks around
+   * every request / resource evaluation. Hook failures follow `onError`;
+   * `beforeResource`/`afterResource` switch evaluation to the async driver.
+   */
+  hooks?: KerberosHooks<S> | null;
 };
 
 /** One Cerbos-shaped attribute validation failure. */
@@ -1080,6 +1245,14 @@ export type CheckResourcesEntry<S extends KerberosSchema = AnySchema> = {
   [K in ResourceKindOf<S>]: { resource: RequestResource<S, K>; actions: ActionOf<S, K>[] };
 }[ResourceKindOf<S>];
 
+export type IsAllowedArgs<S extends KerberosSchema = AnySchema, K extends ResourceKindOf<S> = ResourceKindOf<S>> = {
+  reqId?: string;
+  principal: RequestPrincipal<S>;
+  resource: RequestResource<S, K>;
+  action: ActionOf<S, K>;
+  includeMeta?: boolean;
+};
+
 export type CheckResourcesArgs<S extends KerberosSchema = AnySchema> = {
   reqId?: string;
   principal: RequestPrincipal<S>;
@@ -1136,13 +1309,13 @@ export class Kerberos<S extends KerberosSchema = AnySchema> {
   static parseCheckResourcesArgs(args: unknown, options?: ValidationOptions & { schema?: unknown }): Record<string, unknown>;
   /** Validates `planResources` arguments with the configured backend. */
   static parsePlanResourcesArgs(args: unknown, options?: ValidationOptions & { schema?: unknown }): Record<string, unknown>;
-  isAllowed<K extends ResourceKindOf<S>>(args: {
-    reqId?: string;
-    principal: RequestPrincipal<S>;
-    resource: RequestResource<S, K>;
-    action: ActionOf<S, K>;
-    includeMeta?: boolean;
-  }): Promise<boolean>;
+  isAllowed<K extends ResourceKindOf<S>>(args: IsAllowedArgs<S, K>): Promise<boolean>;
+  /** Subscribes to a lifecycle event (see {@link KerberosEvents}). Chainable; unknown event names are type errors. */
+  on<E extends keyof KerberosEvents>(event: E, listener: KerberosEvents[E]): this;
+  once<E extends keyof KerberosEvents>(event: E, listener: KerberosEvents[E]): this;
+  off<E extends keyof KerberosEvents>(event: E, listener: KerberosEvents[E]): this;
+  removeAllListeners(event?: keyof KerberosEvents): this;
+  listenerCount(event: keyof KerberosEvents): number;
   checkResources(args: CheckResourcesArgs<S>, effectAsBoolean: true): Promise<CheckResourcesResponse<S, boolean>>;
   checkResources(args: CheckResourcesArgs<S>, effectAsBoolean?: false): Promise<CheckResourcesResponse<S, Effect>>;
   checkResources(

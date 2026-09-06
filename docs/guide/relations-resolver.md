@@ -73,6 +73,10 @@ The resolver takes the same `telemetry` option as the engine (`{ api }` or `{ tr
 const relations = new RelationResolver({ schema, tuples, telemetry: { api: require('@opentelemetry/api') } });
 ```
 
+## Resolver hooks & events
+
+The resolver accepts a `hooks` option with the request-level subset of the engine's lifecycle hooks — `beforeRequest(ctx)`, `afterRequest(ctx, summary)`, `onError(error, ctx)`, where `ctx = { kind: 'check' | 'list' | 'lookupSubjects' | 'lookupResources', callId, args }` — and emits `request:start` / `request:end` / `request:error`, `relation:checked` (one per relation or permission checked: `{ callId, kind, resource, relation, subject, allowed }`) and `cache:hit` / `cache:miss` / `cache:error` for tuple-document reads (`kind: 'relation'`). There is no `onError` option here, so a throwing `beforeRequest` always propagates as `KerberosHookError` (the engine converts it under its own `onError` when the resolver serves a relation-backed decision). Through the `relations` seam `callId` is the engine's `kerberosCallId`, so resolver events line up with engine events; standalone calls get a generated id. See [Hooks & events](/guide/hooks) for the full contract.
+
 ## Dynamic tuples (cache-backed)
 
 Exactly like dynamic policies, tuples can live in your cache/store — Kerberos **only reads**; storage, TTL, invalidation and multi-host sync are the backend's job (keyv → cacheable → qified works here too):

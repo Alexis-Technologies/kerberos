@@ -472,6 +472,68 @@ describe('Telemetry wave-2 observability', () => {
     }
   });
 
+  it('counts swallowed hook and event-listener failures under their own sinks', async () => {
+    const { exporter, reader, meter } = createMetricSetup();
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const kerberos = new Kerberos(policies, [], {
+        telemetry: { meter },
+        hooks: {
+          onError() {
+            throw new Error('handler down');
+          },
+          beforeRequest() {
+            throw new Error('veto');
+          },
+        },
+        onError: 'deny',
+      });
+      kerberos.on('request:end', () => {
+        throw new Error('listener down');
+      });
+      assert.equal(await kerberos.isAllowed({ principal, action: 'view', resource }), false);
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    const metrics = await collectMetrics(reader, exporter);
+    const sinks = metrics['kerberos.observability.failures'].dataPoints
+      .map((point) => point.attributes['kerberos.observability.sink'])
+      .sort();
+    assert.deepEqual(sinks, ['events', 'hooks']);
+  });
+
+  it('keeps hooks and events working when every telemetry method throws', async () => {
+    const telemetry = {
+      tracer: {
+        startActiveSpan() {
+          throw new Error('broken tracer');
+        },
+      },
+      meter: {
+        createCounter() {
+          throw new Error('broken meter');
+        },
+        createHistogram() {
+          throw new Error('broken meter');
+        },
+      },
+    };
+    const seen = [];
+    const kerberos = new Kerberos(policies, [], {
+      telemetry,
+      hooks: { beforeRequest: () => seen.push('hook') },
+    });
+    kerberos.on('decision', () => seen.push('event'));
+    kerberos.on('request:end', () => {
+      throw new Error('listener down');
+    });
+    assert.equal(await kerberos.isAllowed({ principal, action: 'view', resource }), true);
+    assert.deepEqual(seen, ['hook', 'event']);
+  });
+
   it('counts fail-closed batch denials on kerberos.decisions', async () => {
     const { exporter, reader, meter } = createMetricSetup();
     const throwingPolicy = {

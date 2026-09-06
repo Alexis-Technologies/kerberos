@@ -11,6 +11,73 @@ import type {
   ValidationOptions,
 } from './index.js';
 
+/** Which public resolver method a hook or event belongs to. */
+export type RelationRequestKind = 'check' | 'list' | 'lookupSubjects' | 'lookupResources';
+
+/**
+ * Context shared by every hook of one resolver call: the method, the
+ * correlation id (the engine's `kerberosCallId` when called through the
+ * `relations` seam, a generated one for standalone calls) and the VALIDATED
+ * arguments object.
+ */
+export type RelationHookContext = { kind: RelationRequestKind; callId: string; args: Record<string, unknown> };
+
+export type RelationRequestSummary = { success: boolean; durationMs: number; error?: unknown };
+
+/**
+ * Resolver lifecycle hooks (request-level only — see the engine's
+ * `KerberosHooks` for the contract). The resolver has no `onError` option, so
+ * a throwing `beforeRequest` / successful-call `afterRequest` always
+ * propagates as `KerberosHookError`; `onError` and a failed call's
+ * `afterRequest` are swallowed. Validated at construction with a `TypeError`
+ * (unknown keys, non-function values), like the engine's option.
+ */
+export type RelationResolverHooks = {
+  beforeRequest?: (ctx: RelationHookContext) => void | Promise<void>;
+  afterRequest?: (ctx: RelationHookContext, summary: RelationRequestSummary) => void | Promise<void>;
+  onError?: (error: unknown, ctx: RelationHookContext) => void | Promise<void>;
+};
+
+export type RelationRequestEventBase = { callId: string; kind: RelationRequestKind };
+export type RelationRequestEndEvent = RelationRequestEventBase & {
+  durationMs: number;
+  success: boolean;
+  error?: string;
+  errorName?: string;
+};
+export type RelationRequestErrorEvent = RelationRequestEventBase & { error: string; errorName?: string };
+export type RelationCheckedEvent = RelationRequestEventBase & {
+  resource: { kind: string; id: string };
+  relation: string;
+  /** Canonical subject string (`'user:u1'`, `'group:eng#member'`). */
+  subject: string;
+  allowed: boolean;
+};
+/** Tuple-document cache reads; `callId` correlates them with the resolver call (null when none). */
+export type RelationCacheEvent = {
+  key: string;
+  kind: 'relation';
+  callId: string | null;
+  error?: string;
+  errorName?: string;
+};
+
+/**
+ * Events emitted by {@link RelationResolver} — same contract as the engine's
+ * events: synchronous, listener failures contained and counted, no `'error'`
+ * event, no public `emit`.
+ */
+export type RelationResolverEvents = {
+  'request:start': (event: RelationRequestEventBase) => void;
+  'request:end': (event: RelationRequestEndEvent) => void;
+  'request:error': (event: RelationRequestErrorEvent) => void;
+  /** One per relation/permission check (`check`; once per name for `list`). */
+  'relation:checked': (event: RelationCheckedEvent) => void;
+  'cache:hit': (event: RelationCacheEvent) => void;
+  'cache:miss': (event: RelationCacheEvent) => void;
+  'cache:error': (event: RelationCacheEvent) => void;
+};
+
 type NonEmptyArray<T> = [T, ...T[]];
 
 /**
@@ -166,6 +233,8 @@ export type RelationResolverOptions = ValidationOptions & {
    * (the fan-out that scales with tuple volume). Unbounded by default.
    */
   maxConcurrency?: number;
+  /** Lifecycle hooks around every public call (see {@link RelationResolverHooks}). */
+  hooks?: RelationResolverHooks | null;
 };
 
 /**
@@ -235,6 +304,12 @@ export class RelationResolver {
     },
     opts?: RelationCallOptions,
   ): Promise<string[]>;
+  /** Subscribes to a resolver event (see {@link RelationResolverEvents}). Chainable; unknown event names are type errors. */
+  on<E extends keyof RelationResolverEvents>(event: E, listener: RelationResolverEvents[E]): this;
+  once<E extends keyof RelationResolverEvents>(event: E, listener: RelationResolverEvents[E]): this;
+  off<E extends keyof RelationResolverEvents>(event: E, listener: RelationResolverEvents[E]): this;
+  removeAllListeners(event?: keyof RelationResolverEvents): this;
+  listenerCount(event: keyof RelationResolverEvents): number;
 }
 
 export class RelationsZodSchemas {

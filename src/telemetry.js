@@ -124,7 +124,7 @@ function createTelemetryWriter(telemetry) {
       observabilityFailuresCounter = meter.createCounter('kerberos.observability.failures', {
         unit: '{failure}',
         description:
-          'Swallowed logger/telemetry sink failures, by kerberos.observability.sink — a non-zero rate means audit or telemetry output is being lost while authorization keeps working',
+          'Swallowed logger/telemetry/hooks/events sink failures, by kerberos.observability.sink — a non-zero rate means audit or telemetry output is being lost while authorization keeps working',
       });
     } catch {
       decisionsCounter = null;
