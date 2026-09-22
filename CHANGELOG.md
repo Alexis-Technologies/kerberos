@@ -5,7 +5,7 @@ All notable changes to **`@alexify/kerberos`** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [4.2.0] - 2026-09-22
 
 Cerbos-parity fixes found by differential testing against a live 0.55.0 PDP
 (policy pairs generated at random, with every disagreement minimized and
@@ -62,6 +62,27 @@ we document rather than copy.
   `kind_sanitize_test.yaml`, `relational_types_test.yaml`) and unit suites
   (`test/RelationalSemantics.test.js`, `test/KindSanitization.test.js`,
   `test/PolicyVersions.test.js`, plus kind rows in `test/Matching.test.js`).
+
+### Upgrading from 4.1
+
+Both behaviour changes below are fixes: they make Kerberos do what v4 already
+claimed — Cerbos-compatible decisions — and one of them closes an
+access-widening gap. They can still change decisions for existing policies, so
+check these before upgrading:
+
+- **Attributes compared as numbers but sent as strings** (query parameters, form
+  fields, some JSON decoders): `R.attr.amount < 1000` with `amount: "500"` used
+  to be `true`; it now raises `KerberosExprError` — `isAllowed` throws under the
+  default `onError: 'throw'`, `checkResources` denies that resource. Coerce at
+  the boundary, or keep the old semantics temporarily with `relational: 'js'` on
+  the codec.
+- **Kind patterns containing `:`** in principal- or role-policy `resource`
+  fields: `doc:*` used to match the kind `doc:x` and now matches no kind at all,
+  exactly as in Cerbos. Search your policies for `resource:` values with a `:`
+  and rewrite them as `doc*` or list the kinds.
+- **Resource policies whose kinds differ only in separators** (`a-b` and `a_b`,
+  `a:b` and `a/b`): they are one resource now, so the constructor throws
+  `Duplicate resource policy` — merge them.
 
 ## [4.1.0] - 2026-09-06
 
@@ -725,6 +746,8 @@ Initial release.
 - In-browser / serverless authorization.
 - Built-in test harness (`Tests`).
 
+[4.2.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v4.2.0
+[4.1.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v4.1.0
 [4.0.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v4.0.0
 [3.1.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v3.1.0
 [3.0.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v3.0.0
