@@ -4,7 +4,7 @@ Kerberos.js supports three policy types:
 
 - **`resourcePolicy`**: selected by `resource.kind`, `resource.policyVersion`, and `resource.scope`
 - **`principalPolicy`**: selected by `principal.id`, `principal.policyVersion`, and `principal.scope`
-- **`rolePolicy`**: selected by each `principal.roles[]`, `principal.policyVersion`, and `principal.scope`
+- **`rolePolicy`**: selected by each `principal.roles[]`, and — like resource policies — `resource.policyVersion` and `resource.scope`
 
 You can pass either type on its own or mix them in the same constructor call:
 

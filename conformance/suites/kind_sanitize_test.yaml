@@ -1,0 +1,122 @@
+---
+name: ResourceKindSanitizationConformance
+description: >-
+  Cerbos runs resource KIND names through `namer.SanitizedResource`
+  (internal/namer/namer.go) on BOTH sides of a comparison — the `resource`
+  field of a policy and the `resource.kind` of the request. For a legacy-shaped
+  name every run of `[^\w.]` becomes `_`, so `gka:b`, `ka-b` and `ka/b` are the
+  kinds `gka_b` and `ka_b` by the time any glob runs. Consequences pinned here:
+  a single `*` appears to cross `:`, a pattern that itself contains `:` matches
+  no kind at all, and different separators name the same resource.
+
+principals:
+  kane:
+    id: kane
+    roles: ['Z']
+  rk_holder:
+    id: p1
+    roles: ['RK']
+  rl_holder:
+    id: p2
+    roles: ['RL']
+
+resources:
+  gka_colon:
+    id: k1
+    kind: 'gka:b'
+    attr: {}
+  gk_colon:
+    id: k2
+    kind: 'gk:x'
+    attr: {}
+  gkx:
+    id: k3
+    kind: gkx
+    attr: {}
+  doc_colon:
+    id: k4
+    kind: 'doc:x'
+    attr: {}
+  doc_underscore:
+    id: k5
+    kind: doc_x
+    attr: {}
+  ka_dash:
+    id: k6
+    kind: 'ka-b'
+    attr: {}
+  ka_underscore:
+    id: k7
+    kind: ka_b
+    attr: {}
+  ka_slash:
+    id: k8
+    kind: 'ka/b'
+    attr: {}
+
+tests:
+  - name: a principal-policy glob reaches kinds whose separators were sanitized away
+    description: >-
+      The rule is `resource: gk*`. `gka:b` and `gk:x` sanitize to `gka_b` and
+      `gk_x`, so the single `*` matches them even though it never crosses `:`.
+    input:
+      principals: [kane]
+      resources: [gka_colon, gk_colon, gkx]
+      actions: [touch]
+    expected:
+      - principal: kane
+        resources: [gka_colon, gk_colon, gkx]
+        actions: { touch: EFFECT_ALLOW }
+
+  - name: a pattern containing ':' matches no kind
+    description: >-
+      The rule is `resource: doc:*`. A pattern with `*` is not a legacy-shaped
+      name, so it is NOT sanitized — and no sanitized kind contains `:`.
+    input:
+      principals: [kane]
+      resources: [doc_colon, doc_underscore]
+      actions: [view]
+    expected:
+      - principal: kane
+        resources: [doc_colon, doc_underscore]
+        actions: { view: EFFECT_DENY }
+
+  - name: separators collapse, so one literal rule covers every spelling
+    description: >-
+      The rule is `resource: ka-b`; `ka-b`, `ka_b` and `ka/b` all sanitize to
+      `ka_b`.
+    input:
+      principals: [kane]
+      resources: [ka_dash, ka_underscore, ka_slash]
+      actions: [edit]
+    expected:
+      - principal: kane
+        resources: [ka_dash, ka_underscore, ka_slash]
+        actions: { edit: EFFECT_ALLOW }
+
+  - name: a resource policy answers every spelling of its kind
+    description: >-
+      The policy declares `resource: ka-b` and also decides requests naming
+      `ka_b` or `ka/b`.
+    input:
+      principals: [rl_holder]
+      resources: [ka_dash, ka_underscore, ka_slash]
+      actions: [view]
+    expected:
+      - principal: rl_holder
+        resources: [ka_dash, ka_underscore, ka_slash]
+        actions: { view: EFFECT_ALLOW }
+
+  - name: a role policy narrows a kind its glob only reaches after sanitization
+    description: >-
+      The resource policy for `gka:b` grants RK both actions; the role policy
+      rule `resource: gk*` allowlists only `touch`, and it applies because the
+      kind is `gka_b` at match time.
+    input:
+      principals: [rk_holder]
+      resources: [gka_colon]
+      actions: [touch, view]
+    expected:
+      - principal: rk_holder
+        resource: gka_colon
+        actions: { touch: EFFECT_ALLOW, view: EFFECT_DENY }

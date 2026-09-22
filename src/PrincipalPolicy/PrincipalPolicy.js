@@ -2,7 +2,7 @@ const { parsePrincipalPolicyShape } = require('./validation');
 const { cloneShapeTree, deepFreeze } = require('../freeze.js');
 
 const { Effect } = require('../schemas');
-const { compileMatcher } = require('../matching.js');
+const { compileKindMatcher, compileMatcher, sanitizeResourceKind } = require('../matching.js');
 const { parseConditions, parseConstants, parseOutputs, parseVariables } = require('../policyParsers.js');
 
 /**
@@ -62,7 +62,7 @@ class PrincipalPolicy {
           actions.push(parsedAction);
         }
         const parsedRule = { ...rule, actions };
-        Object.defineProperty(parsedRule, 'resourceMatcher', { value: compileMatcher([rule.resource]) });
+        Object.defineProperty(parsedRule, 'resourceMatcher', { value: compileKindMatcher(rule.resource) });
         rules.push(parsedRule);
       }
       this.#shape.principalPolicy.rules = rules;
@@ -125,6 +125,9 @@ class PrincipalPolicy {
       variables === undefined ? reqWithConstants : { ...reqWithConstants, variables, V: variables };
 
     const rules = this.rules;
+    // Cerbos compares SANITIZED kind names (see src/matching.js) — computed
+    // once per check, not once per rule.
+    const kind = sanitizeResourceKind(reqWithVariables.R.kind);
 
     for (const action of reqWithVariables.actions) {
       // Replace the per-action effects array + double `includes` with flags.
@@ -138,7 +141,7 @@ class PrincipalPolicy {
 
       for (let i = 0; i < rules.length; i++) {
         const rule = rules[i];
-        if (!rule.resourceMatcher.matches(reqWithVariables.R.kind)) continue;
+        if (!rule.resourceMatcher.matches(kind)) continue;
 
         const actionRules = rule.actions;
         for (let j = 0; j < actionRules.length; j++) {

@@ -23,6 +23,55 @@
 
 const { ALL_ACTIONS } = require('./schemas');
 
+// Cerbos sanitizes resource KIND names before they reach the rule table:
+// `namer.SanitizedResource` (internal/namer/namer.go) replaces every run of
+// `[^\w.]` with `_`, but only for names matching its legacy `oldNamePattern`.
+// Both sides of a kind comparison go through it — the `resource` field of
+// resource/principal/role policies AND the `resource.kind` of the request —
+// so for Cerbos `a-b`, `a/b`, `a@b` and `a:b` are all the same kind `a_b`
+// (two policies spelled that way are a duplicate-definition COMPILE error),
+// and a glob like `gl*` matches the kind `gla:b` because the `:` is gone by
+// the time the pattern runs. A pattern that itself contains `*` never
+// matches the legacy pattern, so it is passed through unchanged — which is
+// why `doc:*` matches NO kind at all in Cerbos.
+//
+// Verified against a live Cerbos 0.55.0 PDP; recorded in
+// conformance/DIVERGENCES.md. Names are ASCII-only in Go's RE2
+// (`[[:alpha:]]` / `[[:word:]]`), which is what `\w` means here too (no `u`
+// flag), so the two regexes match the same strings.
+const LEGACY_KIND_NAME = /^[A-Za-z][\w@.\-/]*(:[A-Za-z][\w@.\-/]*)*$/;
+const NON_IDENTIFIER_CHARS = /[^\w.]+/g;
+// Same class, non-global: `.test()` on a /g regex is stateful (lastIndex).
+const HAS_NON_IDENTIFIER_CHAR = /[^\w.]/;
+
+/**
+ * Cerbos's resource-name sanitization, applied to one kind or one policy
+ * `resource` field. Returns the value unchanged when it is not a legacy-shaped
+ * name (a glob, a name starting with a digit, `a::b`, …).
+ *
+ * @param {string} kind
+ * @returns {string}
+ */
+// One request asks for the same kind several times (the resource-policy
+// lookup, then every principal/role policy along the chain), so the last
+// answer is memoized — a string identity check instead of a regex test. One
+// slot, no eviction policy needed.
+let lastKind;
+let lastSanitizedKind;
+
+function sanitizeResourceKind(kind) {
+  if (kind === lastKind) return lastSanitizedKind;
+  // A kind made only of identifier characters sanitizes to itself, whatever
+  // its shape — one unanchored test, no replace, no allocation.
+  let sanitized = kind;
+  if (typeof kind === 'string' && HAS_NON_IDENTIFIER_CHAR.test(kind) && LEGACY_KIND_NAME.test(kind)) {
+    sanitized = kind.replace(NON_IDENTIFIER_CHARS, '_');
+  }
+  lastKind = kind;
+  lastSanitizedKind = sanitized;
+  return sanitized;
+}
+
 // Escapes regex metacharacters except `*`; `**` crosses `:` segments, a
 // single `*` stays within one.
 function patternToRegExp(pattern) {
@@ -93,4 +142,18 @@ function compileMatcher(patterns) {
   };
 }
 
-module.exports = { compileMatcher, matchesPattern };
+/**
+ * `compileMatcher` for a policy field that names a resource KIND
+ * (principal-policy / role-policy `resource`): the pattern is sanitized the
+ * way Cerbos sanitizes it at compile time. Callers must pass an equally
+ * sanitized kind to `matches()` — use `sanitizeResourceKind` once per
+ * request rather than once per rule.
+ *
+ * @param {string} pattern
+ * @returns {{ matches(value: string): boolean, matchesAny(values: Iterable<string>): boolean }}
+ */
+function compileKindMatcher(pattern) {
+  return compileMatcher([sanitizeResourceKind(pattern)]);
+}
+
+module.exports = { compileKindMatcher, compileMatcher, matchesPattern, sanitizeResourceKind };

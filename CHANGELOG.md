@@ -5,6 +5,85 @@ All notable changes to **`@alexify/kerberos`** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.0] - 2026-09-22
+
+Cerbos-parity fixes found by differential testing against a live 0.55.0 PDP
+(policy pairs generated at random, with every disagreement minimized and
+classified). Two were real bugs on our side; the third is a Cerbos regression
+we document rather than copy.
+
+### Changed
+
+- **Relational operators in `{ $expr }` are strict, like CEL** (potentially
+  breaking, security). `<`, `<=`, `>` and `>=` now compare two numbers, two
+  strings or two booleans and throw `KerberosExprError` for every other pairing,
+  instead of applying JavaScript coercion. Coercion **widened access** whenever
+  an attribute arrived with the wrong type — `"500" < 1000`, `null < 1000`,
+  `[999] < 1000` and `true >= 1` are all `true` in JavaScript, while CEL raises
+  and Cerbos skips the rule. The error follows the engine's `onError` option
+  and, inside a `checkResources` batch, is isolated to a fail-closed
+  `EFFECT_DENY` for that resource. Equality (`==` / `===`) and arithmetic are
+  unchanged. Opt out per codec with `createSafeExprCodec({ jsep, relational:
+  'js' })` (or `codec: { jsep, relational: 'js' }` on the engine).
+
+### Fixed
+
+- **Resource kinds are matched the way Cerbos sanitizes them.** Cerbos runs kind
+  names through `namer.SanitizedResource` on both sides of every comparison —
+  the policy's `resource` field and the request's `resource.kind` — replacing
+  each run of `[^\w.]` with `_` for legacy-shaped names. Kerberos now mirrors it
+  (`sanitizeResourceKind`, computed once per check/plan): a principal- or
+  role-policy glob `gk*` matches the kind `gka:b`, a pattern containing `:`
+  (`doc:*`) matches no kind at all, and `ka-b` / `ka_b` / `ka/b` are one
+  resource — two resource policies spelled that way now throw `Duplicate
+  resource policy` at construction, exactly as Cerbos rejects them at compile
+  time. Principal ids and role names are not sanitized, in either engine.
+
+### Documentation
+
+- **Role policies ride the resource's `policyVersion` and `scope`**, not the
+  principal's — the engine has behaved this way since v4 (matching Cerbos's rule
+  table), but the README and the docs site still described the principal's. Both
+  now carry a "which version applies to what" table covering all four policy
+  kinds, the no-fallback rule and mixed-version requests.
+- **New `DIVERGENCES.md` entry: principal-policy version.** Cerbos 0.41+ selects
+  principal policies by the RESOURCE's `policyVersion` (`check.go` computes
+  `principalVersion` and then queries with `resourceVersion`), contradicting its
+  own documentation, its request shape and its own pre-rule-table engine.
+  Kerberos keeps the documented behaviour; the difference is pinned in both
+  directions by `conformance/suites/principal_version_test.yaml`.
+- The wildcard and expression-language entries in `DIVERGENCES.md` gained the
+  kind-sanitization and strict-comparison tables, both verified against a live
+  PDP.
+
+### Tests
+
+- New conformance suites (`principal_version_test.yaml`,
+  `kind_sanitize_test.yaml`, `relational_types_test.yaml`) and unit suites
+  (`test/RelationalSemantics.test.js`, `test/KindSanitization.test.js`,
+  `test/PolicyVersions.test.js`, plus kind rows in `test/Matching.test.js`).
+
+### Upgrading from 4.1
+
+Both behaviour changes below are fixes: they make Kerberos do what v4 already
+claimed — Cerbos-compatible decisions — and one of them closes an
+access-widening gap. They can still change decisions for existing policies, so
+check these before upgrading:
+
+- **Attributes compared as numbers but sent as strings** (query parameters, form
+  fields, some JSON decoders): `R.attr.amount < 1000` with `amount: "500"` used
+  to be `true`; it now raises `KerberosExprError` — `isAllowed` throws under the
+  default `onError: 'throw'`, `checkResources` denies that resource. Coerce at
+  the boundary, or keep the old semantics temporarily with `relational: 'js'` on
+  the codec.
+- **Kind patterns containing `:`** in principal- or role-policy `resource`
+  fields: `doc:*` used to match the kind `doc:x` and now matches no kind at all,
+  exactly as in Cerbos. Search your policies for `resource:` values with a `:`
+  and rewrite them as `doc*` or list the kinds.
+- **Resource policies whose kinds differ only in separators** (`a-b` and `a_b`,
+  `a:b` and `a/b`): they are one resource now, so the constructor throws
+  `Duplicate resource policy` — merge them.
+
 ## [4.1.0] - 2026-09-06
 
 Lifecycle hooks and events: run your own logic inside the request flow (veto
@@ -13,22 +92,85 @@ both the engine and the built-in relations resolver.
 
 ### Added
 
-- **Lifecycle hooks (`hooks` option).** `beforeRequest(ctx)`, `afterRequest(ctx, summary)`, `beforeResource(ctx, info)`, `afterResource(ctx, info, result)` and `onError(error, ctx)` — awaited user callbacks around every `isAllowed` / `checkResources` / `planResources` call. `ctx` (one frozen object per request) carries the request kind, the `kerberosCallId`, the validated arguments and `enriched`; `info` and `result` are frozen views; `summary` reports `success`/`durationMs`/`error`/`failClosed`/`enriched`. Error contract: a throwing `beforeRequest`/`beforeResource`/`afterResource` (or a successful request's `afterRequest`) vetoes as `KerberosHookError` and follows `onError` (`'deny'` fails closed; inside a batch a per-resource hook only fails that resource); `onError`, a failed request's `afterRequest` and a failed resource's `afterResource` are swallowed so they never mask the cause. A failed resource still reaches `afterResource` with its fail-closed result (`reason: 'evaluation-error'`, `errorName`). Malformed arguments fire no hook. Per-resource hooks are the only ones that leave the synchronous evaluation driver (`test/SyncAsyncParity.test.js` pins byte-identical responses either way). Pinned by `test/Hooks.test.js`.
-- **Request enrichment.** `beforeRequest` may return a replacement arguments object: it is re-validated with the method's own validator (plus the method's invariants — a `checkResources` replacement must keep the batch's resource count), evaluated instead of the original, and marked `enriched: true` on the audit entry, the span (`kerberos.request.enriched`), the `decision` / `plan` / `request:end` events and `afterRequest`'s summary. An invalid replacement is the hook's failure (`KerberosHookError`, `cause` = the `KerberosValidationError`). The caller's objects are never modified; any non-object return value keeps the request.
-- **`hooksTimeoutMs`** (engine + resolver, off by default): bounds every awaited hook invocation; on expiry the hook fails as `KerberosHookError { timedOut: true }` and follows that hook's throwing/swallowing rule instead of hanging authorization — the hook counterpart of `relationsTimeoutMs`.
-- **Events.** `kerberos.on/once/off/removeAllListeners/listenerCount` (chainable, no public `emit`): `request:start` / `request:end` / `request:error`, `decision` (one per resource, fail-closed ones marked `reason: 'evaluation-error'`), `plan`, `relations:resolved`, `cache:hit` / `cache:miss` / `cache:error`. Synchronous, fire-and-forget; payloads are fresh identity-only objects (never attribute bags or `Error` instances) stamped with the request's `callId`. A throwing or rejecting listener is contained and can never affect a decision. Unknown event names throw a `TypeError` (a typo cannot register a listener that never fires). The emitter is the package's own platform-neutral class (`src/events.js`) — synchronous listeners cost no promise; the same class on Node.js and in the browser, no `node:events`. Pinned by `test/Events.test.js` and `test/Emitter.test.js`.
-- **`maxListeners`** (engine + resolver, default 10, `0` disables): listener-leak detection — the first subscription past the threshold on one event name logs a warning; never a limit.
-- **Resolver hooks & events.** `RelationResolver` accepts the request-level hooks (`beforeRequest`/`afterRequest`/`onError`, with enrichment and `hooksTimeoutMs`; `KerberosHookError` always propagates — no `onError` option there) and emits `request:*`, `relation:checked` and `cache:*` (`kind: 'relation'`, correlated by the engine's `callId` through the `relations` seam).
-- **`KerberosHookError`** (main entry): `hook` names the failing hook, `cause` carries the original error, `timedOut` flags a `hooksTimeoutMs` expiry.
-- **Observability.** `kerberos.observability.failures` now also counts swallowed `hooks` and `events` failures under `kerberos.observability.sink`; the new `kerberos.hooks.duration` histogram (by `kerberos.hook`) records every awaited hook invocation, so a slow hook is attributable instead of looking like an engine regression.
-- **Types.** `KerberosHooks`, `KerberosHookContext` (discriminated on `reqKind`), `KerberosRequestArgs`, `KerberosRequestSummary`, `KerberosResourceHookInfo`, `KerberosResourceHookResult`, `KerberosEvents` and the typed `on/once/off` overloads (a typo'd event name is a type error); `RelationResolverHooks` / `RelationResolverEvents` on the `/relations` subpath; `IsAllowedArgs` is now a named type.
-- **Bench.** `pnpm bench` gains hooks/events scenarios (a sync `decision` listener, request-level hooks, per-resource hooks).
+- **Lifecycle hooks (`hooks` option).** `beforeRequest(ctx)`, `afterRequest(ctx,
+  summary)`, `beforeResource(ctx, info)`, `afterResource(ctx, info, result)` and
+  `onError(error, ctx)` — awaited user callbacks around every `isAllowed` /
+  `checkResources` / `planResources` call. `ctx` (one frozen object per request)
+  carries the request kind, the `kerberosCallId`, the validated arguments and
+  `enriched`; `info` and `result` are frozen views; `summary` reports
+  `success`/`durationMs`/`error`/`failClosed`/`enriched`. Error contract: a
+  throwing `beforeRequest`/`beforeResource`/`afterResource` (or a successful
+  request's `afterRequest`) vetoes as `KerberosHookError` and follows `onError`
+  (`'deny'` fails closed; inside a batch a per-resource hook only fails that
+  resource); `onError`, a failed request's `afterRequest` and a failed
+  resource's `afterResource` are swallowed so they never mask the cause. A
+  failed resource still reaches `afterResource` with its fail-closed result
+  (`reason: 'evaluation-error'`, `errorName`). Malformed arguments fire no hook.
+  Per-resource hooks are the only ones that leave the synchronous evaluation
+  driver (`test/SyncAsyncParity.test.js` pins byte-identical responses either
+  way). Pinned by `test/Hooks.test.js`.
+- **Request enrichment.** `beforeRequest` may return a replacement arguments
+  object: it is re-validated with the method's own validator (plus the method's
+  invariants — a `checkResources` replacement must keep the batch's resource
+  count), evaluated instead of the original, and marked `enriched: true` on the
+  audit entry, the span (`kerberos.request.enriched`), the `decision` / `plan` /
+  `request:end` events and `afterRequest`'s summary. An invalid replacement is
+  the hook's failure (`KerberosHookError`, `cause` = the
+  `KerberosValidationError`). The caller's objects are never modified; any
+  non-object return value keeps the request.
+- **`hooksTimeoutMs`** (engine + resolver, off by default): bounds every awaited
+  hook invocation; on expiry the hook fails as `KerberosHookError { timedOut:
+  true }` and follows that hook's throwing/swallowing rule instead of hanging
+  authorization — the hook counterpart of `relationsTimeoutMs`.
+- **Events.** `kerberos.on/once/off/removeAllListeners/listenerCount`
+  (chainable, no public `emit`): `request:start` / `request:end` /
+  `request:error`, `decision` (one per resource, fail-closed ones marked
+  `reason: 'evaluation-error'`), `plan`, `relations:resolved`, `cache:hit` /
+  `cache:miss` / `cache:error`. Synchronous, fire-and-forget; payloads are fresh
+  identity-only objects (never attribute bags or `Error` instances) stamped with
+  the request's `callId`. A throwing or rejecting listener is contained and can
+  never affect a decision. Unknown event names throw a `TypeError` (a typo
+  cannot register a listener that never fires). The emitter is the package's own
+  platform-neutral class (`src/events.js`) — synchronous listeners cost no
+  promise; the same class on Node.js and in the browser, no `node:events`.
+  Pinned by `test/Events.test.js` and `test/Emitter.test.js`.
+- **`maxListeners`** (engine + resolver, default 10, `0` disables):
+  listener-leak detection — the first subscription past the threshold on one
+  event name logs a warning; never a limit.
+- **Resolver hooks & events.** `RelationResolver` accepts the request-level
+  hooks (`beforeRequest`/`afterRequest`/`onError`, with enrichment and
+  `hooksTimeoutMs`; `KerberosHookError` always propagates — no `onError` option
+  there) and emits `request:*`, `relation:checked` and `cache:*` (`kind:
+  'relation'`, correlated by the engine's `callId` through the `relations`
+  seam).
+- **`KerberosHookError`** (main entry): `hook` names the failing hook, `cause`
+  carries the original error, `timedOut` flags a `hooksTimeoutMs` expiry.
+- **Observability.** `kerberos.observability.failures` now also counts swallowed
+  `hooks` and `events` failures under `kerberos.observability.sink`; the new
+  `kerberos.hooks.duration` histogram (by `kerberos.hook`) records every awaited
+  hook invocation, so a slow hook is attributable instead of looking like an
+  engine regression.
+- **Types.** `KerberosHooks`, `KerberosHookContext` (discriminated on
+  `reqKind`), `KerberosRequestArgs`, `KerberosRequestSummary`,
+  `KerberosResourceHookInfo`, `KerberosResourceHookResult`, `KerberosEvents` and
+  the typed `on/once/off` overloads (a typo'd event name is a type error);
+  `RelationResolverHooks` / `RelationResolverEvents` on the `/relations`
+  subpath; `IsAllowedArgs` is now a named type.
+- **Bench.** `pnpm bench` gains hooks/events scenarios (a sync `decision`
+  listener, request-level hooks, per-resource hooks).
 
 ### Changed
 
-- The swallowed-sink `console.warn` names the sink (`audit logger` / `lifecycle hook` / `event listener`) and warns once **per sink** instead of once per instance; the engine and the resolver share one implementation of the request lifecycle (`src/lifecycle.js`).
-- `RelationResolver`: standalone calls without `opts.callId` get a generated correlation id on their span, hooks and events when telemetry, hooks or listeners are active; diagnostics-logger failures are now counted under the `logger` sink and warned once (previously silent).
-- Bundle size (`pnpm size`): main entry 31.9 → 35.8 KB min+gzip, `/relations` 16.3 → 19.8 KB.
+- The swallowed-sink `console.warn` names the sink (`audit logger` / `lifecycle
+  hook` / `event listener`) and warns once **per sink** instead of once per
+  instance; the engine and the resolver share one implementation of the request
+  lifecycle (`src/lifecycle.js`).
+- `RelationResolver`: standalone calls without `opts.callId` get a generated
+  correlation id on their span, hooks and events when telemetry, hooks or
+  listeners are active; diagnostics-logger failures are now counted under the
+  `logger` sink and warned once (previously silent).
+- Bundle size (`pnpm size`): main entry 31.9 → 35.8 KB min+gzip, `/relations`
+  16.3 → 19.8 KB.
 
 ## [4.0.0] - 2026-08-30
 
@@ -604,6 +746,8 @@ Initial release.
 - In-browser / serverless authorization.
 - Built-in test harness (`Tests`).
 
+[4.2.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v4.2.0
+[4.1.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v4.1.0
 [4.0.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v4.0.0
 [3.1.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v3.1.0
 [3.0.0]: https://github.com/Alexis-Technologies/kerberos/releases/tag/v3.0.0

@@ -746,6 +746,13 @@ export type PolicyCodec = {
   deserialize?(jsonSafe: unknown): unknown;
   compileExpr?(expr: string): (ctx: Record<string, unknown>) => unknown;
   isExprDescriptor?(value: unknown): boolean;
+  /**
+   * Semantics of `<`, `<=`, `>`, `>=` inside `{ $expr }` conditions.
+   * `'strict'` (default) follows CEL: two numbers, two strings or two
+   * booleans compare, anything else throws `KerberosExprError` (the request
+   * then follows `onError`). `'js'` restores JavaScript coercion.
+   */
+  relational?: 'strict' | 'js';
   /** Max distinct cached expression ASTs (FIFO eviction). Default 1000. */
   maxCachedExprs?: number;
   /** Max expression string length in characters. Default 4096. */
@@ -1019,6 +1026,13 @@ export type KerberosEvents = {
 export function createSafeExprCodec(options: {
   jsep: (expr: string) => unknown;
   roots?: string[];
+  /**
+   * Semantics of `<`, `<=`, `>`, `>=`. `'strict'` (default) follows CEL:
+   * number/number, string/string and boolean/boolean compare, every other
+   * pairing throws `KerberosExprError` instead of coercing. `'js'` restores
+   * JavaScript coercion (`"500" < 1000` === true).
+   */
+  relational?: 'strict' | 'js';
   /** Max distinct cached expression ASTs (FIFO eviction). Default 1000. */
   maxCachedExprs?: number;
   /** Max expression string length in characters. Default 4096. */

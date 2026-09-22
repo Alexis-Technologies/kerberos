@@ -1,0 +1,80 @@
+---
+name: PrincipalPolicyVersionConformance
+description: >-
+  Which policyVersion selects a PRINCIPAL policy. Kerberos uses
+  `principal.policyVersion`, matching Cerbos's request shape, its documentation
+  and its pre-rule-table engine (<= 0.40). Cerbos 0.41+ regressed and selects
+  principal policies by the RESOURCE's version (check.go computes
+  `principalVersion` but passes `resourceVersion` to the rule-table query), so
+  the two mismatched-version cases below are recorded divergences. When the
+  request names one version on both sides, the engines agree.
+
+principals:
+  vera:
+    id: vera
+    roles: ['Z']
+  vera_v2:
+    id: vera
+    roles: ['Z']
+    policyVersion: v2
+
+resources:
+  verz:
+    id: v1
+    kind: verz
+    attr: {}
+  verz_v2:
+    id: v1
+    kind: verz
+    policyVersion: v2
+    attr: {}
+
+tests:
+  - name: matching versions — default on both sides
+    input:
+      principals: [vera]
+      resources: [verz]
+      actions: [grant, escalate]
+    expected:
+      - principal: vera
+        resource: verz
+        actions: { grant: EFFECT_ALLOW, escalate: EFFECT_DENY }
+
+  - name: matching versions — v2 on both sides
+    input:
+      principals: [vera_v2]
+      resources: [verz_v2]
+      actions: [grant, escalate]
+    expected:
+      - principal: vera_v2
+        resource: verz_v2
+        actions: { grant: EFFECT_DENY, escalate: EFFECT_ALLOW }
+
+  - name: KNOWN DIVERGENCE — principal v2, resource default
+    description: >-
+      Kerberos evaluates principal.vera.vv2 (which allows `escalate`). Cerbos
+      0.55 ignores principal.policyVersion and evaluates principal.vera.vdefault
+      (which allows `grant`).
+    input:
+      principals: [vera_v2]
+      resources: [verz]
+      actions: [grant, escalate]
+    expected:
+      - principal: vera_v2
+        resource: verz
+        actions: { grant: EFFECT_DENY, escalate: EFFECT_ALLOW }
+        cerbosActions: { grant: EFFECT_ALLOW, escalate: EFFECT_DENY }
+
+  - name: KNOWN DIVERGENCE — principal default, resource v2
+    description: >-
+      The mirror image: Kerberos evaluates principal.vera.vdefault, Cerbos
+      picks principal.vera.vv2 because the RESOURCE names v2.
+    input:
+      principals: [vera]
+      resources: [verz_v2]
+      actions: [grant, escalate]
+    expected:
+      - principal: vera
+        resource: verz_v2
+        actions: { grant: EFFECT_ALLOW, escalate: EFFECT_DENY }
+        cerbosActions: { grant: EFFECT_DENY, escalate: EFFECT_ALLOW }
