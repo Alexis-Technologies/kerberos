@@ -63,6 +63,73 @@ const UNARY_OPS = createDispatch({
   typeof: (value) => typeof value,
 });
 
+// CEL-style relational operators (the default). CEL has no cross-type
+// overload for `<`, `<=`, `>`, `>=`: comparing a string with a number, or
+// anything with null / a list / a map, is an evaluation ERROR, while
+// JavaScript would coerce ("500" < 1000, null < 1000, [999] < 1000 and
+// true >= 1 are all true). Coercion WIDENS access whenever an attribute
+// arrives with the wrong type, so policies fail closed here instead: the
+// error surfaces through the engine's `onError` option, exactly like any
+// other condition runtime error. Verified against a live Cerbos 0.55.0 PDP —
+// number/number (int and double mix), string/string (lexicographic) and
+// bool/bool (false < true) are the comparable pairs; see
+// conformance/DIVERGENCES.md. Pass `relational: 'js'` to restore the
+// JavaScript semantics.
+const COMPARABLE_TYPES = new Set(['number', 'string', 'boolean']);
+
+function describeOperand(value) {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'list';
+  const type = typeof value;
+  return type === 'object' ? 'map' : type;
+}
+
+function assertComparable(operator, left, right) {
+  // A MISSING attribute is not a type confusion, and JavaScript already gives
+  // it the outcome CEL's "no such key" error produces in Cerbos: the rule is
+  // not satisfied, whichever way the comparison is written (`undefined < 3`
+  // and `undefined >= 3` are both false). Raising here instead would turn
+  // every policy that reads an optional attribute into an error — including
+  // at plan time, where `P` is fully known and the comparison folds.
+  if (left === undefined || right === undefined) return;
+
+  const leftType = typeof left;
+  const rightType = typeof right;
+  if (leftType !== rightType || !COMPARABLE_TYPES.has(leftType)) {
+    throw new KerberosExprError(
+      `Cannot compare ${describeOperand(left)} with ${describeOperand(right)} using "${operator}" ` +
+        '(relational operators require two numbers, two strings or two booleans)',
+    );
+  }
+}
+
+const STRICT_BINARY_OPS = createDispatch({
+  ...BINARY_OPS,
+  '<': (left, right) => {
+    assertComparable('<', left, right);
+    return left < right;
+  },
+  '>': (left, right) => {
+    assertComparable('>', left, right);
+    return left > right;
+  },
+  '<=': (left, right) => {
+    assertComparable('<=', left, right);
+    return left <= right;
+  },
+  '>=': (left, right) => {
+    assertComparable('>=', left, right);
+    return left >= right;
+  },
+});
+
+const RELATIONAL_MODES = createDispatch({ strict: STRICT_BINARY_OPS, js: BINARY_OPS });
+const DEFAULT_RELATIONAL = 'strict';
+
+function resolveBinaryOps(relational) {
+  return RELATIONAL_MODES[relational ?? DEFAULT_RELATIONAL] ?? STRICT_BINARY_OPS;
+}
+
 const ALLOWED_BINARY_OPS = new Set([...SHORT_CIRCUIT_OPS, ...Object.keys(BINARY_OPS)]);
 
 const ALLOWED_UNARY_OPS = new Set(Object.keys(UNARY_OPS));
@@ -364,7 +431,7 @@ function evalBinary(node, ctx, config) {
     return left === null || left === undefined ? evalNode(node.right, ctx, config) : left;
   }
 
-  const handler = BINARY_OPS[operator];
+  const handler = (config.binaryOps ?? STRICT_BINARY_OPS)[operator];
   if (!handler) throw new KerberosExprError(`Operator "${operator}" is not allowed`);
 
   const left = evalNode(node.left, ctx, config);
@@ -579,7 +646,15 @@ function deepTransform(value, handlers) {
  *   deserialize: (jsonSafe: unknown) => unknown,
  * }}
  */
-function createSafeExprCodec({ jsep, roots, maxCachedExprs, maxExprLength, maxDepth, maxBuiltStringLength } = {}) {
+function createSafeExprCodec({
+  jsep,
+  roots,
+  relational,
+  maxCachedExprs,
+  maxExprLength,
+  maxDepth,
+  maxBuiltStringLength,
+} = {}) {
   if (!jsep || typeof jsep !== 'function') {
     throw new KerberosExprError(
       'createSafeExprCodec({ jsep }) requires a pre-configured jsep instance. ' +
@@ -590,9 +665,17 @@ function createSafeExprCodec({ jsep, roots, maxCachedExprs, maxExprLength, maxDe
     );
   }
 
+  if (relational !== undefined && !RELATIONAL_MODES[relational]) {
+    throw new KerberosExprError(
+      `createSafeExprCodec({ relational }) must be 'strict' or 'js', got ${JSON.stringify(relational)}`,
+    );
+  }
+  const relationalMode = relational ?? DEFAULT_RELATIONAL;
+
   const config = {
     roots: new Set(roots || DEFAULT_ROOTS),
     maxBuiltStringLength: maxBuiltStringLength ?? DEFAULT_LIMITS.maxBuiltStringLength,
+    binaryOps: RELATIONAL_MODES[relationalMode],
   };
   const limits = {
     maxCachedExprs: maxCachedExprs ?? DEFAULT_LIMITS.maxCachedExprs,
@@ -604,7 +687,7 @@ function createSafeExprCodec({ jsep, roots, maxCachedExprs, maxExprLength, maxDe
     const ast = parseExpr(expr, jsep, limits);
     const fn = (ctx) => evalNode(ast, ctx, config);
     Object.defineProperty(fn, EXPR_META, {
-      value: Object.freeze({ expr, ast, roots: config.roots }),
+      value: Object.freeze({ expr, ast, roots: config.roots, relational: relationalMode }),
     });
     return fn;
   }
@@ -648,12 +731,13 @@ function createSafeExprCodec({ jsep, roots, maxCachedExprs, maxExprLength, maxDe
  *
  * @param {Record<string, unknown>} node
  * @param {Record<string, unknown>} ctx
- * @param {{ roots?: Iterable<string> | Set<string> }} [options]
+ * @param {{ roots?: Iterable<string> | Set<string>, relational?: 'strict' | 'js' }} [options]
  * @returns {unknown}
  */
-function evalExprAst(node, ctx, { roots, maxBuiltStringLength } = {}) {
+function evalExprAst(node, ctx, { roots, relational, maxBuiltStringLength } = {}) {
   const config = {
     roots: roots instanceof Set ? roots : new Set(roots || DEFAULT_ROOTS),
+    binaryOps: resolveBinaryOps(relational),
     maxBuiltStringLength: maxBuiltStringLength ?? DEFAULT_LIMITS.maxBuiltStringLength,
   };
   return evalNode(node, ctx, config);

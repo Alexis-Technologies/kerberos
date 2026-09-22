@@ -13,6 +13,9 @@ Instead, the built-in codec (`createSafeExprCodec({ jsep })`) uses an **AST allo
 3. Identifiers resolve **only** against the `{ P, R, V, C }` context and curated safe builtins (`Math`, `Date`, `parseInt`, `parseFloat`, ... — so `constructor`, `process`, `require`, `globalThis` simply do not exist as roots). Member keys `__proto__` / `prototype` / `constructor` are blocked at the interpreter level regardless of how they are written. Method calls are limited to a whitelist of safe helpers on string/array/number/`Date` values, plus `Math.*` / `Date.*` static methods. Only `new Date(...)` is permitted as a constructor.
 4. This keeps remote policies expressive (comparisons, logic, ternaries, member access, object/array literals, time windows via `Date`, numeric helpers via `Math`, parsing via `parseInt`/`parseFloat`) while remaining non-Turing-complete and safe to load from a shared store.
 
+**Comparisons are strict.** `<`, `<=`, `>` and `>=` compare two numbers, two strings or two booleans; every other pairing throws `KerberosExprError` instead of applying JavaScript's coercion, which would let a wrongly-typed attribute widen access (`"500" < 1000`, `null < 1000`, `[999] < 1000` and `true >= 1` are all `true` in plain JavaScript). This matches CEL, so imported Cerbos policies behave the same in both engines; the error then follows the engine's `onError` option, and inside a `checkResources` batch it is isolated to a fail-closed `EFFECT_DENY` for that resource. Equality and arithmetic are unchanged. Pass `createSafeExprCodec({ jsep, relational: 'js' })` to restore the old coercing behaviour.
+
+
 **`jsep` is not bundled** — you install it separately and pass the pre-configured instance, the same way you pass `ajv` for schema validation. This keeps `@alexify/kerberos` itself zero-dependency.
 
 ```javascript

@@ -203,7 +203,7 @@ Kerberos.js supports three policy types:
 
 - **`resourcePolicy`**: selected by `resource.kind`, `resource.policyVersion`, and `resource.scope`
 - **`principalPolicy`**: selected by `principal.id`, `principal.policyVersion`, and `principal.scope`
-- **`rolePolicy`**: selected by each `principal.roles[]`, `principal.policyVersion`, and `principal.scope`
+- **`rolePolicy`**: selected by each `principal.roles[]`, and — like resource policies — `resource.policyVersion` and `resource.scope`
 
 You can pass either type on its own or mix them in the same constructor call:
 
@@ -388,9 +388,9 @@ Policy selection depends on the policy type:
   - `principal.policyVersion` (defaults to `'default'` when omitted)
   - `principal.scope`
 - **`RolePolicy`**
-  - each `principal.roles[]` entry
-  - `principal.policyVersion` (defaults to `'default'` when omitted)
-  - `principal.scope`
+  - each `principal.roles[]` entry (plus every `parentRoles` ancestor)
+  - `resource.policyVersion` (defaults to `'default'` when omitted)
+  - `resource.scope`
 
 Scope behavior follows the Cerbos-style model:
 
@@ -398,7 +398,24 @@ Scope behavior follows the Cerbos-style model:
 - If `scope` **is** provided, Kerberos.js searches from the most specific scope to the least specific scope, and finally falls back to the base policy.
 - Example search chain for `scope: 'acme.corp'`: `acme.corp -> acme -> ''`
 
-When both policy types are loaded, Kerberos first resolves principal overrides using the principal scope/version chain and then falls back to resource policy lookup when the principal policy is not applicable for a given action.
+When both policy types are loaded, Kerberos first resolves principal overrides using the principal's scope/version chain, and falls back to the resource layer — resource policies and role policies, both keyed by the resource's version and scope — when no principal policy decides the action.
+
+### Which version applies to what
+
+| Policy            | Looked up by                                          | Version                   | Scope chain       |
+| ----------------- | ----------------------------------------------------- | ------------------------- | ----------------- |
+| `resourcePolicy`  | `resource.kind`                                       | `resource.policyVersion`  | `resource.scope`  |
+| `principalPolicy` | `principal.id`                                        | `principal.policyVersion` | `principal.scope` |
+| `rolePolicy`      | each `principal.roles[]` (+ `parentRoles` ancestors)  | `resource.policyVersion`  | `resource.scope`  |
+| `derivedRoles`    | name, from the resource policy's `importDerivedRoles` | — (unversioned)           | —                 |
+
+Three consequences:
+
+- The version is **fixed along the whole scope chain** — the walk never crosses versions — and there is **no fallback**: asking for a version no policy carries resolves to nothing rather than to `'default'`.
+- A request may mix versions. `principal.policyVersion: 'v2'` with an unversioned resource evaluates the principal policy at `v2` and the resource/role layer at `'default'`.
+- In `checkResources` the principal chain is resolved once per batch while every resource uses its own `policyVersion`; `planResources` echoes the resource's version back as `policyVersion`.
+
+Cerbos 0.41+ differs here: it selects principal policies by the **resource's** version, a regression against its own documentation and its pre-0.41 engine. When the same policies are served by both engines, send the same value in both fields. See [DIVERGENCES.md](https://github.com/Alexis-Technologies/kerberos/blob/main/conformance/DIVERGENCES.md).
 
 ### How the scope chain is evaluated
 
@@ -415,6 +432,8 @@ Which scope drives which policy type: **resource policies and role policies** wa
 
 Name fields glob, exactly as in Cerbos: a bare `*` matches anything; in any other pattern `*` matches within a single `:`-delimited segment (`view:*` matches `view:public` but neither the bare `view` nor `view:a:b`), and `**` crosses segments. Globs work in resource-policy `actions` and `roles`, principal-policy `resource` and `action`, role-policy `resource` and `allowActions`, and derived-role `parentRoles`. `rules[].derivedRoles` references are exact names — Cerbos's schema rejects globs there too.
 
+Resource **kind** names are compared after Cerbos's own sanitization (`namer.SanitizedResource`): for a name shaped like `foo`, `foo:bar`, `foo-bar` or `foo/bar`, every run of characters outside `[A-Za-z0-9_.]` becomes `_` — on the policy field and on `resource.kind` alike. So `gk*` does match the kind `gka:b` (which is `gka_b` at match time), `doc:*` matches no kind at all (a pattern is never sanitized, and no sanitized kind keeps a `:`), and `ka-b`, `ka_b` and `ka/b` are one and the same resource — declaring policies for two of those spellings throws `Duplicate resource policy`. Principal ids and role names are not sanitized.
+
 
 Example:
 
@@ -423,8 +442,8 @@ const results = await kerberos.checkResources({
   reqId: 'test-request',
   principal: {
     id: 'alice',
-    policyVersion: '20210210',  // Optional: available in request context and logs
-    scope: 'acme.corp',         // Optional: available in request context and logs
+    policyVersion: '20210210',  // Optional: selects the principal policy version
+    scope: 'acme.corp',         // Optional: principal policy scope chain
     roles: ['employee'],
     attr: {
       department: 'accounting',
@@ -1244,6 +1263,9 @@ Instead, the built-in codec (`createSafeExprCodec({ jsep })`) uses an **AST allo
 2. Evaluation walks the AST per request with a strict allowlist — no `eval`, no `new Function`, no recompilation.
 3. Identifiers resolve **only** against the `{ P, R, V, C }` context and curated safe builtins (`Math`, `Date`, `parseInt`, `parseFloat`, ... — so `constructor`, `process`, `require`, `globalThis` simply do not exist as roots). Member keys `__proto__` / `prototype` / `constructor` are blocked at the interpreter level regardless of how they are written. Method calls are limited to a whitelist of safe helpers on string/array/number/`Date` values, plus `Math.*` / `Date.*` static methods. Only `new Date(...)` is permitted as a constructor.
 4. This keeps remote policies expressive (comparisons, logic, ternaries, member access, object/array literals, time windows via `Date`, numeric helpers via `Math`, parsing via `parseInt`/`parseFloat`) while remaining non-Turing-complete and safe to load from a shared store.
+
+**Comparisons are strict.** `<`, `<=`, `>` and `>=` compare two numbers, two strings or two booleans; every other pairing throws `KerberosExprError` instead of applying JavaScript's coercion, which would let a wrongly-typed attribute widen access (`"500" < 1000`, `null < 1000`, `[999] < 1000` and `true >= 1` are all `true` in plain JavaScript). This matches CEL, so imported Cerbos policies behave the same in both engines; the error then follows the engine's `onError` option, and inside a `checkResources` batch it is isolated to a fail-closed `EFFECT_DENY` for that resource. Equality and arithmetic are unchanged. Pass `createSafeExprCodec({ jsep, relational: 'js' })` to restore the old coercing behaviour.
+
 
 **`jsep` is not bundled** — you install it separately and pass the pre-configured instance, the same way you pass `ajv` for schema validation. This keeps `@alexify/kerberos` itself zero-dependency.
 

@@ -1,6 +1,6 @@
 const { parseRolePolicyShape } = require('./validation');
 const { cloneShapeTree, deepFreeze } = require('../freeze.js');
-const { compileMatcher } = require('../matching.js');
+const { compileKindMatcher, compileMatcher, sanitizeResourceKind } = require('../matching.js');
 
 const { Effect } = require('../schemas');
 const { parseConditions, parseConstants, parseOutputs, parseVariables } = require('../policyParsers.js');
@@ -52,7 +52,7 @@ class RolePolicy {
         // glob-aware matchers, non-enumerable so they never leak into
         // serialized shapes).
         Object.defineProperty(parsedRule, 'allowActionsMatcher', { value: compileMatcher(rule.allowActions) });
-        Object.defineProperty(parsedRule, 'resourceMatcher', { value: compileMatcher([rule.resource]) });
+        Object.defineProperty(parsedRule, 'resourceMatcher', { value: compileKindMatcher(rule.resource) });
         rules.push(parsedRule);
       }
       this.#shape.rolePolicy.rules = rules;
@@ -129,10 +129,12 @@ class RolePolicy {
       variables === undefined ? reqWithConstants : { ...reqWithConstants, variables, V: variables };
 
     const rules = this.rules;
+    // Kind names are compared sanitized (see src/matching.js).
+    const kind = sanitizeResourceKind(reqWithVariables.R.kind);
     for (const action of reqWithVariables.actions) {
       for (let i = 0; i < rules.length; i++) {
         const rule = rules[i];
-        if (!rule.resourceMatcher.matches(reqWithVariables.R.kind)) continue;
+        if (!rule.resourceMatcher.matches(kind)) continue;
         if (!rule.allowActionsMatcher.matches(action)) continue;
 
         const isConditionFulfilled = rule.condition ? rule.condition.isFulfilled(reqWithVariables) : true;
@@ -177,6 +179,8 @@ class RolePolicy {
       variables === undefined ? reqWithConstants : { ...reqWithConstants, variables, V: variables };
 
     const rules = this.rules;
+    // Kind names are compared sanitized (see src/matching.js).
+    const kind = sanitizeResourceKind(reqWithVariables.R.kind);
 
     for (const action of reqWithVariables.actions) {
       let matchedResource = false;
@@ -187,7 +191,7 @@ class RolePolicy {
 
       for (let i = 0; i < rules.length; i++) {
         const rule = rules[i];
-        if (!rule.resourceMatcher.matches(reqWithVariables.R.kind)) continue;
+        if (!rule.resourceMatcher.matches(kind)) continue;
 
         matchedResource = true;
         if (!rule.allowActionsMatcher.matches(action)) continue;

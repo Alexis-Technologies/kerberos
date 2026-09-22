@@ -1,0 +1,95 @@
+---
+name: RelationalTypeConformance
+description: >-
+  Relational operators over wrongly-typed attributes. CEL has no cross-type
+  overload for `<`, `<=`, `>`, `>=`: the comparison raises, Cerbos treats the
+  condition as not satisfied and the ALLOW rule never fires. Kerberos's `$expr`
+  interpreter compares strictly for the same reason (JavaScript coercion would
+  make `"500" < 1000` true and WIDEN access); the error surfaces per `onError`
+  and inside a checkResources batch it is isolated to a fail-closed
+  EFFECT_DENY. Both engines therefore deny — this suite pins that they stay
+  aligned, and the control case proves the rule still fires for sound input.
+
+principals:
+  cleared:
+    id: ivy
+    roles: ['USER']
+    attr:
+      clearance: 4
+  cleared_as_string:
+    id: ivy
+    roles: ['USER']
+    attr:
+      clearance: '4'
+  cleared_as_list:
+    id: ivy
+    roles: ['USER']
+    attr:
+      clearance: [4]
+
+resources:
+  amount_ok:
+    id: e1
+    kind: expense
+    attr:
+      ownerId: ivy
+      amount: 999
+  amount_string:
+    id: e2
+    kind: expense
+    attr:
+      ownerId: ivy
+      amount: '500'
+  amount_bool:
+    id: e3
+    kind: expense
+    attr:
+      ownerId: ivy
+      amount: true
+  amount_list:
+    id: e4
+    kind: expense
+    attr:
+      ownerId: ivy
+      amount: [999]
+  amount_null:
+    id: e5
+    kind: expense
+    attr:
+      ownerId: ivy
+      amount: null
+
+tests:
+  - name: control — both operands well typed, the rule fires
+    input:
+      principals: [cleared]
+      resources: [amount_ok]
+      actions: [approve]
+    expected:
+      - principal: cleared
+        resource: amount_ok
+        actions: { approve: EFFECT_ALLOW }
+
+  - name: a resource attribute of the wrong type never widens access
+    description: >-
+      `R.attr.amount < 1000` with amount as a string, a boolean, a list or
+      null. Neither engine compares across types.
+    input:
+      principals: [cleared]
+      resources: [amount_string, amount_bool, amount_list, amount_null]
+      actions: [approve]
+    expected:
+      - principal: cleared
+        resources: [amount_string, amount_bool, amount_list, amount_null]
+        actions: { approve: EFFECT_DENY }
+
+  - name: a principal attribute of the wrong type never widens access
+    description: '`P.attr.clearance >= 3` with clearance as a string or a list.'
+    input:
+      principals: [cleared_as_string, cleared_as_list]
+      resources: [amount_ok]
+      actions: [approve]
+    expected:
+      - principals: [cleared_as_string, cleared_as_list]
+        resource: amount_ok
+        actions: { approve: EFFECT_DENY }

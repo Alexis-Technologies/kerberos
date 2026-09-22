@@ -1,0 +1,17 @@
+apiVersion: api.cerbos.dev/v1
+principalPolicy:
+  principal: kane
+  version: default
+  rules:
+    - resource: 'gk*'
+      actions:
+        - action: touch
+          effect: EFFECT_ALLOW
+    - resource: 'doc:*'
+      actions:
+        - action: view
+          effect: EFFECT_ALLOW
+    - resource: 'ka-b'
+      actions:
+        - action: edit
+          effect: EFFECT_ALLOW

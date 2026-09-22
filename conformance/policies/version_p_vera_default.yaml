@@ -1,0 +1,9 @@
+apiVersion: api.cerbos.dev/v1
+principalPolicy:
+  principal: vera
+  version: default
+  rules:
+    - resource: verz
+      actions:
+        - action: grant
+          effect: EFFECT_ALLOW

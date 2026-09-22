@@ -32,6 +32,7 @@ const {
 const { createAttributeSchemaRegistry, validateRequestAttributes } = require('./attributeSchemas.js');
 const { createLimiter, settleAll, withTimeout } = require('./async.js');
 const { createSafeExprCodec } = require('./caching/codec.js');
+const { sanitizeResourceKind } = require('./matching.js');
 const { PlanKind, countLeaves, toDebugString, toFilter } = require('./planning/nodes.js');
 const { buildResourcePlan } = require('./planning/planner.js');
 const { evaluateDecisionLayer } = require('./decision.js');
@@ -549,6 +550,7 @@ class Kerberos {
     } else if (codec?.jsep) {
       const builtinCodec = createSafeExprCodec({
         jsep: codec.jsep,
+        relational: codec.relational,
         maxCachedExprs: codec.maxCachedExprs,
         maxExprLength: codec.maxExprLength,
         maxDepth: codec.maxDepth,
@@ -704,7 +706,11 @@ class Kerberos {
         continue;
       }
 
-      const key = `${handledPolicy.kind}.${handledPolicy.version}.${Kerberos.normalizeScope(handledPolicy.scope)}`;
+      // Kind names are keyed sanitized, like Cerbos's policy FQNs: `a-b` and
+      // `a_b` are the same resource there (and a duplicate-definition compile
+      // error), so they must not silently shadow each other here.
+      const kind = sanitizeResourceKind(handledPolicy.kind);
+      const key = `${kind}.${handledPolicy.version}.${Kerberos.normalizeScope(handledPolicy.scope)}`;
       if (resourcePolicies.has(key)) throw new Error(`Duplicate resource policy "${key}"`);
       resourcePolicies.set(key, handledPolicy);
     }
@@ -1112,7 +1118,7 @@ class Kerberos {
     return this.#resolvePolicyChain(
       'resource',
       this.#resourcePolicies,
-      req.R.kind,
+      sanitizeResourceKind(req.R.kind),
       version,
       req.R.scope,
       ResourcePolicy,
@@ -1121,6 +1127,13 @@ class Kerberos {
     );
   }
 
+  // Principal policies ride the PRINCIPAL's own scope chain and
+  // policyVersion — what Cerbos's API shape, its docs and its pre-rule-table
+  // engine (<= 0.40) all do. Cerbos 0.41+ regressed: check.go computes
+  // `principalVersion` but passes `resourceVersion` to the rule-table query,
+  // so a live 0.55 PDP selects principal policies by the RESOURCE's version.
+  // Kerberos keeps the documented behaviour; the difference is catalogued in
+  // conformance/DIVERGENCES.md.
   #getPrincipalPolicyChain(req, trace, lookups) {
     const version = req.P.policyVersion ?? DEFAULT_VERSION;
     return this.#resolvePolicyChain(
@@ -1609,7 +1622,7 @@ class Kerberos {
       this.#resolvePolicyChainFromMemory(
         'resource',
         this.#resourcePolicies,
-        req.R.kind,
+        sanitizeResourceKind(req.R.kind),
         req.R.policyVersion ?? DEFAULT_VERSION,
         req.R.scope,
         trace,
@@ -1640,7 +1653,7 @@ class Kerberos {
       resourceChain = this.#resolvePolicyChainFromMemory(
         'resource',
         this.#resourcePolicies,
-        req.R.kind,
+        sanitizeResourceKind(req.R.kind),
         req.R.policyVersion ?? DEFAULT_VERSION,
         req.R.scope,
         trace,

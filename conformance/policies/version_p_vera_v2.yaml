@@ -1,0 +1,9 @@
+apiVersion: api.cerbos.dev/v1
+principalPolicy:
+  principal: vera
+  version: v2
+  rules:
+    - resource: verz
+      actions:
+        - action: escalate
+          effect: EFFECT_ALLOW

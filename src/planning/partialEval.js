@@ -148,9 +148,13 @@ function createExprPlanner({ principal, resource, actions, constants, variables 
 
   // Source of the $expr currently being planned; stamped onto opaque nodes.
   let currentSrc = '';
+  // Relational mode of the codec that compiled the $expr currently being
+  // planned — folding must use the SAME comparison semantics the runtime
+  // would, or a plan could allow what a check denies (and vice versa).
+  let currentRelational;
 
   function evalConst(node) {
-    return evalExprAst(node, ctx);
+    return evalExprAst(node, ctx, { relational: currentRelational });
   }
 
   function variablePlan(name) {
@@ -161,14 +165,17 @@ function createExprPlanner({ principal, resource, actions, constants, variables 
       plan = constPV(undefined); // undeclared variable: V.<name> is undefined at runtime too
     } else if (fn[EXPR_META]) {
       const outerSrc = currentSrc;
+      const outerRelational = currentRelational;
       const wasPlanning = planningVariable;
       planningVariable = true;
       currentSrc = fn[EXPR_META].expr;
+      currentRelational = fn[EXPR_META].relational;
       try {
         plan = planValue(fn[EXPR_META].ast);
       } finally {
         planningVariable = wasPlanning;
         currentSrc = outerSrc;
+        currentRelational = outerRelational;
       }
     } else {
       // Plain JS function: run it against the known context; touching an
@@ -504,11 +511,14 @@ function createExprPlanner({ principal, resource, actions, constants, variables 
     const meta = fn[EXPR_META];
     if (!meta) return opaqueNode(describeFn(fn), 'js-function');
     const outerSrc = currentSrc;
+    const outerRelational = currentRelational;
     currentSrc = meta.expr;
+    currentRelational = meta.relational;
     try {
       return planBool(meta.ast);
     } finally {
       currentSrc = outerSrc;
+      currentRelational = outerRelational;
     }
   }
 
