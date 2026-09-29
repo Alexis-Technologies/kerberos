@@ -2218,3 +2218,254 @@ describe('RelationResolver lookup edge cases', () => {
     assert.deepEqual([...granted].sort(), ['edit', 'view']);
   });
 });
+
+describe('RelationResolver — sharing unfinished subproblems', () => {
+  const { RelationResolver } = require('../src/Relations/index.js');
+
+  /** mulberry32 — tiny deterministic PRNG (same as test/Fuzz.test.js). */
+  function createRandom(seed) {
+    let state = seed >>> 0;
+    return () => {
+      state = (state + 0x6d2b79f5) >>> 0;
+      let t = state;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // Fails the test instead of hanging it if a shared wait ever deadlocks.
+  function withinDeadline(promise, ms = 2000) {
+    let timer;
+    const deadline = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`still pending after ${ms} ms — deadlock?`)), ms);
+    });
+    return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+  }
+
+  async function outcome(promise) {
+    try {
+      return { value: await promise };
+    } catch (error) {
+      return { error };
+    }
+  }
+
+  const groupSchema = (caveats = undefined) => ({
+    relationSchema: {
+      ...(caveats ? { caveats } : {}),
+      definitions: {
+        user: {},
+        group: {
+          relations: { member: ['user', 'group#member', ...(caveats ? [{ type: 'user', caveat: 'counted' }] : [])] },
+        },
+        folder: {
+          relations: { parent: ['folder'], viewer: ['user', 'group#member'] },
+          permissions: { view: { anyOf: ['viewer', { via: 'parent', permission: 'view' }] } },
+        },
+        document: {
+          relations: { parent: ['folder'], viewer: ['user', 'group#member'] },
+          permissions: { view: { anyOf: ['viewer', { via: 'parent', permission: 'view' }] } },
+        },
+      },
+    },
+  });
+
+  it('computes a subproblem shared by concurrent checks once', async () => {
+    let evaluations = 0;
+    const relations = new RelationResolver({
+      schema: groupSchema({
+        counted: {
+          match: () => {
+            evaluations += 1;
+            return true;
+          },
+        },
+      }),
+      tuples: [
+        { resource: 'group:eng', relation: 'member', subject: 'user:u', caveat: { name: 'counted' } },
+        ...[1, 2, 3, 4, 5].map((i) => `document:d${i}#viewer@group:eng#member`),
+      ],
+    });
+
+    const memo = new Map();
+    const results = await withinDeadline(
+      Promise.all(
+        [1, 2, 3, 4, 5].map((i) =>
+          relations.check({ resource: `document:d${i}`, permission: 'view', subject: 'user:u' }, { memo }),
+        ),
+      ),
+    );
+    assert.deepEqual(results, [true, true, true, true, true]);
+    assert.equal(evaluations, 1);
+  });
+
+  it('shares work across the resources of an engine batch', async () => {
+    let evaluations = 0;
+    const relations = new RelationResolver({
+      schema: groupSchema({
+        counted: {
+          match: () => {
+            evaluations += 1;
+            return true;
+          },
+        },
+      }),
+      tuples: [
+        { resource: 'group:eng', relation: 'member', subject: 'user:u', caveat: { name: 'counted' } },
+        ...[1, 2, 3, 4, 5].map((i) => `document:d${i}#viewer@group:eng#member`),
+      ],
+    });
+    const { Effect, Kerberos } = require('../src/index.js');
+    const kerberos = new Kerberos(
+      [
+        {
+          resourcePolicy: {
+            version: 'default',
+            resource: 'document',
+            importDerivedRoles: ['doc_roles'],
+            rules: [{ actions: ['view'], effect: Effect.Allow, derivedRoles: ['VIEWER'] }],
+          },
+        },
+      ],
+      [{ name: 'doc_roles', definitions: [{ name: 'VIEWER', relation: 'view' }] }],
+      { relations },
+    );
+    const response = await kerberos.checkResources({
+      principal: { id: 'u', roles: ['USER'] },
+      resources: [1, 2, 3, 4, 5].map((i) => ({ resource: { id: `d${i}`, kind: 'document' }, actions: ['view'] })),
+    });
+    assert.ok(response.results.every((result) => result.actions.view === Effect.Allow));
+    assert.equal(evaluations, 1);
+  });
+
+  it('never deadlocks on cycles entered from both ends at once', async () => {
+    const cases = [
+      // a <-> b, nobody is a member: both sides run into the depth guard.
+      { tuples: ['group:a#member@group:b#member', 'group:b#member@group:a#member'], subject: 'user:ghost' },
+      // a <-> b, the member sits in b.
+      {
+        tuples: ['group:a#member@group:b#member', 'group:b#member@group:a#member', 'group:b#member@user:u'],
+        subject: 'user:u',
+      },
+      // the cycle is listed before a matching userset.
+      {
+        tuples: [
+          'group:a#member@group:b#member',
+          'group:b#member@group:a#member',
+          'group:a#member@group:c#member',
+          'group:c#member@user:u',
+        ],
+        subject: 'user:u',
+      },
+      // a self-loop.
+      { tuples: ['group:a#member@group:a#member', 'group:b#member@group:a#member'], subject: 'user:ghost' },
+    ];
+    for (const { tuples, subject } of cases) {
+      const relations = new RelationResolver({ schema: groupSchema(), tuples, maxDepth: 6 });
+      const targets = ['group:a', 'group:b', 'group:a', 'group:b'];
+      const independent = [];
+      for (const resource of targets) {
+        independent.push(await outcome(relations.check({ resource, relation: 'member', subject })));
+      }
+      const memo = new Map();
+      const shared = await withinDeadline(
+        Promise.all(
+          targets.map((resource) => outcome(relations.check({ resource, relation: 'member', subject }, { memo }))),
+        ),
+      );
+      for (let i = 0; i < targets.length; i++) {
+        assert.equal('error' in shared[i], 'error' in independent[i], `${tuples.join(' ')} [${i}]`);
+        assert.equal(shared[i].value, independent[i].value, `${tuples.join(' ')} [${i}]`);
+      }
+    }
+  });
+
+  it('answers from its own budget when the computation it waited on fails', async () => {
+    // X reaches group:k five levels down and runs out of depth inside it; Y
+    // reaches the same subproblem at the top and has budget to spare. Y starts
+    // waiting on X's unfinished group:k (both reads are delayed so the order
+    // is fixed), and must not inherit X's depth error.
+    const delayed = { 'rel:group:k:member': 30, 'rel:document:y:viewer': 10 };
+    const docs = { 'rel:group:k:member': ['group:k2#member'], 'rel:document:y:viewer': ['group:k#member'] };
+    const relations = new RelationResolver({
+      schema: groupSchema(),
+      tuples: [
+        'document:x#parent@folder:f1',
+        'folder:f1#parent@folder:f2',
+        'folder:f2#parent@folder:f3',
+        'folder:f3#viewer@group:k#member',
+        'group:k2#member@group:k3#member',
+        'group:k3#member@user:u',
+      ],
+      cache: { get: (key) => new Promise((resolve) => setTimeout(() => resolve(docs[key]), delayed[key] ?? 0)) },
+      maxDepth: 7,
+    });
+
+    const alone = await outcome(relations.check({ resource: 'document:x', permission: 'view', subject: 'user:u' }));
+    assert.match(alone.error?.message ?? '', /maximum depth of 7/);
+
+    const memo = new Map();
+    const [x, y] = await withinDeadline(
+      Promise.all([
+        outcome(relations.check({ resource: 'document:x', permission: 'view', subject: 'user:u' }, { memo })),
+        outcome(relations.check({ resource: 'document:y', permission: 'view', subject: 'user:u' }, { memo })),
+      ]),
+    );
+    assert.match(x.error?.message ?? '', /maximum depth of 7/);
+    assert.deepEqual(y, { value: true });
+  });
+
+  it('agrees with independent checks on random graphs with cycles, exclusions and intersections', async () => {
+    const schema = {
+      relationSchema: {
+        definitions: {
+          user: {},
+          group: { relations: { member: ['user', 'group#member'] } },
+          doc: {
+            relations: { parent: ['doc'], viewer: ['user', 'group#member'], banned: ['user', 'group#member'] },
+            permissions: {
+              view: { anyOf: ['viewer', { via: 'parent', permission: 'view' }] },
+              safe_view: { exclude: { base: 'view', subtract: ['banned'] } },
+              strict: { allOf: ['viewer', { via: 'parent', permission: 'view' }] },
+            },
+          },
+        },
+      },
+    };
+    const random = createRandom(0x1f11e7);
+    const pick = (items) => items[Math.floor(random() * items.length)];
+    const groups = ['g0', 'g1', 'g2', 'g3', 'g4', 'g5'];
+    const docsIds = ['d0', 'd1', 'd2', 'd3', 'd4', 'd5'];
+    const users = ['u0', 'u1', 'u2', 'u3'];
+    const subjectRef = () => (random() < 0.5 ? `user:${pick(users)}` : `group:${pick(groups)}#member`);
+
+    for (let round = 0; round < 40; round++) {
+      const tuples = new Set();
+      for (let i = 0; i < 10; i++) tuples.add(`group:${pick(groups)}#member@${subjectRef()}`);
+      for (let i = 0; i < 6; i++) tuples.add(`doc:${pick(docsIds)}#parent@doc:${pick(docsIds)}`);
+      for (let i = 0; i < 6; i++) tuples.add(`doc:${pick(docsIds)}#viewer@${subjectRef()}`);
+      for (let i = 0; i < 3; i++) tuples.add(`doc:${pick(docsIds)}#banned@${subjectRef()}`);
+      const relations = new RelationResolver({ schema, tuples: [...tuples], maxDepth: 4 + Math.floor(random() * 9) });
+
+      const queries = [];
+      for (const doc of docsIds) {
+        for (const permission of ['view', 'safe_view', 'strict']) {
+          queries.push({ resource: `doc:${doc}`, permission, subject: `user:${pick(users)}` });
+        }
+      }
+      const independent = [];
+      for (const query of queries) independent.push(await outcome(relations.check(query)));
+      const memo = new Map();
+      const shared = await withinDeadline(
+        Promise.all(queries.map((query) => outcome(relations.check(query, { memo })))),
+      );
+
+      for (let i = 0; i < queries.length; i++) {
+        const label = `round ${round}: ${JSON.stringify(queries[i])}`;
+        if ('value' in independent[i]) assert.deepEqual(shared[i], independent[i], label);
+        if ('error' in shared[i]) assert.ok('error' in independent[i], label);
+      }
+    }
+  });
+});

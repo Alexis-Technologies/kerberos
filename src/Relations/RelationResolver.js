@@ -137,6 +137,44 @@ const {
  * public call + `kerberos.relations.checks` / `kerberos.cache.requests`
  * metrics), guarded so telemetry can never affect resolution.
  */
+// A check subproblem that is still being computed, stored in the decision
+// memo under its `check|` key until it settles — so concurrent checks sharing
+// one memo (the resources of a checkResources batch, a lookupResources
+// verification wave) wait for each other's work instead of repeating it.
+//
+// Waiting on an unfinished subproblem is what used to rule this out: on
+// cyclic data a computation would wait for itself. `waitingOn` records the
+// one record each computation is waiting for at any moment — its own child
+// subproblem, or another computation's in-flight record. Evaluating one
+// subproblem is sequential (union/intersection/exclusion/arrow and userset
+// redispatch all await one child at a time), so every record waits on at
+// most one other and the wait-for graph is a set of chains. Before waiting
+// on a record, the chain from that record is followed: reaching the waiter
+// itself means the wait would close a cycle, and the subproblem is computed
+// directly instead — exactly the pre-sharing behaviour, which runs into the
+// depth guard. Every added edge is checked this way, so the graph never
+// becomes cyclic and a wait can never deadlock.
+class InFlightCheck {
+  /** @type {Promise<boolean> | null} */
+  promise = null;
+
+  /** @type {InFlightCheck | null} */
+  waitingOn = null;
+}
+
+// Bound on the wait-chain walk; the chain is at most as long as the number of
+// unfinished subproblems, so hitting this means something is badly wrong —
+// treat it as a cycle and compute directly rather than wait.
+const MAX_WAIT_CHAIN = 100_000;
+
+function waitWouldCycle(target, waiter) {
+  let steps = 0;
+  for (let node = target; node !== null; node = node.waitingOn) {
+    if (node === waiter || (steps += 1) > MAX_WAIT_CHAIN) return true;
+  }
+  return false;
+}
+
 // Monotonic id per resolver instance — part of the decision-memo scope key so
 // one caller-provided memo Map can never leak decisions across two resolvers
 // (e.g. two tenants with different schemas but identical type/name strings).
@@ -382,29 +420,29 @@ class RelationResolver {
     // reads); `collect` needs every branch, so children resolve as one
     // allSettled wave.
     this.#rewriteEvaluators = createDispatch({
-      ref: (node, resource, subject, session, depth) =>
-        this.#checkInternal(resource, node.name, subject, session, depth - 1),
-      union: async (node, resource, subject, session, depth) => {
+      ref: (node, resource, subject, session, depth, frame) =>
+        this.#checkInternal(resource, node.name, subject, session, depth - 1, frame),
+      union: async (node, resource, subject, session, depth, frame) => {
         for (const child of node.children) {
-          if (await this.#evalRewrite(child, resource, subject, session, depth)) return true;
+          if (await this.#evalRewrite(child, resource, subject, session, depth, frame)) return true;
         }
         return false;
       },
-      intersection: async (node, resource, subject, session, depth) => {
+      intersection: async (node, resource, subject, session, depth, frame) => {
         for (const child of node.children) {
-          if (!(await this.#evalRewrite(child, resource, subject, session, depth))) return false;
+          if (!(await this.#evalRewrite(child, resource, subject, session, depth, frame))) return false;
         }
         return true;
       },
-      exclusion: async (node, resource, subject, session, depth) => {
+      exclusion: async (node, resource, subject, session, depth, frame) => {
         // Base first (order-sensitive); an empty base short-circuits.
-        if (!(await this.#evalRewrite(node.base, resource, subject, session, depth))) return false;
+        if (!(await this.#evalRewrite(node.base, resource, subject, session, depth, frame))) return false;
         for (const subtracted of node.subtract) {
-          if (await this.#evalRewrite(subtracted, resource, subject, session, depth)) return false;
+          if (await this.#evalRewrite(subtracted, resource, subject, session, depth, frame)) return false;
         }
         return true;
       },
-      arrow: async (node, resource, subject, session, depth) => {
+      arrow: async (node, resource, subject, session, depth, frame) => {
         const entries = await this.#readRelationEntries(resource.type, resource.id, node.via, session);
         // Compile guarantees tupleset entries are direct object refs; a false
         // caveat removes the tuple, shrinking the reached object set.
@@ -424,6 +462,7 @@ class RelationResolver {
               subject,
               session,
               depth - 1,
+              frame,
             );
             if (!matched) return false;
           }
@@ -436,6 +475,7 @@ class RelationResolver {
             subject,
             session,
             depth - 1,
+            frame,
           );
           if (matched) return true;
         }
@@ -559,7 +599,14 @@ class RelationResolver {
         this.#assertCheckable(resource.type, name, 'check');
 
         const session = this.#createSession(parsed, opts, run);
-        const allowed = await this.#checkInternal(resource, name, subject, session, this.#limits.maxDepth);
+        const allowed = await this.#checkInternal(
+          resource,
+          name,
+          subject,
+          session,
+          this.#limits.maxDepth,
+          new InFlightCheck(),
+        );
         this.#telemetry.recordRelationCheck(allowed);
         this.#emitRelationChecked(run, resource, name, subject, allowed);
         this.#setSpanAttributes(otel, resource.type, name, {
@@ -601,8 +648,9 @@ class RelationResolver {
 
         const session = this.#createSession(parsed, opts, run);
         const granted = new Set();
+        const root = new InFlightCheck();
         for (const name of names) {
-          const allowed = await this.#checkInternal(resource, name, subject, session, this.#limits.maxDepth);
+          const allowed = await this.#checkInternal(resource, name, subject, session, this.#limits.maxDepth, root);
           this.#telemetry.recordRelationCheck(allowed);
           this.#emitRelationChecked(run, resource, name, subject, allowed);
           if (allowed) granted.add(name);
@@ -1028,7 +1076,7 @@ class RelationResolver {
       // key prefixes (`check|`/`doc|`/...) already keep entries apart, and a
       // private session has exactly one resolver/principal/context.
       const single = new Map();
-      return { shared: single, decisions: single, principal, context, callId };
+      return { shared: single, decisions: single, principal, context, callId, sharesWork: false };
     }
 
     let shared = memo.get(this.#sharedKey);
@@ -1052,7 +1100,8 @@ class RelationResolver {
       memo.set(decisionsKey, decisions);
     }
 
-    return { shared, decisions, principal, context, callId };
+    // A caller memo may be shared by concurrent calls (a checkResources batch).
+    return { shared, decisions, principal, context, callId, sharesWork: true };
   }
 
   // -------------------------------------------------------------------------
@@ -1215,8 +1264,8 @@ class RelationResolver {
   //
   // Uses the singleflight memo (see #memoizeShared): static/empty reads resolve
   // and stay memoized; a cache read that rejects evicts itself. (Check
-  // subproblems memoize completed values only — an in-flight promise there
-  // would deadlock on cyclic data instead of hitting the depth guard.)
+  // subproblems share in-flight work too, through InFlightCheck records and
+  // their cycle-safe wait chains.)
   #readRelationEntries(type, id, relation, session) {
     const docKey = `doc|${type}:${id}#${relation}`;
     return this.#memoizeShared(session, docKey, () => {
@@ -1338,7 +1387,7 @@ class RelationResolver {
   // including userset subjects, and type-wide wildcards) resolve immediately
   // and stay ahead of recursion; userset entries are gathered and redispatched
   // only after every cheap terminal candidate has been ruled out.
-  async #checkDirect(resource, relation, subject, session, depth) {
+  async #checkDirect(resource, relation, subject, session, depth, frame) {
     const entries = await this.#readRelationEntries(resource.type, resource.id, relation, session);
 
     let usersets = null;
@@ -1367,6 +1416,7 @@ class RelationResolver {
           subject,
           session,
           depth - 1,
+          frame,
         );
         if (matched) return true;
       }
@@ -1375,13 +1425,15 @@ class RelationResolver {
     return false;
   }
 
-  #evalRewrite(node, resource, subject, session, depth) {
+  #evalRewrite(node, resource, subject, session, depth, frame) {
     const evaluator = this.#rewriteEvaluators[node.kind];
     if (!evaluator) throw new KerberosRelationsError(`Unsupported rewrite node "${node.kind}"`);
-    return evaluator(node, resource, subject, session, depth);
+    return evaluator(node, resource, subject, session, depth, frame);
   }
 
-  async #checkInternal(resource, name, subject, session, depth) {
+  // `frame` is the caller's record (see InFlightCheck): the computation that is
+  // about to wait for this subproblem.
+  async #checkInternal(resource, name, subject, session, depth, frame) {
     if (depth <= 0) {
       throw new KerberosRelationsError(
         `Relation check exceeded the maximum depth of ${this.#limits.maxDepth} — the relationship graph is recursive or too deep`,
@@ -1395,19 +1447,63 @@ class RelationResolver {
     // #createSession): caveat outcomes depend on them, so a shared memo must
     // never replay a decision computed under a different principal or context.
     const key = `check|${resource.type}:${resource.id}#${name}@${subjectToString(subject)}`;
-    if (session.decisions.has(key)) return session.decisions.get(key);
+    const known = session.decisions.get(key);
+    if (known === true || known === false) return known;
 
-    let result;
-    if (this.#schema.getRelationSubjects(resource.type, name)) {
-      result = await this.#checkDirect(resource, name, subject, session, depth);
-    } else {
-      const node = this.#schema.getPermissionNode(resource.type, name);
-      // A type or name outside the schema simply resolves to no access.
-      result = node ? await this.#evalRewrite(node, resource, subject, session, depth) : false;
+    // A session no other computation can see (a standalone check or list
+    // without a caller memo) is one sequential walk: nothing to share, so
+    // only completed values are memoized.
+    if (!session.sharesWork) {
+      const result = await this.#evaluateCheck(resource, name, subject, session, depth, null);
+      session.decisions.set(key, result);
+      return result;
     }
 
-    session.decisions.set(key, result);
-    return result;
+    frame ??= new InFlightCheck();
+    let registerKey = key;
+    if (known instanceof InFlightCheck) {
+      if (!waitWouldCycle(known, frame)) {
+        frame.waitingOn = known;
+        try {
+          return await known.promise;
+        } catch {
+          // Another computation's failure (its depth budget, a cache error)
+          // is not an answer for this one: compute it with our own budget,
+          // exactly as if the work had never been shared.
+        } finally {
+          frame.waitingOn = null;
+        }
+      }
+      // Waiting would close a cycle (or the shared attempt failed): compute
+      // directly, without registering — the pre-sharing behaviour.
+      registerKey = null;
+    }
+
+    const record = new InFlightCheck();
+    frame.waitingOn = record;
+    if (registerKey !== null) session.decisions.set(registerKey, record);
+    // Assigned before any other computation can run (the evaluation returns
+    // its promise at its first await), so no one ever sees a null promise.
+    record.promise = this.#evaluateCheck(resource, name, subject, session, depth, record);
+    try {
+      const result = await record.promise;
+      if (registerKey !== null) session.decisions.set(registerKey, result);
+      return result;
+    } catch (error) {
+      if (registerKey !== null && session.decisions.get(registerKey) === record) session.decisions.delete(registerKey);
+      throw error;
+    } finally {
+      frame.waitingOn = null;
+    }
+  }
+
+  #evaluateCheck(resource, name, subject, session, depth, frame) {
+    if (this.#schema.getRelationSubjects(resource.type, name)) {
+      return this.#checkDirect(resource, name, subject, session, depth, frame);
+    }
+    const node = this.#schema.getPermissionNode(resource.type, name);
+    // A type or name outside the schema simply resolves to no access.
+    return node ? this.#evalRewrite(node, resource, subject, session, depth, frame) : Promise.resolve(false);
   }
 
   // -------------------------------------------------------------------------
@@ -1596,14 +1692,17 @@ class RelationResolver {
       // check chain per candidate) — the opt-in maxConcurrency limiter applies
       // here so a 100k-candidate lookup cannot launch 100k chains at once.
       const limit = Number.isFinite(this.#limits.maxConcurrency) ? createLimiter(this.#limits.maxConcurrency) : null;
+      // The verification chains run concurrently on this session: let them
+      // share unfinished subproblems.
+      session.sharesWork = true;
       const candidateList = [];
       const checks = [];
       for (const id of candidates) {
         candidateList.push(id);
         checks.push(
           limit
-            ? limit(() => this.#checkInternal({ type, id }, name, subject, session, depth - 1))
-            : this.#checkInternal({ type, id }, name, subject, session, depth - 1),
+            ? limit(() => this.#checkInternal({ type, id }, name, subject, session, depth - 1, new InFlightCheck()))
+            : this.#checkInternal({ type, id }, name, subject, session, depth - 1, new InFlightCheck()),
         );
       }
       const outcomes = await settleAll(checks);
@@ -1664,8 +1763,10 @@ class RelationResolver {
       );
     }
 
-    // Value-memo (completed results only) — an in-flight promise here would
-    // deadlock on cyclic data instead of hitting the depth guard.
+    // Value-memo (completed results only). Unlike check subproblems (see
+    // InFlightCheck), subject collection runs its branches as parallel waves,
+    // so one computation can wait on several others at once and the wait
+    // chains that keep check sharing deadlock-free do not apply here.
     const memoKey = `subjects|${resource.type}:${resource.id}#${name}`;
     if (session.shared.has(memoKey)) return session.shared.get(memoKey);
 
