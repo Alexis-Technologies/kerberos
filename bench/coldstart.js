@@ -12,22 +12,24 @@ const RUNS = Number(process.argv[2]) || 30;
 const ENTRY = path.join(__dirname, '..', 'index.js');
 
 // The child reads the clock before its first require, so Node's own bootstrap
-// is excluded and only the package's cost is measured.
+// is excluded and only the package's cost is measured. It uses
+// process.hrtime rather than performance.now(): loading node:perf_hooks here
+// would hide what the package itself pays for it.
 const CHILD = `
-const { performance } = require('node:perf_hooks');
-const t0 = performance.now();
+const now = () => Number(process.hrtime.bigint()) / 1e6;
+const t0 = now();
 const { Kerberos } = require(${JSON.stringify(ENTRY)});
-const t1 = performance.now();
+const t1 = now();
 const engine = new Kerberos(
   [{ resourcePolicy: { version: 'default', resource: 'expense',
      rules: [{ actions: ['view'], effect: 'EFFECT_ALLOW', roles: ['USER'] }] } }],
   [],
 );
-const t2 = performance.now();
+const t2 = now();
 engine
   .isAllowed({ principal: { id: 'sally', roles: ['USER'] }, action: 'view', resource: { id: 'e1', kind: 'expense' } })
   .then(() => {
-    const t3 = performance.now();
+    const t3 = now();
     process.stdout.write(JSON.stringify({ require: t1 - t0, construct: t2 - t1, firstDecision: t3 - t2, total: t3 - t0 }));
   });
 `;

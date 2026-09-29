@@ -29,18 +29,23 @@ const {
   KerberosRelationsError,
   KerberosValidationError,
 } = require('./errors.js');
-const { createAttributeSchemaRegistry, validateRequestAttributes } = require('./attributeSchemas.js');
 const { createLimiter, settleAll, withTimeout } = require('./async.js');
 const { createSafeExprCodec } = require('./caching/codec.js');
 const { sanitizeResourceKind } = require('./matching.js');
 const { PlanKind, countLeaves, toDebugString, toFilter } = require('./planning/nodes.js');
-const { buildResourcePlan } = require('./planning/planner.js');
 const { evaluateDecisionLayer } = require('./decision.js');
 const { DerivedRoleView, NO_DERIVED_ROLES } = require('./derivedRoleView.js');
 const { createAjvAdapter, parseWithValidation, registerAjvKeywords } = require('./validation');
 // Platform runtime: bundlers swap this for `./runtime/browser.js` via the
 // package.json `browser` field map when targeting the browser.
 const { generateCallId, getNow } = require('./runtime/node.js');
+
+// Loaded on first use rather than at require time: most engines never
+// configure `schemas` or plan a query, and cold start pays for every module.
+let attributeSchemasModule = null;
+const loadAttributeSchemas = () => (attributeSchemasModule ??= require('./attributeSchemas.js'));
+let plannerModule = null;
+const loadPlanner = () => (plannerModule ??= require('./planning/planner.js'));
 
 const EMPTY_ROWS = new Map();
 
@@ -496,7 +501,10 @@ class Kerberos {
     // Attribute-schema enforcement (Cerbos `schemas` parity): compiled once
     // here; null when unset or `enforcement: 'none'` — the evaluation drivers
     // skip the whole feature on a single falsy check.
-    this.#schemas = createAttributeSchemaRegistry(schemas, this.#ajv);
+    this.#schemas =
+      schemas === undefined || schemas === null
+        ? null
+        : loadAttributeSchemas().createAttributeSchemaRegistry(schemas, this.#ajv);
 
     // Backend dispatch happens ONCE (priority mirrors resolveValidationAdapter:
     // Zod → TypeBox+Ajv → JSON Schema+Ajv), then every validator wires through
@@ -1426,7 +1434,7 @@ class Kerberos {
     let resourceChain = null;
     if (this.#schemas) {
       resourceChain = await this.#getResourcePolicyChain(req, trace, lookups);
-      validationErrors = validateRequestAttributes(this.#schemas, resourceChain, req);
+      validationErrors = loadAttributeSchemas().validateRequestAttributes(this.#schemas, resourceChain, req);
       if (validationErrors.length && this.#schemas.enforcement === 'reject') {
         return Kerberos.#invalidAttributesResult(req, trace, validationErrors);
       }
@@ -1738,7 +1746,7 @@ class Kerberos {
         req.R.scope,
         trace,
       );
-      validationErrors = validateRequestAttributes(this.#schemas, resourceChain, req);
+      validationErrors = loadAttributeSchemas().validateRequestAttributes(this.#schemas, resourceChain, req);
       if (validationErrors.length && this.#schemas.enforcement === 'reject') {
         return Kerberos.#invalidAttributesResult(req, trace, validationErrors);
       }
@@ -2368,7 +2376,7 @@ class Kerberos {
           // Dedupes role-closure lookups; only worth it on the cache path.
           this.#cache.enabled ? new Map() : null,
         );
-        const { node } = buildResourcePlan({
+        const { node } = loadPlanner().buildResourcePlan({
           principal: parsedArgs.principal,
           resource: parsedArgs.resource,
           actions,
