@@ -102,31 +102,44 @@ function evaluateDecisionLayer({ req, scopes, settleDerivedRoles = false, collec
   // rules working instead of silently denying.
   const buckets = uniqueRoles.length > 0 ? uniqueRoles : [null];
 
-  // Evaluate each policy once (rules fire per action; outputs are emitted for
-  // every evaluated rule, sealed or not — matching single-policy behavior).
+  // Policies are evaluated lazily, as the walk reaches them: a resource policy
+  // per (scope, action), a role policy the first time a bucket needs its
+  // verdict. A scope that no bucket reaches for an action — because a more
+  // specific scope already decided — is never evaluated, so its conditions
+  // cannot fail the request and its outputs are not emitted (Cerbos's
+  // rule-table walk behaves the same, verified on a live 0.55 PDP). Every
+  // policy the walk does reach is still evaluated once per request.
   let hadSources = false;
   let mostSpecificSrcBase = null;
   const scopeEvals = [];
-  const rowVerdicts = new Map();
   for (const entry of scopes) {
     let resourceEval = null;
     if (entry.resource) {
       hadSources = true;
-      resourceEval = entry.resource.policy.evaluateRules(req, entry.resource.derivedRoles);
+      resourceEval = entry.resource.policy.evaluateLazily(req, entry.resource.derivedRoles, outputs);
       mostSpecificSrcBase ??= resourceEval.srcBase;
-      for (const [src, output] of resourceEval.outputs) outputs.set(src, output);
     }
-    for (const policies of entry.rows.values()) {
-      for (const policy of policies) {
-        if (rowVerdicts.has(policy)) continue;
-        hadSources = true;
-        const verdict = policy.evaluateAllowlist(req);
-        rowVerdicts.set(policy, verdict);
-        for (const [src, output] of verdict.outputs) outputs.set(src, output);
+    if (!hadSources) {
+      for (const policies of entry.rows.values()) {
+        if (policies.length > 0) {
+          hadSources = true;
+          break;
+        }
       }
     }
     scopeEvals.push({ ...entry, resourceEval });
   }
+
+  const rowVerdicts = new Map();
+  const verdictOf = (policy) => {
+    let verdict = rowVerdicts.get(policy);
+    if (verdict === undefined) {
+      verdict = policy.evaluateAllowlist(req);
+      rowVerdicts.set(policy, verdict);
+      for (const [src, output] of verdict.outputs) outputs.set(src, output);
+    }
+    return verdict;
+  };
 
   for (const action of req.actions) {
     let winningAllow = null;
@@ -135,7 +148,7 @@ function evaluateDecisionLayer({ req, scopes, settleDerivedRoles = false, collec
 
     for (const role of buckets) {
       for (const { resourceEval, rows } of scopeEvals) {
-        const perAction = resourceEval?.actions.get(action);
+        const perAction = resourceEval?.action(action);
         if (perAction?.conditionFailed) conditionFailed = true;
 
         // Deny beats allow within the bucket at this scope.
@@ -152,7 +165,7 @@ function evaluateDecisionLayer({ req, scopes, settleDerivedRoles = false, collec
           const rowPolicies = rows.get(role);
           if (rowPolicies) {
             for (const policy of rowPolicies) {
-              const verdict = rowVerdicts.get(policy);
+              const verdict = verdictOf(policy);
               if (verdict.allowed.has(action)) continue;
               if (verdict.conditionFailed.has(action)) conditionFailed = true;
               deny = {

@@ -44,6 +44,8 @@ class ResourcePolicy {
 
   #ruleIndex = null;
 
+  #srcBase = null;
+
   /**
    * @param {unknown} shape
    * @param {object} [options]
@@ -173,8 +175,11 @@ class ResourcePolicy {
    * The policy's `metaSrcBase` — `resource.<kind>.v<version>[/scope]`.
    */
   get srcBase() {
-    const prefix = `resource.${this.kind}.v${this.version}`;
-    return this.scope ? `${prefix}/${this.scope}` : prefix;
+    if (this.#srcBase === null) {
+      const prefix = `resource.${this.kind}.v${this.version}`;
+      this.#srcBase = this.scope ? `${prefix}/${this.scope}` : prefix;
+    }
+    return this.#srcBase;
   }
 
   /**
@@ -183,7 +188,7 @@ class ResourcePolicy {
    * condition held), without resolving conflicts — resolution is the decision
    * walk's job (`src/decision.js`), where this policy is one scope of a chain.
    *
-   * Outputs are built here for every evaluated rule, exactly as before.
+   * Outputs are built here for every evaluated rule.
    *
    * @param {Record<string, unknown>} req
    * @param {Map<string, string[]|null>|Set<string>} derivedRoles - active derived
@@ -199,76 +204,111 @@ class ResourcePolicy {
   evaluateRules(req, derivedRoles) {
     const outputs = new Map();
     const actions = new Map();
-    const metaSrcBase = this.srcBase;
-    const result = { srcBase: metaSrcBase, scope: this.scope ?? '', derivedRoles, outputs, actions };
+    const result = { srcBase: this.srcBase, scope: this.scope ?? '', derivedRoles, outputs, actions };
 
     if (!req.actions?.length) return result;
 
-    // Skip the request copies when the policy declares neither constants nor
-    // variables (the common case): conditions then read `C`/`V` as undefined
-    // either way, and the hot path saves two object spreads per check.
+    const reqWithVariables = this.#prepare(req);
+    for (const action of reqWithVariables.actions) {
+      actions.set(action, this.#evaluateAction(reqWithVariables, action, derivedRoles, outputs));
+    }
+    return result;
+  }
+
+  /**
+   * Lazy form of {@link evaluateRules} for the decision walk: `action(name)`
+   * evaluates that action's rules the first time the walk reaches this scope
+   * for it, and memoizes the result. A scope the walk never reaches — because
+   * a more specific one already decided — is never evaluated: its conditions
+   * do not run and its outputs are not emitted, as in Cerbos. Outputs of the
+   * evaluated rules go straight into `outputs`.
+   *
+   * @param {Record<string, unknown>} req
+   * @param {Map<string, string[]|null>|Set<string>} derivedRoles
+   * @param {Map<string, unknown>} outputs
+   */
+  evaluateLazily(req, derivedRoles, outputs) {
+    let reqWithVariables = null;
+    const actions = new Map();
+    return {
+      srcBase: this.srcBase,
+      scope: this.scope ?? '',
+      derivedRoles,
+      action: (action) => {
+        let perAction = actions.get(action);
+        if (perAction === undefined) {
+          // Constants and variables once per scope, however many actions.
+          reqWithVariables ??= this.#prepare(req);
+          perAction = this.#evaluateAction(reqWithVariables, action, derivedRoles, outputs);
+          actions.set(action, perAction);
+        }
+        return perAction;
+      },
+    };
+  }
+
+  // Skip the request copies when the policy declares neither constants nor
+  // variables (the common case): conditions then read `C`/`V` as undefined
+  // either way, and the hot path saves two object spreads per check.
+  #prepare(req) {
     const constants = this.#shape.resourcePolicy.constants?.get();
     const reqWithConstants = constants === undefined ? req : { ...req, constants, C: constants };
 
     const variables = this.#shape.resourcePolicy.variables?.get(reqWithConstants);
-    const reqWithVariables =
-      variables === undefined ? reqWithConstants : { ...reqWithConstants, variables, V: variables };
+    return variables === undefined ? reqWithConstants : { ...reqWithConstants, variables, V: variables };
+  }
 
+  #evaluateAction(reqWithVariables, action, derivedRoles, outputs) {
+    const perAction = { firedAllows: [], firedDenies: [], conditionFailed: false };
     const principalRoles = reqWithVariables.P.roles ?? [];
     const rules = this.rules;
-    const ruleIndex = this.#ruleIndex;
+    const metaSrcBase = this.srcBase;
 
-    for (const action of reqWithVariables.actions) {
-      const perAction = { firedAllows: [], firedDenies: [], conditionFailed: false };
-      actions.set(action, perAction);
+    // Only the rules that can fire for this action and these roles, in rule
+    // order; the checks below stay as they were.
+    for (const i of this.#ruleIndex.candidates(action, principalRoles)) {
+      const rule = rules[i];
+      if (!rule.actionsMatcher.matches(action)) continue;
 
-      // Only the rules that can fire for this action and these roles, in rule
-      // order; the checks below stay as they were.
-      for (const i of ruleIndex.candidates(action, principalRoles)) {
-        const rule = rules[i];
-        if (!rule.actionsMatcher.matches(action)) continue;
-
-        // Does the rule reach this principal at all? (Bucket attribution — WHICH
-        // role it reaches through — happens in the decision walk.)
-        let rolesMatch = rule.rolesMatcher ? rule.rolesMatcher.matchesAny(principalRoles) : false;
-        // The wildcard role also reaches a principal with no roles at all.
-        if (!rolesMatch && rule.rolesMatcher && principalRoles.length === 0 && rule.rolesMatcher.matches(ALL_ROLES)) {
-          rolesMatch = true;
-        }
-        let derivedRolesMatch = false;
-        if (!rolesMatch && Array.isArray(rule.derivedRoles)) {
-          for (const role of rule.derivedRoles) {
-            if (derivedRoles.has(role)) {
-              derivedRolesMatch = true;
-              break;
-            }
+      // Does the rule reach this principal at all? (Bucket attribution — WHICH
+      // role it reaches through — happens in the decision walk.)
+      let rolesMatch = rule.rolesMatcher ? rule.rolesMatcher.matchesAny(principalRoles) : false;
+      // The wildcard role also reaches a principal with no roles at all.
+      if (!rolesMatch && rule.rolesMatcher && principalRoles.length === 0 && rule.rolesMatcher.matches(ALL_ROLES)) {
+        rolesMatch = true;
+      }
+      let derivedRolesMatch = false;
+      if (!rolesMatch && Array.isArray(rule.derivedRoles)) {
+        for (const role of rule.derivedRoles) {
+          if (derivedRoles.has(role)) {
+            derivedRolesMatch = true;
+            break;
           }
         }
-        if (!rolesMatch && !derivedRolesMatch) continue;
-
-        // Checking the condition
-        const isConditionFulfilled = rule.condition ? rule.condition.isFulfilled(reqWithVariables) : true;
-        const metaSrc = `${metaSrcBase}#${rule.name || 'UNNAMED_RULE' + `_${i + 1}`}`;
-
-        // Build outputs based on rule activation and condition fulfillment.
-        // `build` returns null when the rule has no output branch for the
-        // current activation state, so we don't emit spurious null outputs.
-        if (rule.output) {
-          const output = rule.output.build(reqWithVariables, isConditionFulfilled, metaSrc);
-          if (output) outputs.set(output.src, output);
-        }
-
-        if (!isConditionFulfilled) {
-          perAction.conditionFailed = true;
-          continue;
-        }
-
-        if (rule.effect === Effect.Deny) perAction.firedDenies.push({ rule, src: metaSrc });
-        else if (rule.effect === Effect.Allow) perAction.firedAllows.push({ rule, src: metaSrc });
       }
-    }
+      if (!rolesMatch && !derivedRolesMatch) continue;
 
-    return result;
+      // Checking the condition
+      const isConditionFulfilled = rule.condition ? rule.condition.isFulfilled(reqWithVariables) : true;
+      const metaSrc = `${metaSrcBase}#${rule.name || 'UNNAMED_RULE' + `_${i + 1}`}`;
+
+      // Build outputs based on rule activation and condition fulfillment.
+      // `build` returns null when the rule has no output branch for the
+      // current activation state, so we don't emit spurious null outputs.
+      if (rule.output) {
+        const output = rule.output.build(reqWithVariables, isConditionFulfilled, metaSrc);
+        if (output) outputs.set(output.src, output);
+      }
+
+      if (!isConditionFulfilled) {
+        perAction.conditionFailed = true;
+        continue;
+      }
+
+      if (rule.effect === Effect.Deny) perAction.firedDenies.push({ rule, src: metaSrc });
+      else if (rule.effect === Effect.Allow) perAction.firedAllows.push({ rule, src: metaSrc });
+    }
+    return perAction;
   }
 
   /**

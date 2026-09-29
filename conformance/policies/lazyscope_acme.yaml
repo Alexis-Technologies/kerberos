@@ -1,0 +1,12 @@
+---
+# Lazy scope walk probe, scope `lazyscope`: decides `view` for USER.
+apiVersion: 'api.cerbos.dev/v1'
+resourcePolicy:
+  version: default
+  resource: lazyscope
+  scope: lazyscope
+  rules:
+    - name: scoped-allows-view
+      actions: ['view']
+      effect: EFFECT_ALLOW
+      roles: ['USER']

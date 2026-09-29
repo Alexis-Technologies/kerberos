@@ -1,0 +1,21 @@
+---
+# Lazy scope walk probe, base scope: a DENY rule whose condition raises a
+# runtime error in both engines. Requests at scope `lazyscope` are decided
+# before the walk gets here.
+apiVersion: 'api.cerbos.dev/v1'
+resourcePolicy:
+  version: default
+  resource: lazyscope
+  rules:
+    - name: base-allows-view
+      actions: ['view']
+      effect: EFFECT_ALLOW
+      roles: ['USER']
+
+    - name: base-erroring-deny
+      actions: ['view']
+      effect: EFFECT_DENY
+      roles: ['USER']
+      condition:
+        match:
+          expr: R.attr.missing.deep == true

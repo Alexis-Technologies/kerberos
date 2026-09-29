@@ -1,11 +1,12 @@
 ---
 name: LazyEvaluationConformance
 description: >-
-  A derived role is evaluated only when a rule of the requested action
-  references it, so a derived role whose condition raises a runtime error
-  cannot affect actions that never ask about it. Both engines agree here;
-  where the erroring role IS referenced they still differ in how (Cerbos
-  skips it, Kerberos fails closed) but not in the outcome of this suite.
+  Only what can affect the decision is evaluated. A derived role is evaluated
+  only when a rule of the requested action references it, and a scope only
+  when the walk reaches it, so an erroring condition elsewhere cannot affect
+  the request. Both engines agree here; where the erroring condition IS
+  reached they still differ in how (Cerbos skips the rule, Kerberos fails
+  closed), which conderr_test.yaml records.
 
 principals:
   owner:
@@ -21,6 +22,11 @@ resources:
     kind: lazyeval
     attr:
       ownerId: u1
+  scoped:
+    id: s1
+    kind: lazyscope
+    scope: lazyscope
+    attr: {}
 
 tests:
   - name: an erroring derived role no rule of the action references is never evaluated
@@ -61,3 +67,16 @@ tests:
       - principal: owner
         resource: item
         actions: { break: EFFECT_DENY }
+
+  - name: a scope the walk never reaches is never evaluated
+    description: >-
+      The scoped policy decides `view`; the base scope's erroring DENY rule is
+      never evaluated (Kerberos 4.2 evaluated every scope and failed closed).
+    input:
+      principals: [owner]
+      resources: [scoped]
+      actions: [view]
+    expected:
+      - principal: owner
+        resource: scoped
+        actions: { view: EFFECT_ALLOW }
