@@ -1191,7 +1191,39 @@ describe('Kerberos relations integration', () => {
 
       assert.equal(await kerberos.isAllowed({ principal: olga, action: 'view', resource: readme }), true);
       assert.equal(checkCalls, 0);
-      // 'view' appears in two definitions but is resolved once.
+      // 'view' appears in two definitions but is resolved once; DOC_EDITOR is
+      // not referenced by any rule for 'view', so 'edit' is never asked for.
+      assert.deepEqual(listCalls, [['view']]);
+
+      listCalls.length = 0;
+      const withEditRule = new Kerberos(
+        [
+          {
+            resourcePolicy: {
+              ...documentPolicy.resourcePolicy,
+              rules: [
+                ...documentPolicy.resourcePolicy.rules,
+                { name: 'editor-can-edit', actions: ['edit'], effect: Effect.Allow, derivedRoles: ['DOC_EDITOR'] },
+              ],
+            },
+          },
+        ],
+        [twoRoleDerived],
+        {
+          relations: {
+            check: async () => false,
+            async list({ relations }) {
+              listCalls.push(relations);
+              return ['view'];
+            },
+          },
+        },
+      );
+      const response = await withEditRule.checkResources({
+        principal: olga,
+        resources: [{ resource: readme, actions: ['view', 'edit'] }],
+      });
+      assert.deepEqual(response.results[0].actions, { view: Effect.Allow, edit: Effect.Deny });
       assert.deepEqual(listCalls, [['view', 'edit']]);
     });
 

@@ -1,0 +1,63 @@
+---
+name: LazyEvaluationConformance
+description: >-
+  A derived role is evaluated only when a rule of the requested action
+  references it, so a derived role whose condition raises a runtime error
+  cannot affect actions that never ask about it. Both engines agree here;
+  where the erroring role IS referenced they still differ in how (Cerbos
+  skips it, Kerberos fails closed) but not in the outcome of this suite.
+
+principals:
+  owner:
+    id: u1
+    roles: ['USER']
+  stranger:
+    id: u2
+    roles: ['USER']
+
+resources:
+  item:
+    id: l1
+    kind: lazyeval
+    attr:
+      ownerId: u1
+
+tests:
+  - name: an erroring derived role no rule of the action references is never evaluated
+    input:
+      principals: [owner, stranger]
+      resources: [item]
+      actions: [view]
+    expected:
+      - principal: owner
+        resource: item
+        actions: { view: EFFECT_ALLOW }
+      - principal: stranger
+        resource: item
+        actions: { view: EFFECT_ALLOW }
+
+  - name: a referenced derived role still decides
+    input:
+      principals: [owner, stranger]
+      resources: [item]
+      actions: [edit]
+    expected:
+      - principal: owner
+        resource: item
+        actions: { edit: EFFECT_ALLOW }
+      - principal: stranger
+        resource: item
+        actions: { edit: EFFECT_DENY }
+
+  - name: a referenced erroring derived role never grants
+    description: >-
+      Cerbos treats the erroring condition as not satisfied; Kerberos fails
+      closed. Either way the only rule for `break` cannot allow.
+    input:
+      principals: [owner]
+      resources: [item]
+      actions: [break]
+    expected:
+      - principal: owner
+        resource: item
+        actions: { break: EFFECT_DENY }

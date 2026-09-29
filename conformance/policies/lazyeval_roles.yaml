@@ -1,0 +1,19 @@
+---
+# Derived roles for the lazy-evaluation probe. BROKEN's condition is a
+# runtime error in both engines (`R.attr.missing.deep` — CEL "no such key",
+# a TypeError in Kerberos).
+apiVersion: 'api.cerbos.dev/v1'
+derivedRoles:
+  name: lazyeval_roles
+  definitions:
+    - name: OWNER
+      parentRoles: ['USER']
+      condition:
+        match:
+          expr: R.attr.ownerId == P.id
+
+    - name: BROKEN
+      parentRoles: ['USER']
+      condition:
+        match:
+          expr: R.attr.missing.deep == true

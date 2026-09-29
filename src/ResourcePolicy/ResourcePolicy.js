@@ -156,6 +156,20 @@ class ResourcePolicy {
   }
 
   /**
+   * Derived-role names referenced by the rules of these actions — the only
+   * derived roles a decision for them can depend on.
+   *
+   * @param {readonly string[]} actions
+   * @returns {ReadonlySet<string>}
+   */
+  referencedDerivedRoles(actions) {
+    if (actions.length === 1) return this.#ruleIndex.referencedDerivedRoles(actions[0]);
+    const names = new Set();
+    for (const action of actions) for (const name of this.#ruleIndex.referencedDerivedRoles(action)) names.add(name);
+    return names;
+  }
+
+  /**
    * The policy's `metaSrcBase` — `resource.<kind>.v<version>[/scope]`.
    */
   get srcBase() {

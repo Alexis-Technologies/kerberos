@@ -139,7 +139,9 @@ A wrongly-typed operand in a relational comparison reaches this same class: CEL 
 
 Kerberos has no per-rule skip-on-error mode. The error surfaces through the request-level `onError` option (`'throw'` propagates it, `'deny'` fails closed), and inside a `checkResources` batch a rejected resource is isolated to a fail-closed `EFFECT_DENY` carrying `reason: 'evaluation-error'`. The divergence is therefore in the safe direction, but it is a real difference in decisions.
 
-_Enforcement: corpus (`suites/conderr_test.yaml`, recorded via `cerbosActions`)._
+Fail-closed applies to conditions that are actually **evaluated**. Since 4.3.0 a derived role is evaluated only when a rule of the requested actions asks about it, so a derived role whose condition errors no longer fails requests that never reference it. Both engines then agree (verified on 0.55.0). `meta.effectiveDerivedRoles` still lists every active imported derived role, as Cerbos's does; an erroring definition simply counts as inactive there and cannot affect the decision.
+
+_Enforcement: corpus (`suites/conderr_test.yaml`, recorded via `cerbosActions`; `suites/lazy_eval_test.yaml`)._
 
 ### Plan operators
 

@@ -75,9 +75,13 @@ function ruleCoversRole(rule, role, derivedRoles) {
  *   resource: { policy: import('./ResourcePolicy').ResourcePolicy, derivedRoles: Map<string, string[]|null> } | null,
  *   rows: Map<string|null, Array<import('./RolePolicy').RolePolicy>>,
  * }>} input.scopes - one entry per scope of the resource scope chain, most specific first
+ * @param {boolean} [input.settleDerivedRoles] - resolve every imported derived
+ *   role after the walk so `meta.effectiveDerivedRoles` is complete (tracing only)
+ * @param {boolean} [input.collectDerivedRoles] - fill `meta.effectiveDerivedRoles`
+ *   at all (the engine skips it for untraced requests, whose meta is discarded)
  * @returns {{ effects: Map, outputs: Map, meta: { actions: Record<string, object>, effectiveDerivedRoles: string[] }, hadSources: boolean }}
  */
-function evaluateDecisionLayer({ req, scopes }) {
+function evaluateDecisionLayer({ req, scopes, settleDerivedRoles = false, collectDerivedRoles = true }) {
   const effects = new Map();
   const outputs = new Map();
   const actionsMeta = {};
@@ -111,7 +115,6 @@ function evaluateDecisionLayer({ req, scopes }) {
       resourceEval = entry.resource.policy.evaluateRules(req, entry.resource.derivedRoles);
       mostSpecificSrcBase ??= resourceEval.srcBase;
       for (const [src, output] of resourceEval.outputs) outputs.set(src, output);
-      for (const name of entry.resource.derivedRoles.keys()) effectiveDerivedRoles.add(name);
     }
     for (const policies of entry.rows.values()) {
       for (const policy of policies) {
@@ -205,6 +208,14 @@ function evaluateDecisionLayer({ req, scopes }) {
       if (mostSpecificSrcBase) meta.matchedPolicy = mostSpecificSrcBase;
       actionsMeta[action] = meta;
     }
+  }
+
+  // Derived roles resolve lazily (only the names a rule asked about), so the
+  // active ones are known only once the walk is done.
+  for (const entry of scopes) {
+    if (!entry.resource || !collectDerivedRoles) continue;
+    if (settleDerivedRoles) entry.resource.derivedRoles.settle?.();
+    for (const name of entry.resource.derivedRoles.keys()) effectiveDerivedRoles.add(name);
   }
 
   return {

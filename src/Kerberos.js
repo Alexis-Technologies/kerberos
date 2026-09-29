@@ -36,6 +36,7 @@ const { sanitizeResourceKind } = require('./matching.js');
 const { PlanKind, countLeaves, toDebugString, toFilter } = require('./planning/nodes.js');
 const { buildResourcePlan } = require('./planning/planner.js');
 const { evaluateDecisionLayer } = require('./decision.js');
+const { DerivedRoleView, NO_DERIVED_ROLES } = require('./derivedRoleView.js');
 const { createAjvAdapter, parseWithValidation, registerAjvKeywords } = require('./validation');
 // Platform runtime: bundlers swap this for `./runtime/browser.js` via the
 // package.json `browser` field map when targeting the browser.
@@ -778,28 +779,35 @@ class Kerberos {
     return resolved;
   }
 
-  // Returns active derived-role name → `parentRoles` (null when ungated), which
-  // resource-policy conflict resolution needs to attribute a rule to the
-  // principal roles it was written for.
-  async #getImportedDerivedRoles(policy, req, relationsMemo, trace, lookups, otel) {
-    const importedRoles = new Map();
+  // Returns the policy's active derived roles as a lazy view (name →
+  // `parentRoles`, null when ungated), which resource-policy conflict
+  // resolution needs to attribute a rule to the principal roles it was written
+  // for. Condition-backed definitions are evaluated only when a rule asks about
+  // them; relation-backed ones are resolved here (the only async step), and
+  // only when a rule of the requested actions references them.
+  async #getImportedDerivedRoles(policy, req, relationsMemo, trace, lookups, otel, activations) {
+    if (policy.importDerivedRoles.length === 0) return NO_DERIVED_ROLES;
+    const setActivations = [];
     const relationCandidates = [];
+    let referenced = null;
     for (const name of policy.importDerivedRoles) {
       const role = await this.#resolveDerivedRolesSetByName(name, lookups, trace);
       if (!role) continue;
-      const derivedRoles = role.getActivated(req);
-      if (derivedRoles) {
-        for (const [derivedRole, parentRoles] of derivedRoles) importedRoles.set(derivedRole, parentRoles);
+      setActivations.push(Kerberos.#activationFor(role, req, activations));
+      if (role.hasRelationDefinitions) {
+        referenced ??= policy.referencedDerivedRoles(req.actions);
+        for (const candidate of role.getRelationCandidates(req, referenced)) relationCandidates.push(candidate);
       }
-      for (const candidate of role.getRelationCandidates(req)) relationCandidates.push(candidate);
     }
 
+    let grantedRoles = null;
     if (relationCandidates.length) {
       if (this.#relations) {
         const granted = await this.#resolveRelationCandidates(relationCandidates, req, relationsMemo, trace, otel);
         if (granted.length) {
           const parentRolesByName = new Map(relationCandidates.map((c) => [c.name, c.parentRoles]));
-          for (const name of granted) importedRoles.set(name, parentRolesByName.get(name) ?? null);
+          grantedRoles = new Map();
+          for (const name of granted) grantedRoles.set(name, parentRolesByName.get(name) ?? null);
         }
       } else if (trace) {
         // Relation-backed definitions without a configured `relations`
@@ -817,7 +825,18 @@ class Kerberos {
       }
     }
 
-    return importedRoles;
+    return setActivations.length || grantedRoles ? new DerivedRoleView(setActivations, grantedRoles) : NO_DERIVED_ROLES;
+  }
+
+  // One lazy activation per derived-roles set per evaluation, shared by every
+  // scope that imports the set — a name is evaluated at most once per request.
+  static #activationFor(role, req, activations) {
+    let activation = activations?.get(role);
+    if (!activation) {
+      activation = role.createActivation(req);
+      activations?.set(role, activation);
+    }
+    return activation;
   }
 
   /**
@@ -1277,6 +1296,8 @@ class Kerberos {
     const chainByScope = new Map();
     for (const entry of resourceChain) chainByScope.set(entry.scope, entry);
 
+    // Only a chain with several resource policies can import one set twice.
+    const activations = resourceChain.length > 1 ? new Map() : null;
     const scopes = [];
     for (const scope of this.#getScopeChain(req.R.scope)) {
       const chainEntry = chainByScope.get(scope) ?? null;
@@ -1291,6 +1312,7 @@ class Kerberos {
           trace,
           lookups,
           otel,
+          activations,
         );
         resource = { policy: chainEntry.policy, derivedRoles };
       }
@@ -1422,7 +1444,12 @@ class Kerberos {
     if (unresolvedActions.length) {
       const layerReq = unresolvedActions.length === req.actions.length ? req : { ...req, actions: unresolvedActions };
       const scopes = await this.#getDecisionScopes(layerReq, trace, relationsMemo, lookups, otel, resourceChain);
-      layerResult = evaluateDecisionLayer({ req: layerReq, scopes });
+      layerResult = evaluateDecisionLayer({
+        req: layerReq,
+        scopes,
+        settleDerivedRoles: trace !== null,
+        collectDerivedRoles: trace !== null,
+      });
     }
 
     const merged = Kerberos.#mergeSourceResults(req, trace, principalResult, layerResult);
@@ -1622,9 +1649,11 @@ class Kerberos {
     return rowsByScope;
   }
 
-  #getImportedDerivedRolesSync(policy, req, trace) {
-    const importedRoles = new Map();
+  #getImportedDerivedRolesSync(policy, req, trace, activations) {
+    if (policy.importDerivedRoles.length === 0) return NO_DERIVED_ROLES;
+    const setActivations = [];
     const relationCandidates = [];
+    let referenced = null;
     for (const name of policy.importDerivedRoles) {
       const role = this.#derivedRoles.get(name);
       if (!role) {
@@ -1634,11 +1663,13 @@ class Kerberos {
         continue;
       }
       trace?.push({ source: 'derivedRoles', name, matched: true });
-      const derivedRoles = role.getActivated(req);
-      if (derivedRoles) {
-        for (const [derivedRole, parentRoles] of derivedRoles) importedRoles.set(derivedRole, parentRoles);
+      setActivations.push(Kerberos.#activationFor(role, req, activations));
+      // Evaluated with or without tracing, so a gate that throws fails the
+      // request the same way whether or not includeMeta is set.
+      if (role.hasRelationDefinitions) {
+        referenced ??= policy.referencedDerivedRoles(req.actions);
+        for (const candidate of role.getRelationCandidates(req, referenced)) relationCandidates.push(candidate);
       }
-      for (const candidate of role.getRelationCandidates(req)) relationCandidates.push(candidate);
     }
 
     // The sync driver runs only when no `relations` resolver is configured —
@@ -1656,7 +1687,7 @@ class Kerberos {
       }
     }
 
-    return importedRoles;
+    return setActivations.length ? new DerivedRoleView(setActivations) : NO_DERIVED_ROLES;
   }
 
   #getDecisionScopesSync(req, trace, precomputedResourceChain = null) {
@@ -1675,13 +1706,18 @@ class Kerberos {
     const chainByScope = new Map();
     for (const entry of resourceChain) chainByScope.set(entry.scope, entry);
 
+    // Only a chain with several resource policies can import one set twice.
+    const activations = resourceChain.length > 1 ? new Map() : null;
     const scopes = [];
     for (const scope of this.#getScopeChain(req.R.scope)) {
       const chainEntry = chainByScope.get(scope) ?? null;
       const rows = rowsByScope.get(scope) ?? EMPTY_ROWS;
       if (!chainEntry && rows.size === 0) continue;
       const resource = chainEntry
-        ? { policy: chainEntry.policy, derivedRoles: this.#getImportedDerivedRolesSync(chainEntry.policy, req, trace) }
+        ? {
+            policy: chainEntry.policy,
+            derivedRoles: this.#getImportedDerivedRolesSync(chainEntry.policy, req, trace, activations),
+          }
         : null;
       scopes.push({ scope, resource, rows });
     }
@@ -1729,6 +1765,8 @@ class Kerberos {
       layerResult = evaluateDecisionLayer({
         req: layerReq,
         scopes: this.#getDecisionScopesSync(layerReq, trace, resourceChain),
+        settleDerivedRoles: trace !== null,
+        collectDerivedRoles: trace !== null,
       });
     }
 

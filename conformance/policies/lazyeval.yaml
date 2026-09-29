@@ -1,0 +1,23 @@
+---
+# Lazy-evaluation probe: a derived role whose condition errors is imported,
+# but only the `break` action's rule references it.
+apiVersion: 'api.cerbos.dev/v1'
+resourcePolicy:
+  version: default
+  resource: lazyeval
+  importDerivedRoles: ['lazyeval_roles']
+  rules:
+    - name: users-may-view
+      actions: ['view']
+      effect: EFFECT_ALLOW
+      roles: ['USER']
+
+    - name: owners-may-edit
+      actions: ['edit']
+      effect: EFFECT_ALLOW
+      derivedRoles: ['OWNER']
+
+    - name: broken-may-break
+      actions: ['break']
+      effect: EFFECT_ALLOW
+      derivedRoles: ['BROKEN']
