@@ -273,3 +273,84 @@ describe('Rule index', () => {
     assert.deepEqual([...rolePolicy.evaluateAllowlist(invoice).allowed], ['view']);
   });
 });
+
+describe('Rule index — role buckets without catch-all rules', () => {
+  it('merges the literal-role lists of several principal roles in rule order', () => {
+    const rules = [];
+    for (let i = 0; i < 12; i++) rules.push(compiledRule({ actions: ['view'], roles: [i % 2 ? 'ODD' : 'EVEN'] }));
+    const index = createRuleIndex(rules);
+    assert.deepEqual(index.candidates('view', ['ODD']), [1, 3, 5, 7, 9, 11]);
+    assert.deepEqual(index.candidates('view', ['ODD', 'EVEN']), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    assert.deepEqual(index.candidates('view', ['NONE']), []);
+  });
+});
+
+describe('DerivedRoleView', () => {
+  const { DerivedRoleView } = require('../src/derivedRoleView.js');
+
+  function activation(answers, { throwing = [] } = {}) {
+    const calls = [];
+    return {
+      calls,
+      names: Object.keys(answers).concat(throwing),
+      resolve(name) {
+        calls.push(name);
+        if (throwing.includes(name)) throw new Error(`boom ${name}`);
+        return answers[name] ?? null;
+      },
+    };
+  }
+
+  it('combines sets like the eager Map did: a later active set and a relation grant win', () => {
+    const first = activation({ OWNER: { parentRoles: ['USER'] }, EDITOR: null });
+    const second = activation({ OWNER: { parentRoles: ['ADMIN'] }, EDITOR: { parentRoles: ['USER'] } });
+    const granted = new Map([
+      ['VIEWER', null],
+      ['EDITOR', ['GUEST']],
+    ]);
+    const view = new DerivedRoleView([first, second], granted);
+
+    assert.equal(view.has('OWNER'), true);
+    assert.deepEqual(view.get('OWNER'), ['ADMIN']);
+    assert.deepEqual(view.get('EDITOR'), ['GUEST']);
+    assert.equal(view.has('VIEWER'), true);
+    assert.equal(view.get('VIEWER'), null);
+    assert.equal(view.has('MISSING'), false);
+    assert.equal(view.get('MISSING'), undefined);
+
+    // Resolved once per name, however often it is asked about.
+    view.has('OWNER');
+    assert.deepEqual(first.calls, ['OWNER', 'EDITOR', 'VIEWER', 'MISSING']);
+    assert.deepEqual([...view.keys()], ['OWNER', 'EDITOR', 'VIEWER']);
+  });
+
+  it('lists only resolved names until settled, and treats a throwing definition as inactive when settling', () => {
+    const set = activation({ A: { parentRoles: ['USER'] }, B: { parentRoles: ['USER'] } }, { throwing: ['C'] });
+    const other = activation({ D: { parentRoles: ['USER'] } });
+    const view = new DerivedRoleView([set, other]);
+
+    assert.equal(view.has('B'), true);
+    assert.deepEqual([...view.keys()], ['B']);
+
+    view.settle();
+    assert.deepEqual([...view.keys()], ['A', 'B', 'D']);
+    assert.equal(view.has('C'), false);
+  });
+
+  it('delegates straight to a single set and reads its memo for keys()', () => {
+    const answers = new Map();
+    const single = {
+      names: ['A', 'B'],
+      resolve(name) {
+        const result = name === 'A' ? { parentRoles: ['USER'] } : null;
+        answers.set(name, result);
+        return result;
+      },
+      peek: (name) => answers.get(name),
+    };
+    const view = new DerivedRoleView([single]);
+    assert.equal(view.has('A'), true);
+    assert.equal(view.has('B'), false);
+    assert.deepEqual([...view.keys()], ['A']);
+  });
+});

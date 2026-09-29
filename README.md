@@ -6,7 +6,7 @@
 [![dependencies](https://img.shields.io/badge/runtime_dependencies-0-brightgreen)](#bundle-size)
 [![license](https://img.shields.io/npm/l/%40alexify%2Fkerberos)](./LICENSE)
 
-An **embedded, zero-dependency authorization engine** for Node.js and the browser: Cerbos-style policies (RBAC + ABAC), a SpiceDB-inspired "Zanzibar-lite" resolver (ReBAC) and Cerbos-compatible query plans — all in-process, no server to deploy, [~34 KB min+gzip](#bundle-size). The API deliberately stays as close to Cerbos as possible: if you know Cerbos, you already know Kerberos.js.
+An **embedded, zero-dependency authorization engine** for Node.js and the browser: Cerbos-style policies (RBAC + ABAC), a SpiceDB-inspired "Zanzibar-lite" resolver (ReBAC) and Cerbos-compatible query plans — all in-process, no server to deploy, [~38 KB min+gzip](#bundle-size). The API deliberately stays as close to Cerbos as possible: if you know Cerbos, you already know Kerberos.js.
 
 ```javascript
 import { Kerberos, Effect } from '@alexify/kerberos';
@@ -67,7 +67,7 @@ await kerberos.isAllowed({
 | **DX** | [Pluggable validation](#schema-validation) (Zod / JSON Schema + Ajv / TypeBox), [testing DSL](#testing) (`/tests`), [typed authoring](#typescript) via an optional app schema, [browser build](#browser-usage), [live playground](https://kerberosjs.vercel.app/playground) |
 | **Compatibility** | A [conformance suite](./conformance/) runs one corpus — written in Cerbos's own policy and test formats — against both Kerberos and a real Cerbos PDP in CI; known gaps are listed in [DIVERGENCES.md](./conformance/DIVERGENCES.md) |
 
-> **Version 4.x** — see the [CHANGELOG](./CHANGELOG.md) for everything that changed since `3.1.0`: verified Cerbos compatibility (a conformance corpus replayed against a live PDP, plus the `/cerbos` YAML + CEL policy importer), attribute-schema enforcement, policy-as-code tooling (the `/loader` subpath and the `kerberos` CLI), typed policy authoring, and the code-review hardening waves — a `Conditions` fail-open fix, restored Node-ESM named exports, and a synchronous evaluation driver (~2.5× on simple `isAllowed`). `4.2.0` closes the parity gaps a differential campaign against a live PDP turned up — CEL-style strict comparisons and Cerbos's resource-kind sanitization — see its upgrade notes.
+> **Version 4.x** — see the [CHANGELOG](./CHANGELOG.md) for everything that changed since `3.1.0`: verified Cerbos compatibility (a conformance corpus replayed against a live PDP, plus the `/cerbos` YAML + CEL policy importer), attribute-schema enforcement, policy-as-code tooling (the `/loader` subpath and the `kerberos` CLI), typed policy authoring, and the code-review hardening waves — a `Conditions` fail-open fix, restored Node-ESM named exports, and a synchronous evaluation driver (~2.5× on simple `isAllowed`). `4.2.0` closes the parity gaps a differential campaign against a live PDP turned up — CEL-style strict comparisons and Cerbos's resource-kind sanitization — see its upgrade notes. `4.3.0` is a performance release: rules indexed by action and role, derived roles and the scope walk evaluated only as far as the decision needs (which also aligns unreached-scope behaviour with Cerbos), and ReBAC batches that share unfinished subproblems.
 
 ## Table of Contents
 
@@ -118,8 +118,8 @@ Zero runtime dependencies. Measured with `pnpm size` (esbuild browser bundle, fu
 
 | Entry | min | min+gzip |
 | ----- | ---:| --------:|
-| `@alexify/kerberos` (main entry, query planner included) | 127.4 KB | **35.8 KB** |
-| `@alexify/kerberos/relations` (opt-in ReBAC resolver) | 70.9 KB | 19.8 KB |
+| `@alexify/kerberos` (main entry, query planner included) | 134.3 KB | **38.3 KB** |
+| `@alexify/kerberos/relations` (opt-in ReBAC resolver) | 71.6 KB | 20.0 KB |
 | `@alexify/kerberos/cerbos` (opt-in [Cerbos importer](#importing-cerbos-policies)) | 34.0 KB | 10.9 KB |
 | `@alexify/kerberos/loader` (Node-only; browser bundlers get a throwing stub) | 1.0 KB | 0.5 KB |
 
@@ -340,7 +340,7 @@ When mixed policy types are present, Kerberos resolves each action in this order
 
 1. Find the matching `PrincipalPolicy` for the request principal.
 2. If it returns an explicit `EFFECT_ALLOW` or `EFFECT_DENY`, use that result — role policies do not narrow a principal-policy override.
-3. Otherwise, evaluate the matching `ResourcePolicy`. Before its rules are matched, the imported **derived roles are resolved**: condition-backed definitions evaluate synchronously, and relation-backed definitions (the `relation:` field) resolve through the configured [`relations` resolver](#rebac-relations) (ReBAC) — `list`-first with parallel `check` fallback, one shared memo per request. The resulting `effectiveDerivedRoles` then participate in rule matching alongside plain `roles`. Conflicts resolve **per principal role**: `EFFECT_DENY` overrides `EFFECT_ALLOW` within a role, an `EFFECT_ALLOW` from any role wins across roles.
+3. Otherwise, evaluate the matching `ResourcePolicy`. Its imported **derived roles are resolved lazily**: a condition-backed definition is evaluated only when a rule of the requested actions asks about it (once per request, however many scopes import it), and a relation-backed definition (the `relation:` field) resolves through the configured [`relations` resolver](#rebac-relations) (ReBAC) only when such a rule references it — `list`-first with parallel `check` fallback, one shared memo per request. The resulting `effectiveDerivedRoles` then participate in rule matching alongside plain `roles`. Conflicts resolve **per principal role**: `EFFECT_DENY` overrides `EFFECT_ALLOW` within a role, an `EFFECT_ALLOW` from any role wins across roles.
 4. Apply the `RolePolicy` layer as a **filter** on that result: if every principal role is constrained by an applicable role policy, an `EFFECT_ALLOW` survives only when at least one of those roles allowlists the action (union across roles, `parentRoles` intersection within a role).
 5. If nothing matches, return `EFFECT_DENY`.
 
@@ -423,6 +423,7 @@ Matching Cerbos's `SCOPE_PERMISSIONS_OVERRIDE_PARENT` (its default), the chain i
 
 - The first scope whose policy produces a decision (allow or deny) for an action and a role **seals** it; policies further up cannot change it.
 - A rule whose condition fails decides nothing — the walk **falls through** to the parent scope for that action.
+- A scope the walk never reaches for an action is **not evaluated at all**: its conditions do not run — so an erroring condition there cannot fail the request — and its outputs are not emitted. This is what Cerbos does too (verified on a live PDP).
 - The walk runs per principal role, so a deny sealing one role at a specific scope does not stop another role from winning an allow at the base scope (allow from any role wins across roles).
 - A scope with no policy at all is simply skipped (Cerbos's `lenientScopeSearch`; Kerberos has no strict mode).
 
@@ -1033,8 +1034,8 @@ Per action, `meta.actions[action]` includes:
 
 At the result level:
 
-- **effectiveDerivedRoles**: derived roles that activated for this resource
-- **resolution** (decision trace): every policy lookup that was attempted — `{ source, id, version, scopesSearched, matchedScope, origin? }` entries (with `origin: 'cache'` for cache-resolved policies), `{ source: 'derivedRoles', name, matched, origin? }` entries for every imported derived-roles set (`matched: false` = the import resolved nowhere — e.g. an evicted or corrupt cache document silently stopping rules from matching), plus `{ source: 'relations', name, relation, matched, reason? }` entries for [relation-backed derived roles](#rebac-relations). The same trace appears in [`planResources` meta](#query-plans-planresources).
+- **effectiveDerivedRoles**: derived roles that activated for this resource — every active imported derived role, as Cerbos reports it (relation-backed ones only when a rule of the request references them, since only those are resolved)
+- **resolution** (decision trace): every policy lookup that was attempted — `{ source, id, version, scopesSearched, matchedScope, origin? }` entries (with `origin: 'cache'` for cache-resolved policies), `{ source: 'derivedRoles', name, matched, origin? }` entries for every imported derived-roles set (`matched: false` = the import resolved nowhere — e.g. an evicted or corrupt cache document silently stopping rules from matching), plus `{ source: 'relations', name, relation, matched, reason? }` entries for the referenced [relation-backed derived roles](#rebac-relations). The same trace appears in [`planResources` meta](#query-plans-planresources).
 
 ## Caching / Storing policies
 
@@ -1517,7 +1518,7 @@ Exactly like dynamic policies, tuples can live in your cache/store — Kerberos 
 
 Static tuples always win per `(resource, relation)` key — the cache is only consulted on a static miss, and sources for the same key are never merged. **A corrupt document throws a typed `KerberosCodecError`** (propagating per the engine's `onError` semantics) instead of resolving as empty — an "empty" read would silently *widen* access in exclusion positions (`read_only = viewer − editor`: a real editor whose editor document fails to parse would gain `read_only`). The same rule applies to a caveat whose condition **throws** (→ `KerberosRelationsError`): an evaluation error is never read as an answer; a caveat that cleanly evaluates to `false` simply does not match. Genuine absence (cache miss) still resolves as an empty set, and entries the schema does not admit are skipped with an operator log. Transient cache failures retry per `cacheRetry` and then surface as `KerberosCacheError`.
 
-**Session memo contract** (`opts.memo` on `check`/`list`/`lookupSubjects`/`lookupResources`): pass one `Map` to share work across calls — document reads are shared whenever the same resolver instance is used, and decision entries are automatically scoped by resolver instance plus the *identity* of the `principal`/`context` objects, so reusing a memo across different principals, contexts or resolver instances is safe by construction (reuse the same object references to maximize sharing — that is exactly what the Kerberos engine does across a `checkResources` batch). A read that fails (rejects) is evicted from the memo automatically, so a transient backend failure never poisons a long-lived memo — the next call retries; successfully resolved reads stay memoized for the memo's lifetime, so treat the memo as request/batch-scoped when document freshness matters.
+**Session memo contract** (`opts.memo` on `check`/`list`/`lookupSubjects`/`lookupResources`): pass one `Map` to share work across calls — document reads are shared whenever the same resolver instance is used, and decision entries are automatically scoped by resolver instance plus the *identity* of the `principal`/`context` objects, so reusing a memo across different principals, contexts or resolver instances is safe by construction (reuse the same object references to maximize sharing — that is exactly what the Kerberos engine does across a `checkResources` batch). A read that fails (rejects) is evicted from the memo automatically, so a transient backend failure never poisons a long-lived memo — the next call retries; successfully resolved reads stay memoized for the memo's lifetime, so treat the memo as request/batch-scoped when document freshness matters. Checks running **concurrently** on one memo — the resources of a `checkResources` batch, a `lookupResources` verification wave — also share subproblems that are still being computed: a check that needs one waits for it instead of repeating the walk. Waits are checked for cycles first, so cyclic data still ends at the depth guard instead of deadlocking, and if the computation being waited on fails, the waiting check computes the subproblem itself — sharing never changes an answer.
 
 ### Consistency (honest limitations)
 
@@ -2206,7 +2207,7 @@ The built-in `RelationResolver` emits `request:start` / `request:end` / `request
 
 ## Benchmarks
 
-Measured with the zero-dependency harness in [`bench/bench.js`](./bench/bench.js) (1s timed run after 2k warmup iterations per scenario). Reproduce with:
+Measured with the zero-dependency harness in [`bench/bench.js`](./bench/bench.js) (1s timed run after up to 2k warmup iterations, at most 0.5 s, per scenario). Reproduce with:
 
 ```bash
 pnpm bench
@@ -2216,23 +2217,37 @@ Apple Silicon (M-series), Node v24:
 
 | Scenario |  ops/sec |
 | -------- |---------:|
-| `isAllowed` — simple role match |  ~640,000 |
-| `isAllowed` — derived roles + variables + condition |  ~500,000 |
-| `checkResources` — 10 resources × 3 actions |   ~48,000 |
-| `checkResources` — 10 resources, includeMeta |   ~47,000 |
-| `isAllowed` — role policy + 2-level parentRoles chain |  ~390,000 |
-| `isAllowed` — 3-segment scoped request (chain walk) |  ~430,000 |
-| `isAllowed` — simple role match + Zod validation |  ~400,000 |
-| `isAllowed` — simple role match + 1 sync `decision` listener |  ~590,000 |
-| `isAllowed` — simple role match + request-level hooks |  ~350,000 |
-| `isAllowed` — simple role match + per-resource hooks |  ~310,000 |
-| `checkResources` — 10 resources × 3 actions + `decision` listener |   ~45,000 |
-| `isAllowed` — cache-backed dynamic policy (`$expr`, in-memory Map) |  ~260,000 |
-| `checkResources` — 50 resources, cache-backed |    ~7,400 |
-| `planResources` — `$expr` policy (variables + deny rule) |   ~61,000 |
-| `relations.check` — direct tuple (flat) |  ~730,000 |
-| `relations.check` — deep walk (3 arrows + nested groups) |  ~106,000 |
+| `isAllowed` — simple role match |  ~770,000 |
+| `isAllowed` — derived roles + variables + condition |  ~600,000 |
+| `checkResources` — 10 resources × 3 actions |   ~58,000 |
+| `checkResources` — 10 resources, includeMeta |   ~48,000 |
+| `isAllowed` — role policy + 2-level parentRoles chain |  ~395,000 |
+| `isAllowed` — 3-segment scoped request (chain walk) |  ~580,000 |
+| `isAllowed` — simple role match + Zod validation |  ~445,000 |
+| `isAllowed` — simple role match + 1 sync `decision` listener |  ~695,000 |
+| `isAllowed` — simple role match + request-level hooks |  ~390,000 |
+| `isAllowed` — simple role match + per-resource hooks |  ~335,000 |
+| `checkResources` — 10 resources × 3 actions + `decision` listener |   ~52,000 |
+| `isAllowed` — cache-backed dynamic policy (`$expr`, in-memory Map) |  ~265,000 |
+| `checkResources` — 50 resources, cache-backed |    ~8,300 |
+| `planResources` — `$expr` policy (variables + deny rule) |   ~63,000 |
+| `relations.check` — direct tuple (flat) |  ~720,000 |
+| `relations.check` — deep walk (3 arrows + nested groups) |  ~105,000 |
 | `isAllowed` — relation-backed derived role (deep walk) |   ~70,000 |
+
+Scaling sweeps (`node bench/bench.js scaling`) — how decision cost grows with policy shape; 4.2.0 → 4.3.0 on the same machine:
+
+| Scenario | 4.2.0 | 4.3.0 |
+| -------- | -----:| -----:|
+| 1 000 rules, one per action — match first / last | ~31,000 / ~30,000 | ~730,000 / ~740,000 |
+| 1 000 rules, one per role — match last | ~27,000 | ~720,000 |
+| 64 principal roles, no role policies | ~37,000 | ~133,000 |
+| 32 imported derived-role definitions, 1 referenced | ~190,000 | ~625,000 |
+| scope depth 8, decided at the most specific scope | ~170,000 | ~278,000 |
+| `checkResources` — 100 documents, relation depth 16 (batches/s) | ~330 | ~1,670 |
+| 100 concurrent `relations.check`, shared memo, depth 16 (batches/s) | ~380 | ~3,260 |
+
+Cold start (`pnpm bench:coldstart`: `require` + construction + first decision in a fresh process): ~17 ms.
 
 `checkResources` evaluates resources **concurrently** (`Promise.allSettled`): with a remote policy store, N resources cost one parallel wave of lookups instead of N sequential round-trips (measured ~8x faster with a 2ms-latency cache and 10 resources), and one failing resource never fails the batch — it fail-closes to `EFFECT_DENY` for its actions only.
 
@@ -2244,7 +2259,7 @@ The same scenario — role-gated actions plus one ownership condition — implem
 
 | Library · path | ops/sec |
 | -------------- | -------:|
-| `@alexify/kerberos` · `isAllowed` | ~640,000 |
+| `@alexify/kerberos` · `isAllowed` | ~740,000 |
 | `@casl/ability` · check (prebuilt ability) | ~7,300,000 |
 | `@casl/ability` · build + check (per request) | ~1,300,000 |
 | `casbin` · `enforce` (in-memory model) | ~200,000 |
@@ -2255,7 +2270,7 @@ Bundle size for the browser, measured the same way as the table above (`pnpm siz
 
 | Library | min+gzip |
 | ------- | --------:|
-| `@alexify/kerberos` (main entry) | 35.8 KB |
+| `@alexify/kerberos` (main entry) | 38.3 KB |
 | `@casl/ability` | 6.6 KB |
 | `casbin` | 33.9 KB — does not bundle for the browser (Node builtins); measured as a Node bundle |
 
