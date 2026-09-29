@@ -242,6 +242,13 @@ class Kerberos {
 
   #rolePolicies = new Map();
 
+  // Ids (sanitized kind / principal id / role) that have at least one
+  // in-memory policy at any version or scope, per lookup source. Without a
+  // cache, an id missing here cannot resolve anywhere along any chain, so the
+  // lookup skips its per-scope map probes — which is most of a request's
+  // cost for principals holding dozens of roles without role policies.
+  #policyIds = { resource: new Set(), principal: new Set(), role: new Set() };
+
   #derivedRoles = new Map();
 
   #logger = createLoggerWriter(false);
@@ -518,6 +525,9 @@ class Kerberos {
     this.#resourcePolicies = resourcePolicies;
     this.#principalPolicies = principalPolicies;
     this.#rolePolicies = rolePolicies;
+    for (const policy of resourcePolicies.values()) this.#policyIds.resource.add(sanitizeResourceKind(policy.kind));
+    for (const policy of principalPolicies.values()) this.#policyIds.principal.add(policy.principal);
+    for (const policy of rolePolicies.values()) this.#policyIds.role.add(policy.role);
     this.#derivedRoles = this.#getDerivedRolesMap(derivedRoles);
 
     this.#logger = createLoggerWriter(logger);
@@ -1089,6 +1099,9 @@ class Kerberos {
 
   async #resolvePolicyChainUncached(source, map, id, version, scope, Constructor) {
     const scopeSearchChain = this.#getScopeChain(scope);
+    if (!this.#cache.enabled && !this.#policyIds[source].has(id)) {
+      return { chain: [], entry: { source, id, version, scopesSearched: scopeSearchChain, matchedScope: null } };
+    }
     const chain = [];
     let firstOrigin = null;
 
@@ -1170,6 +1183,9 @@ class Kerberos {
    * @returns {Promise<{ rowsByScope: Map<string, Map<string|null, object[]>>, roleChains: Map<string, Array<{policy: object, scope: string}>> }>}
    */
   async #getRoleRows(req, trace, lookups) {
+    if (!trace && !this.#cache.enabled && !this.#hasAnyRolePolicy(req.P.roles)) {
+      return { rowsByScope: new Map(), roleChains: new Map() };
+    }
     const uniqueRoles = [];
     const seenRoles = new Set();
     for (const role of req.P.roles ?? []) {
@@ -1199,6 +1215,10 @@ class Kerberos {
       for (const role of uniqueRoles) {
         chains.set(role, await this.#getRolePolicyChain(role, req, trace, lookups));
       }
+    }
+    if (!Kerberos.#anyChainResolved(chains)) {
+      for (const role of uniqueRoles) roleChains.set(role, chains.get(role));
+      return { rowsByScope, roleChains };
     }
 
     // Transitive parents (DFS, cycle → throw like the old evaluator did).
@@ -1509,6 +1529,12 @@ class Kerberos {
   #resolvePolicyChainFromMemory(source, map, id, version, scope, trace) {
     const scopeSearchChain = this.#getScopeChain(scope);
     const chain = [];
+    // The sync driver never has a cache: an id with no policy anywhere misses
+    // at every scope, so the probes (and their key strings) are skipped.
+    if (!this.#policyIds[source].has(id)) {
+      trace?.push({ source, id, version, scopesSearched: scopeSearchChain, matchedScope: null });
+      return chain;
+    }
     for (const searchScope of scopeSearchChain) {
       const policy = map.get(`${id}.${version}.${searchScope}`);
       if (policy) chain.push({ policy, scope: searchScope });
@@ -1517,7 +1543,22 @@ class Kerberos {
     return chain;
   }
 
+  #hasAnyRolePolicy(roles) {
+    const known = this.#policyIds.role;
+    if (known.size === 0 || !roles) return false;
+    for (const role of roles) if (known.has(role)) return true;
+    return false;
+  }
+
+  static #anyChainResolved(chains) {
+    for (const chain of chains.values()) if (chain.length > 0) return true;
+    return false;
+  }
+
   #getRoleRowsSync(req, trace) {
+    // Untraced and none of the principal's roles has a role policy anywhere:
+    // nothing to resolve (a traced request still records one miss per role).
+    if (!trace && !this.#hasAnyRolePolicy(req.P.roles)) return new Map();
     const uniqueRoles = [];
     const seenRoles = new Set();
     for (const role of req.P.roles ?? []) {
@@ -1537,6 +1578,9 @@ class Kerberos {
         this.#resolvePolicyChainFromMemory('role', this.#rolePolicies, role, version, req.R.scope, trace),
       );
     }
+    // No role of the principal has a role policy along the chain (the common
+    // case): no rows, and no parent closure to walk.
+    if (!Kerberos.#anyChainResolved(chains)) return rowsByScope;
 
     const ancestorsOf = new Map();
     const resolveAncestors = (role, path) => {
