@@ -1,6 +1,7 @@
 const { parseRolePolicyShape } = require('./validation');
 const { cloneShapeTree, deepFreeze } = require('../freeze.js');
 const { compileKindMatcher, compileMatcher, sanitizeResourceKind } = require('../matching.js');
+const { createKeyedSelector } = require('../ruleIndex.js');
 
 const { Effect } = require('../schemas');
 const { parseConditions, parseConstants, parseOutputs, parseVariables } = require('../policyParsers.js');
@@ -32,6 +33,8 @@ class RolePolicy {
 
   #shape = null;
 
+  #rulesForKind = null;
+
   constructor(shape, options = {}) {
     this.#shape = cloneShapeTree(RolePolicy.parseShape(shape, options));
     if (this.#shape.rolePolicy.constants) {
@@ -57,6 +60,10 @@ class RolePolicy {
       }
       this.#shape.rolePolicy.rules = rules;
     }
+    const indexedRules = this.#shape.rolePolicy.rules ?? [];
+    this.#rulesForKind = createKeyedSelector(indexedRules.length, (i, kind) =>
+      indexedRules[i].resourceMatcher.matches(kind),
+    );
 
     // Post-construction hardening: the parsed shape IS live evaluation state
     // (stored in the engine's policy Maps), and the constructor-time
@@ -131,10 +138,10 @@ class RolePolicy {
     const rules = this.rules;
     // Kind names are compared sanitized (see src/matching.js).
     const kind = sanitizeResourceKind(reqWithVariables.R.kind);
+    const ruleIndices = this.#rulesForKind(kind);
     for (const action of reqWithVariables.actions) {
-      for (let i = 0; i < rules.length; i++) {
+      for (const i of ruleIndices) {
         const rule = rules[i];
-        if (!rule.resourceMatcher.matches(kind)) continue;
         if (!rule.allowActionsMatcher.matches(action)) continue;
 
         const isConditionFulfilled = rule.condition ? rule.condition.isFulfilled(reqWithVariables) : true;

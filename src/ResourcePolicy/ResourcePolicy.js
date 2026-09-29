@@ -2,6 +2,7 @@ const { parseResourcePolicyShape } = require('./validation');
 const { cloneShapeTree, deepFreeze } = require('../freeze.js');
 const { compileMatcher } = require('../matching.js');
 const { evaluateDecisionLayer } = require('../decision.js');
+const { createRuleIndex } = require('../ruleIndex.js');
 
 const { ALL_ROLES, Effect } = require('../schemas');
 const { parseConditions, parseConstants, parseOutputs, parseVariables } = require('../policyParsers.js');
@@ -40,6 +41,8 @@ class ResourcePolicy {
   #shape = null;
 
   #attributeSchemas = null;
+
+  #ruleIndex = null;
 
   /**
    * @param {unknown} shape
@@ -80,6 +83,7 @@ class ResourcePolicy {
       }
       this.#shape.resourcePolicy.rules = rules;
     }
+    this.#ruleIndex = createRuleIndex(this.#shape.resourcePolicy.rules ?? []);
     // Attribute-schema bindings (Cerbos `schemas` parity): keep the compiled
     // ignoreWhen matchers OFF the frozen shape (runtime-only state, like the
     // rule matchers) — the engine reads them through `attributeSchemas`.
@@ -141,6 +145,17 @@ class ResourcePolicy {
   }
 
   /**
+   * Indices (into `rules`) of the rules whose `actions` match `action`, in
+   * rule order — the planner's view of the rule index.
+   *
+   * @param {string} action
+   * @returns {readonly number[]}
+   */
+  ruleIndicesFor(action) {
+    return this.#ruleIndex.forAction(action);
+  }
+
+  /**
    * The policy's `metaSrcBase` — `resource.<kind>.v<version>[/scope]`.
    */
   get srcBase() {
@@ -187,12 +202,15 @@ class ResourcePolicy {
 
     const principalRoles = reqWithVariables.P.roles ?? [];
     const rules = this.rules;
+    const ruleIndex = this.#ruleIndex;
 
     for (const action of reqWithVariables.actions) {
       const perAction = { firedAllows: [], firedDenies: [], conditionFailed: false };
       actions.set(action, perAction);
 
-      for (let i = 0; i < rules.length; i++) {
+      // Only the rules that can fire for this action and these roles, in rule
+      // order; the checks below stay as they were.
+      for (const i of ruleIndex.candidates(action, principalRoles)) {
         const rule = rules[i];
         if (!rule.actionsMatcher.matches(action)) continue;
 

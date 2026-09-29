@@ -42,7 +42,12 @@ const { matchesPattern } = require('./matching.js');
  * bare-`*` patterns reach it.
  */
 function ruleCoversRole(rule, role, derivedRoles) {
-  if (Array.isArray(rule.roles)) {
+  // Policy rules carry a precompiled matcher; a plain rule object (legacy
+  // call shape) falls back to matching pattern by pattern.
+  const matcher = rule.rolesMatcher;
+  if (matcher) {
+    if (role === null ? matcher.matchesAll : matcher.matches(role)) return true;
+  } else if (Array.isArray(rule.roles)) {
     for (const pattern of rule.roles) {
       if (pattern === '*' || (role !== null && matchesPattern(pattern, role))) return true;
     }
