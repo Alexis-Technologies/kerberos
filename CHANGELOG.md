@@ -5,7 +5,7 @@ All notable changes to **`@alexify/kerberos`** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.3.0] - 2026-09-29
+## [4.3.0] - 2026-09-30
 
 A performance release. The work comes from the scaling measurements of the
 decision engine, which showed decision cost following the size of the policy
