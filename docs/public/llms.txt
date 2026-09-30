@@ -5,7 +5,7 @@
 Key facts:
 
 - npm: `@alexify/kerberos` — zero runtime dependencies, CommonJS, ships `src/` as-is (no build step).
-- Size: ~25.1 KB min+gzip for the main entry; 15.1 KB for the opt-in `/relations` subpath.
+- Size: ~38.3 KB min+gzip for the main entry; 20.0 KB for the opt-in `/relations` subpath.
 - Runtimes: Node.js >= 18 and modern browsers (bundler required; the browser build has zero Node builtins).
 - Entry points: `@alexify/kerberos` (engine), `@alexify/kerberos/relations` (built-in ReBAC resolver), `@alexify/kerberos/tests` (declarative test DSL).
 - Public API: `isAllowed(args)`, `checkResources(args, effectAsBoolean?)`, `planResources(args)`.
