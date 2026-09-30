@@ -1,6 +1,6 @@
 {
   "name": "@alexify/kerberos",
-  "version": "4.2.0",
+  "version": "4.3.0",
   "description": "Fast, zero-dependency in-process authorization engine for Node.js and browsers — ABAC, RBAC and ReBAC (Zanzibar-style relations) with Cerbos-like policies, caveats, OpenTelemetry and pluggable validation/caching",
   "main": "index.js",
   "bin": {
@@ -46,6 +46,7 @@
     "test:types": "tsd",
     "test:conformance": "node --test conformance/*.test.js",
     "bench": "node bench/bench.js",
+    "bench:coldstart": "node bench/coldstart.js",
     "lint": "oxlint src test scripts bench conformance bin",
     "format": "oxfmt src test scripts bench conformance bin",
     "format:check": "oxfmt --check src test scripts bench conformance bin",

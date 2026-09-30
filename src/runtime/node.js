@@ -1,5 +1,4 @@
 const { randomUUID } = require('node:crypto');
-const { performance } = require('node:perf_hooks');
 
 /**
  * Node.js platform runtime. The browser counterpart (`./browser.js`) is
@@ -15,10 +14,15 @@ const { performance } = require('node:perf_hooks');
 const generateCallId = () => randomUUID();
 
 /**
- * Returns a high-resolution timestamp in milliseconds.
+ * Returns a high-resolution timestamp in milliseconds. Only differences are
+ * ever used (durations), so the monotonic `process.hrtime` clock serves as
+ * well as `performance.now()` — without loading node:perf_hooks at startup.
  *
  * @returns {number}
  */
-const getNow = () => performance.now();
+const getNow = () => {
+  const [seconds, nanoseconds] = process.hrtime();
+  return seconds * 1e3 + nanoseconds / 1e6;
+};
 
 module.exports = { generateCallId, getNow };

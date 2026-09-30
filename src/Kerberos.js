@@ -29,17 +29,23 @@ const {
   KerberosRelationsError,
   KerberosValidationError,
 } = require('./errors.js');
-const { createAttributeSchemaRegistry, validateRequestAttributes } = require('./attributeSchemas.js');
 const { createLimiter, settleAll, withTimeout } = require('./async.js');
 const { createSafeExprCodec } = require('./caching/codec.js');
 const { sanitizeResourceKind } = require('./matching.js');
 const { PlanKind, countLeaves, toDebugString, toFilter } = require('./planning/nodes.js');
-const { buildResourcePlan } = require('./planning/planner.js');
 const { evaluateDecisionLayer } = require('./decision.js');
+const { DerivedRoleView, NO_DERIVED_ROLES } = require('./derivedRoleView.js');
 const { createAjvAdapter, parseWithValidation, registerAjvKeywords } = require('./validation');
 // Platform runtime: bundlers swap this for `./runtime/browser.js` via the
 // package.json `browser` field map when targeting the browser.
 const { generateCallId, getNow } = require('./runtime/node.js');
+
+// Loaded on first use rather than at require time: most engines never
+// configure `schemas` or plan a query, and cold start pays for every module.
+let attributeSchemasModule = null;
+const loadAttributeSchemas = () => (attributeSchemasModule ??= require('./attributeSchemas.js'));
+let plannerModule = null;
+const loadPlanner = () => (plannerModule ??= require('./planning/planner.js'));
 
 const EMPTY_ROWS = new Map();
 
@@ -241,6 +247,13 @@ class Kerberos {
   #principalPolicies = new Map();
 
   #rolePolicies = new Map();
+
+  // Ids (sanitized kind / principal id / role) that have at least one
+  // in-memory policy at any version or scope, per lookup source. Without a
+  // cache, an id missing here cannot resolve anywhere along any chain, so the
+  // lookup skips its per-scope map probes — which is most of a request's
+  // cost for principals holding dozens of roles without role policies.
+  #policyIds = { resource: new Set(), principal: new Set(), role: new Set() };
 
   #derivedRoles = new Map();
 
@@ -488,7 +501,10 @@ class Kerberos {
     // Attribute-schema enforcement (Cerbos `schemas` parity): compiled once
     // here; null when unset or `enforcement: 'none'` — the evaluation drivers
     // skip the whole feature on a single falsy check.
-    this.#schemas = createAttributeSchemaRegistry(schemas, this.#ajv);
+    this.#schemas =
+      schemas === undefined || schemas === null
+        ? null
+        : loadAttributeSchemas().createAttributeSchemaRegistry(schemas, this.#ajv);
 
     // Backend dispatch happens ONCE (priority mirrors resolveValidationAdapter:
     // Zod → TypeBox+Ajv → JSON Schema+Ajv), then every validator wires through
@@ -518,6 +534,9 @@ class Kerberos {
     this.#resourcePolicies = resourcePolicies;
     this.#principalPolicies = principalPolicies;
     this.#rolePolicies = rolePolicies;
+    for (const policy of resourcePolicies.values()) this.#policyIds.resource.add(sanitizeResourceKind(policy.kind));
+    for (const policy of principalPolicies.values()) this.#policyIds.principal.add(policy.principal);
+    for (const policy of rolePolicies.values()) this.#policyIds.role.add(policy.role);
     this.#derivedRoles = this.#getDerivedRolesMap(derivedRoles);
 
     this.#logger = createLoggerWriter(logger);
@@ -768,28 +787,35 @@ class Kerberos {
     return resolved;
   }
 
-  // Returns active derived-role name → `parentRoles` (null when ungated), which
-  // resource-policy conflict resolution needs to attribute a rule to the
-  // principal roles it was written for.
-  async #getImportedDerivedRoles(policy, req, relationsMemo, trace, lookups, otel) {
-    const importedRoles = new Map();
+  // Returns the policy's active derived roles as a lazy view (name →
+  // `parentRoles`, null when ungated), which resource-policy conflict
+  // resolution needs to attribute a rule to the principal roles it was written
+  // for. Condition-backed definitions are evaluated only when a rule asks about
+  // them; relation-backed ones are resolved here (the only async step), and
+  // only when a rule of the requested actions references them.
+  async #getImportedDerivedRoles(policy, req, relationsMemo, trace, lookups, otel, activations) {
+    if (policy.importDerivedRoles.length === 0) return NO_DERIVED_ROLES;
+    const setActivations = [];
     const relationCandidates = [];
+    let referenced = null;
     for (const name of policy.importDerivedRoles) {
       const role = await this.#resolveDerivedRolesSetByName(name, lookups, trace);
       if (!role) continue;
-      const derivedRoles = role.getActivated(req);
-      if (derivedRoles) {
-        for (const [derivedRole, parentRoles] of derivedRoles) importedRoles.set(derivedRole, parentRoles);
+      setActivations.push(Kerberos.#activationFor(role, req, activations));
+      if (role.hasRelationDefinitions) {
+        referenced ??= policy.referencedDerivedRoles(req.actions);
+        for (const candidate of role.getRelationCandidates(req, referenced)) relationCandidates.push(candidate);
       }
-      for (const candidate of role.getRelationCandidates(req)) relationCandidates.push(candidate);
     }
 
+    let grantedRoles = null;
     if (relationCandidates.length) {
       if (this.#relations) {
         const granted = await this.#resolveRelationCandidates(relationCandidates, req, relationsMemo, trace, otel);
         if (granted.length) {
           const parentRolesByName = new Map(relationCandidates.map((c) => [c.name, c.parentRoles]));
-          for (const name of granted) importedRoles.set(name, parentRolesByName.get(name) ?? null);
+          grantedRoles = new Map();
+          for (const name of granted) grantedRoles.set(name, parentRolesByName.get(name) ?? null);
         }
       } else if (trace) {
         // Relation-backed definitions without a configured `relations`
@@ -807,7 +833,18 @@ class Kerberos {
       }
     }
 
-    return importedRoles;
+    return setActivations.length || grantedRoles ? new DerivedRoleView(setActivations, grantedRoles) : NO_DERIVED_ROLES;
+  }
+
+  // One lazy activation per derived-roles set per evaluation, shared by every
+  // scope that imports the set — a name is evaluated at most once per request.
+  static #activationFor(role, req, activations) {
+    let activation = activations?.get(role);
+    if (!activation) {
+      activation = role.createActivation(req);
+      activations?.set(role, activation);
+    }
+    return activation;
   }
 
   /**
@@ -1089,6 +1126,9 @@ class Kerberos {
 
   async #resolvePolicyChainUncached(source, map, id, version, scope, Constructor) {
     const scopeSearchChain = this.#getScopeChain(scope);
+    if (!this.#cache.enabled && !this.#policyIds[source].has(id)) {
+      return { chain: [], entry: { source, id, version, scopesSearched: scopeSearchChain, matchedScope: null } };
+    }
     const chain = [];
     let firstOrigin = null;
 
@@ -1170,6 +1210,9 @@ class Kerberos {
    * @returns {Promise<{ rowsByScope: Map<string, Map<string|null, object[]>>, roleChains: Map<string, Array<{policy: object, scope: string}>> }>}
    */
   async #getRoleRows(req, trace, lookups) {
+    if (!trace && !this.#cache.enabled && !this.#hasAnyRolePolicy(req.P.roles)) {
+      return { rowsByScope: new Map(), roleChains: new Map() };
+    }
     const uniqueRoles = [];
     const seenRoles = new Set();
     for (const role of req.P.roles ?? []) {
@@ -1199,6 +1242,10 @@ class Kerberos {
       for (const role of uniqueRoles) {
         chains.set(role, await this.#getRolePolicyChain(role, req, trace, lookups));
       }
+    }
+    if (!Kerberos.#anyChainResolved(chains)) {
+      for (const role of uniqueRoles) roleChains.set(role, chains.get(role));
+      return { rowsByScope, roleChains };
     }
 
     // Transitive parents (DFS, cycle → throw like the old evaluator did).
@@ -1257,6 +1304,8 @@ class Kerberos {
     const chainByScope = new Map();
     for (const entry of resourceChain) chainByScope.set(entry.scope, entry);
 
+    // Only a chain with several resource policies can import one set twice.
+    const activations = resourceChain.length > 1 ? new Map() : null;
     const scopes = [];
     for (const scope of this.#getScopeChain(req.R.scope)) {
       const chainEntry = chainByScope.get(scope) ?? null;
@@ -1271,6 +1320,7 @@ class Kerberos {
           trace,
           lookups,
           otel,
+          activations,
         );
         resource = { policy: chainEntry.policy, derivedRoles };
       }
@@ -1384,7 +1434,7 @@ class Kerberos {
     let resourceChain = null;
     if (this.#schemas) {
       resourceChain = await this.#getResourcePolicyChain(req, trace, lookups);
-      validationErrors = validateRequestAttributes(this.#schemas, resourceChain, req);
+      validationErrors = loadAttributeSchemas().validateRequestAttributes(this.#schemas, resourceChain, req);
       if (validationErrors.length && this.#schemas.enforcement === 'reject') {
         return Kerberos.#invalidAttributesResult(req, trace, validationErrors);
       }
@@ -1402,7 +1452,12 @@ class Kerberos {
     if (unresolvedActions.length) {
       const layerReq = unresolvedActions.length === req.actions.length ? req : { ...req, actions: unresolvedActions };
       const scopes = await this.#getDecisionScopes(layerReq, trace, relationsMemo, lookups, otel, resourceChain);
-      layerResult = evaluateDecisionLayer({ req: layerReq, scopes });
+      layerResult = evaluateDecisionLayer({
+        req: layerReq,
+        scopes,
+        settleDerivedRoles: trace !== null,
+        collectDerivedRoles: trace !== null,
+      });
     }
 
     const merged = Kerberos.#mergeSourceResults(req, trace, principalResult, layerResult);
@@ -1509,6 +1564,12 @@ class Kerberos {
   #resolvePolicyChainFromMemory(source, map, id, version, scope, trace) {
     const scopeSearchChain = this.#getScopeChain(scope);
     const chain = [];
+    // The sync driver never has a cache: an id with no policy anywhere misses
+    // at every scope, so the probes (and their key strings) are skipped.
+    if (!this.#policyIds[source].has(id)) {
+      trace?.push({ source, id, version, scopesSearched: scopeSearchChain, matchedScope: null });
+      return chain;
+    }
     for (const searchScope of scopeSearchChain) {
       const policy = map.get(`${id}.${version}.${searchScope}`);
       if (policy) chain.push({ policy, scope: searchScope });
@@ -1517,7 +1578,22 @@ class Kerberos {
     return chain;
   }
 
+  #hasAnyRolePolicy(roles) {
+    const known = this.#policyIds.role;
+    if (known.size === 0 || !roles) return false;
+    for (const role of roles) if (known.has(role)) return true;
+    return false;
+  }
+
+  static #anyChainResolved(chains) {
+    for (const chain of chains.values()) if (chain.length > 0) return true;
+    return false;
+  }
+
   #getRoleRowsSync(req, trace) {
+    // Untraced and none of the principal's roles has a role policy anywhere:
+    // nothing to resolve (a traced request still records one miss per role).
+    if (!trace && !this.#hasAnyRolePolicy(req.P.roles)) return new Map();
     const uniqueRoles = [];
     const seenRoles = new Set();
     for (const role of req.P.roles ?? []) {
@@ -1537,6 +1613,9 @@ class Kerberos {
         this.#resolvePolicyChainFromMemory('role', this.#rolePolicies, role, version, req.R.scope, trace),
       );
     }
+    // No role of the principal has a role policy along the chain (the common
+    // case): no rows, and no parent closure to walk.
+    if (!Kerberos.#anyChainResolved(chains)) return rowsByScope;
 
     const ancestorsOf = new Map();
     const resolveAncestors = (role, path) => {
@@ -1578,9 +1657,11 @@ class Kerberos {
     return rowsByScope;
   }
 
-  #getImportedDerivedRolesSync(policy, req, trace) {
-    const importedRoles = new Map();
+  #getImportedDerivedRolesSync(policy, req, trace, activations) {
+    if (policy.importDerivedRoles.length === 0) return NO_DERIVED_ROLES;
+    const setActivations = [];
     const relationCandidates = [];
+    let referenced = null;
     for (const name of policy.importDerivedRoles) {
       const role = this.#derivedRoles.get(name);
       if (!role) {
@@ -1590,11 +1671,13 @@ class Kerberos {
         continue;
       }
       trace?.push({ source: 'derivedRoles', name, matched: true });
-      const derivedRoles = role.getActivated(req);
-      if (derivedRoles) {
-        for (const [derivedRole, parentRoles] of derivedRoles) importedRoles.set(derivedRole, parentRoles);
+      setActivations.push(Kerberos.#activationFor(role, req, activations));
+      // Evaluated with or without tracing, so a gate that throws fails the
+      // request the same way whether or not includeMeta is set.
+      if (role.hasRelationDefinitions) {
+        referenced ??= policy.referencedDerivedRoles(req.actions);
+        for (const candidate of role.getRelationCandidates(req, referenced)) relationCandidates.push(candidate);
       }
-      for (const candidate of role.getRelationCandidates(req)) relationCandidates.push(candidate);
     }
 
     // The sync driver runs only when no `relations` resolver is configured —
@@ -1612,7 +1695,7 @@ class Kerberos {
       }
     }
 
-    return importedRoles;
+    return setActivations.length ? new DerivedRoleView(setActivations) : NO_DERIVED_ROLES;
   }
 
   #getDecisionScopesSync(req, trace, precomputedResourceChain = null) {
@@ -1631,13 +1714,18 @@ class Kerberos {
     const chainByScope = new Map();
     for (const entry of resourceChain) chainByScope.set(entry.scope, entry);
 
+    // Only a chain with several resource policies can import one set twice.
+    const activations = resourceChain.length > 1 ? new Map() : null;
     const scopes = [];
     for (const scope of this.#getScopeChain(req.R.scope)) {
       const chainEntry = chainByScope.get(scope) ?? null;
       const rows = rowsByScope.get(scope) ?? EMPTY_ROWS;
       if (!chainEntry && rows.size === 0) continue;
       const resource = chainEntry
-        ? { policy: chainEntry.policy, derivedRoles: this.#getImportedDerivedRolesSync(chainEntry.policy, req, trace) }
+        ? {
+            policy: chainEntry.policy,
+            derivedRoles: this.#getImportedDerivedRolesSync(chainEntry.policy, req, trace, activations),
+          }
         : null;
       scopes.push({ scope, resource, rows });
     }
@@ -1658,7 +1746,7 @@ class Kerberos {
         req.R.scope,
         trace,
       );
-      validationErrors = validateRequestAttributes(this.#schemas, resourceChain, req);
+      validationErrors = loadAttributeSchemas().validateRequestAttributes(this.#schemas, resourceChain, req);
       if (validationErrors.length && this.#schemas.enforcement === 'reject') {
         return Kerberos.#invalidAttributesResult(req, trace, validationErrors);
       }
@@ -1685,6 +1773,8 @@ class Kerberos {
       layerResult = evaluateDecisionLayer({
         req: layerReq,
         scopes: this.#getDecisionScopesSync(layerReq, trace, resourceChain),
+        settleDerivedRoles: trace !== null,
+        collectDerivedRoles: trace !== null,
       });
     }
 
@@ -2286,7 +2376,7 @@ class Kerberos {
           // Dedupes role-closure lookups; only worth it on the cache path.
           this.#cache.enabled ? new Map() : null,
         );
-        const { node } = buildResourcePlan({
+        const { node } = loadPlanner().buildResourcePlan({
           principal: parsedArgs.principal,
           resource: parsedArgs.resource,
           actions,

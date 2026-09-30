@@ -139,7 +139,9 @@ A wrongly-typed operand in a relational comparison reaches this same class: CEL 
 
 Kerberos has no per-rule skip-on-error mode. The error surfaces through the request-level `onError` option (`'throw'` propagates it, `'deny'` fails closed), and inside a `checkResources` batch a rejected resource is isolated to a fail-closed `EFFECT_DENY` carrying `reason: 'evaluation-error'`. The divergence is therefore in the safe direction, but it is a real difference in decisions.
 
-_Enforcement: corpus (`suites/conderr_test.yaml`, recorded via `cerbosActions`)._
+Fail-closed applies to conditions that are actually **evaluated**, and since 4.3.0 only what can affect the decision is evaluated: a derived role only when a rule of the requested actions asks about it, and a scope only when the walk reaches it (see _Scope walk evaluation_ below). An erroring condition elsewhere no longer fails the request, and both engines then agree (verified on 0.55.0). `meta.effectiveDerivedRoles` still lists every active imported derived role, as Cerbos's does; an erroring definition simply counts as inactive there and cannot affect the decision.
+
+_Enforcement: corpus (`suites/conderr_test.yaml`, recorded via `cerbosActions`; `suites/lazy_eval_test.yaml`)._
 
 ### Plan operators
 
@@ -174,6 +176,14 @@ Two traps found while establishing this, worth knowing if you ever re-verify:
 - **`ghcr.io/cerbos/cerbos:latest` is stale and serves 0.40.0.** A parity check against `latest` validates the _old_ semantics and hides this entirely, which is why CI pins an explicit version.
 
 _Enforcement: corpus (`suites/ticket_test.yaml`, all four combinations), plus `test/ConflictResolution.test.js` and the multi-role principals in `test/PlanParity.test.js`._
+
+### Scope walk evaluation — aligned in 4.3
+
+Cerbos walks the scope chain per action and role and stops at the first scope that decides; the scopes after it are never evaluated. Verified on a live 0.55.0 PDP with a two-level chain where the specific scope allows: the parent scope's outputs are not emitted, and a parent-scope DENY rule whose condition errors does not affect the decision.
+
+Kerberos up to 4.2 evaluated every policy of the chain before walking it. That emitted outputs of scopes the walk never reached, and let an erroring condition in such a scope fail the whole request with `evaluation-error`. Since 4.3 a resource policy is evaluated per (scope, action) only when the walk reaches it, and a role policy only when a bucket needs its verdict — the same as Cerbos. Outputs of unreached scopes are no longer emitted, which is a visible change for anyone reading `outputs` across a scope chain.
+
+_Enforcement: corpus (`suites/lazy_eval_test.yaml`, decisions — the runner does not compare outputs), plus `test/LazyScopes.test.js` (outputs and errors, both drivers)._
 
 ## Documentation audit (Cerbos 0.55.0)
 

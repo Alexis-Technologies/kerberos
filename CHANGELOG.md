@@ -5,6 +5,98 @@ All notable changes to **`@alexify/kerberos`** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.0] - 2026-09-30
+
+A performance release. The work comes from the scaling measurements of the
+decision engine, which showed decision cost following the size of the policy
+set rather than the part of it a request needs. Every behaviour change below
+was checked against a live Cerbos 0.55.0 PDP and brings Kerberos closer to it.
+
+### Performance
+
+- **Rules are indexed by action and role** (`src/ruleIndex.js`). A resource
+  policy no longer tests every rule against every requested action. The rules
+  that can fire for an action are cached per policy, and long lists are split
+  by the principal role they reach. Principal and role policies select their
+  rules by kind once per check. A 1 000-rule policy decides in the same time
+  whether the matching rule is first or last: ~30k → ~730k decisions/s.
+- **Lookups skip ids that have no policy.** Without a cache, a principal id or
+  role with no in-memory policy at any version or scope is no longer probed
+  scope by scope. 64 principal roles without role policies: ~37k → ~133k
+  decisions/s. The plain single-rule check is ~20% faster because it no longer
+  looks for principal and role policies that do not exist.
+- **Derived roles are evaluated only when a rule asks about them**, and only
+  once per request even when several scopes import the same set. The relations
+  resolver is asked only about relation-backed roles that a rule of the
+  requested actions references. 32 imported definitions with one referenced:
+  ~190k → ~625k decisions/s.
+- **The scope walk evaluates a scope only when it reaches it** (see Changed).
+  Scope depth 8, decided at the most specific scope: ~170k → ~278k decisions/s.
+- **ReBAC: concurrent checks share unfinished subproblems.** The built-in
+  resolver used to memoize only finished subproblems, so the resources of a
+  `checkResources` batch each re-walked the shared part of the graph. A
+  subproblem now waits for an identical one that is still being computed.
+  Waits are checked for cycles first, so cyclic data still ends at the depth
+  guard instead of deadlocking. If the computation being waited on fails, the
+  waiting check computes the subproblem itself. For 100 documents in a folder
+  chain of depth 16: `checkResources` ~330 → ~1 670 batches/s, 100 concurrent
+  `relations.check` calls ~380 → ~3 260. Single checks are unchanged.
+- **Smaller cold start.** The query planner and the attribute-schema validator
+  load on first use, and the Node runtime measures durations with
+  `process.hrtime` instead of loading `node:perf_hooks`. Require, construction
+  and first decision: ~18.0 → ~16.8 ms.
+
+### Changed
+
+- **Scopes the decision walk never reaches are not evaluated.** Once a more
+  specific scope decides an action for a role, the scopes after it are skipped
+  for that action. Their conditions do not run, so an erroring condition there
+  no longer fails the request with `evaluation-error`. Their outputs are no
+  longer emitted. This is what Cerbos does. Kerberos used to evaluate every
+  policy of the chain up front, which DIVERGENCES.md now records as aligned.
+- **A derived role whose condition errors fails only requests that use it.**
+  Previously every request that imported the set failed. When a rule of the
+  request does reference it, Kerberos still fails closed, as before.
+  `meta.effectiveDerivedRoles` still lists every active imported derived role,
+  as Cerbos does. Relation-backed ones are listed only when a rule of the
+  request references them, since only those are resolved.
+- The benchmark harness warms up for at most 0.5 s per scenario and accepts a
+  name filter (`node bench/bench.js scaling`).
+
+### Fixed
+
+- A condition-backed derived-role definition without `parentRoles`, built
+  without a validation backend, crashed every request that evaluated it with a
+  `TypeError`. It now fails at construction with the same message as the
+  validation backends.
+
+### Added
+
+- `bench:coldstart` script and `scaling —` benchmark scenarios.
+- `DerivedRoles#getRelationCandidates(req, names?)`: an optional set of names
+  limits the candidates.
+
+### Tests
+
+- `test/RuleIndex.test.js`: a seeded randomized comparison of the indexed
+  evaluation against a full rule scan. `test/LazyScopes.test.js`: outputs and
+  errors of unreached scopes, on both drivers. New lazy-evaluation cases in
+  `test/DerivedRoles.test.js`. In `test/Relations.test.js`, in-flight sharing
+  with cycles, the foreign-failure rule and a seeded random comparison against
+  independent checks.
+- Conformance: `suites/lazy_eval_test.yaml` passes against both engines.
+  Kerberos 4.2 fails three of its cases.
+
+### Upgrading from 4.2
+
+No API changes. Two behaviour changes can show up in existing tests:
+
+- **`outputs` across a scope chain.** If a more specific scope decides, the
+  parent scopes' outputs are no longer in the response.
+- **Errors that used to deny.** A condition that throws in a scope the walk
+  does not reach, or in a derived role that no rule of the request references,
+  no longer turns the request into a fail-closed `EFFECT_DENY`.
+
 ## [4.2.0] - 2026-09-22
 
 Cerbos-parity fixes found by differential testing against a live 0.55.0 PDP

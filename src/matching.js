@@ -118,7 +118,7 @@ function matchesPattern(pattern, value) {
  * regex test only when a rule actually uses globs.
  *
  * @param {readonly string[]} patterns
- * @returns {{ matches(value: string): boolean, matchesAny(values: Iterable<string>): boolean }}
+ * @returns {{ matchesAll: boolean, matches(value: string): boolean, matchesAny(values: Iterable<string>): boolean }}
  */
 function compileMatcher(patterns) {
   const exact = new Set();
@@ -130,6 +130,9 @@ function compileMatcher(patterns) {
     else exact.add(pattern);
   }
   return {
+    // True when the list contains a bare `*` — the only pattern that reaches
+    // the anonymous bucket of a principal with no roles.
+    matchesAll: matchAll,
     matches(value) {
       if (matchAll || exact.has(value)) return true;
       for (const re of globs) if (re.test(value)) return true;

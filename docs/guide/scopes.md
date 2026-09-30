@@ -48,6 +48,7 @@ Matching Cerbos's `SCOPE_PERMISSIONS_OVERRIDE_PARENT` (its default), the chain i
 
 - The first scope whose policy produces a decision (allow or deny) for an action and a role **seals** it; policies further up cannot change it.
 - A rule whose condition fails decides nothing — the walk **falls through** to the parent scope for that action.
+- A scope the walk never reaches for an action is **not evaluated at all**: its conditions do not run — so an erroring condition there cannot fail the request — and its outputs are not emitted. This is what Cerbos does too (verified on a live PDP).
 - The walk runs per principal role, so a deny sealing one role at a specific scope does not stop another role from winning an allow at the base scope (allow from any role wins across roles).
 - A scope with no policy at all is simply skipped (Cerbos's `lenientScopeSearch`; Kerberos has no strict mode).
 

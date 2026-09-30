@@ -36,6 +36,15 @@ class DerivedRoles {
 
   #shape = null;
 
+  // Condition-backed definitions grouped by name (a set may define one name
+  // more than once), and their unique names in definition order — the lazy
+  // activation below evaluates by name.
+  #conditionDefsByName = new Map();
+
+  #conditionNames = [];
+
+  #hasRelationDefinitions = false;
+
   /**
    * @param {unknown} shape
    * @param {object} [options]
@@ -54,6 +63,13 @@ class DerivedRoles {
         if (!def.condition && !def.relation) {
           throw new Error(`Derived role definition "${def.name}" must declare a "condition" or a "relation"`);
         }
+        // Same rule as every validation backend: a condition-backed
+        // definition is gated on its parent roles, so they are required.
+        if (!def.relation && !(Array.isArray(def.parentRoles) && def.parentRoles.length)) {
+          throw new Error(
+            `Derived role definition "${def.name}" requires either "relation" or both "parentRoles" and "condition"`,
+          );
+        }
         // Never materialize an absent condition (e.g. as null): shapes may be
         // reused across instances, and a written `condition: null` would fail
         // the optional-field validation on the next construction.
@@ -66,6 +82,16 @@ class DerivedRoles {
           Object.defineProperty(parsedDef, 'parentRolesMatcher', { value: compileMatcher(def.parentRoles) });
         }
         defs.push(parsedDef);
+        if (parsedDef.relation) {
+          this.#hasRelationDefinitions = true;
+        } else {
+          const sameName = this.#conditionDefsByName.get(parsedDef.name);
+          if (sameName) sameName.push(parsedDef);
+          else {
+            this.#conditionDefsByName.set(parsedDef.name, [parsedDef]);
+            this.#conditionNames.push(parsedDef.name);
+          }
+        }
       }
       this.#shape.definitions = defs;
     }
@@ -92,6 +118,11 @@ class DerivedRoles {
     return this.#shape;
   }
 
+  /** Whether any definition is relation-backed (resolved on the async phase). */
+  get hasRelationDefinitions() {
+    return this.#hasRelationDefinitions;
+  }
+
   // Shared evaluation prelude: request enriched with constants/variables plus
   // an O(1) principal-roles set for parent-role gating.
   #buildEvalContext(req) {
@@ -105,14 +136,7 @@ class DerivedRoles {
     const reqWithVariables =
       variables === undefined ? reqWithConstants : { ...reqWithConstants, variables, V: variables };
 
-    return { reqWithVariables, principalRoles: new Set(reqWithVariables.P.roles) };
-  }
-
-  static #parentRolesMatch(def, principalRoles) {
-    for (const role of principalRoles) {
-      if (def.parentRolesMatcher.matches(role)) return true;
-    }
-    return false;
+    return { reqWithVariables, principalRoles: reqWithVariables.P.roles ?? [] };
   }
 
   /**
@@ -141,19 +165,54 @@ class DerivedRoles {
    */
   getActivated(req) {
     const roles = new Map();
-
-    if (!this.#shape.definitions.length) return roles;
-
-    const { reqWithVariables, principalRoles } = this.#buildEvalContext(req);
-
-    for (const def of this.#shape.definitions) {
-      if (def.relation) continue;
-      if (!DerivedRoles.#parentRolesMatch(def, principalRoles)) continue;
-
-      if (def.condition.isFulfilled(reqWithVariables)) roles.set(def.name, def.parentRoles);
+    const activation = this.createActivation(req);
+    for (const name of activation.names) {
+      const active = activation.resolve(name);
+      if (active) roles.set(name, active.parentRoles);
     }
-
     return roles;
+  }
+
+  /**
+   * Lazy counterpart of {@link getActivated} for one request: `resolve(name)`
+   * evaluates that name's condition-backed definitions on first use and
+   * memoizes the answer — `{ parentRoles }` when one of them activates (the
+   * last active definition wins, as in `getActivated`), `null` otherwise.
+   * The engine only resolves the names a rule actually asks about, so a
+   * definition no rule needs is never evaluated. `names` lists every
+   * condition-backed name in definition order.
+   *
+   * @param {Record<string, unknown>} req
+   * @returns {{
+   *   names: readonly string[],
+   *   resolve(name: string): { parentRoles: string[] } | null,
+   *   peek(name: string): { parentRoles: string[] } | null | undefined,
+   * }}
+   */
+  createActivation(req) {
+    const defsByName = this.#conditionDefsByName;
+    const results = new Map();
+    let context = null;
+    return {
+      names: this.#conditionNames,
+      // The memoized answer, without evaluating (undefined = not resolved yet).
+      peek: (name) => results.get(name),
+      resolve: (name) => {
+        let result = results.get(name);
+        if (result !== undefined) return result;
+        result = null;
+        const defs = defsByName.get(name);
+        if (defs) {
+          context ??= this.#buildEvalContext(req);
+          for (const def of defs) {
+            if (!def.parentRolesMatcher.matchesAny(context.principalRoles)) continue;
+            if (def.condition.isFulfilled(context.reqWithVariables)) result = { parentRoles: def.parentRoles };
+          }
+        }
+        results.set(name, result);
+        return result;
+      },
+    };
   }
 
   /**
@@ -163,20 +222,23 @@ class DerivedRoles {
    * resolver on its async phase.
    *
    * @param {Record<string, unknown>} req
+   * @param {ReadonlySet<string>} [names] - only consider definitions with these
+   *   names (the engine passes the derived roles its rules reference)
    * @returns {Array<{ name: string, relation: string }>}
    */
-  getRelationCandidates(req) {
+  getRelationCandidates(req, names) {
     const candidates = [];
 
-    if (!this.#shape.definitions.length) return candidates;
+    if (!this.#hasRelationDefinitions || names?.size === 0) return candidates;
 
     let context = null;
     for (const def of this.#shape.definitions) {
       if (!def.relation) continue;
+      if (names && !names.has(def.name)) continue;
       context ??= this.#buildEvalContext(req);
 
       if (Array.isArray(def.parentRoles) && def.parentRoles.length) {
-        if (!DerivedRoles.#parentRolesMatch(def, context.principalRoles)) continue;
+        if (!def.parentRolesMatcher.matchesAny(context.principalRoles)) continue;
       }
       if (def.condition && !def.condition.isFulfilled(context.reqWithVariables)) continue;
 

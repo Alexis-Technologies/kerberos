@@ -1,7 +1,8 @@
 /**
  * Zero-dependency ops/sec benchmark for the Kerberos hot paths.
  *
- * Run: pnpm bench (or: node bench/bench.js)
+ * Run: pnpm bench (or: node bench/bench.js [filter]) — a filter runs only the
+ * scenarios whose name contains it (e.g. `node bench/bench.js scaling`).
  *
  * Results are recorded in the README "Benchmarks" section — update it when a
  * change moves the numbers. jsep (devDependency) is only needed for the
@@ -11,10 +12,16 @@ const { performance } = require('node:perf_hooks');
 const { Kerberos, Effect } = require('../src/index.js');
 
 const WARMUP_ITERATIONS = 2_000;
+// Slow scenarios (millisecond-scale batches) stop warming up after this long
+// instead of spending seconds on 2 000 iterations.
+const WARMUP_MAX_MS = 500;
 const MEASURE_MS = 1_000;
+const filter = process.argv[2] ?? '';
 
 async function bench(name, fn) {
-  for (let i = 0; i < WARMUP_ITERATIONS; i++) await fn();
+  if (!name.includes(filter)) return null;
+  const warmupStart = performance.now();
+  for (let i = 0; i < WARMUP_ITERATIONS && performance.now() - warmupStart < WARMUP_MAX_MS; i++) await fn();
 
   let iterations = 0;
   const start = performance.now();
@@ -24,7 +31,7 @@ async function bench(name, fn) {
   }
   const elapsed = performance.now() - start;
   const opsPerSec = Math.round((iterations / elapsed) * 1000);
-  console.log(`${name.padEnd(52)} ${opsPerSec.toLocaleString('en-US').padStart(12)} ops/sec`);
+  console.log(`${name.padEnd(66)} ${opsPerSec.toLocaleString('en-US').padStart(12)} ops/sec`);
   return { name, opsPerSec };
 }
 
@@ -351,7 +358,179 @@ async function main() {
       })),
   );
 
+  await scalingScenarios(results, RelationResolver);
+
   return results;
+}
+
+/**
+ * Scaling sweeps over the dimensions that drive decision cost: rules per
+ * policy, principal roles, imported derived-role definitions, scope depth and
+ * relation-graph depth under a batch. Every scenario name starts with
+ * `scaling —` so `node bench/bench.js scaling` runs just these.
+ */
+async function scalingScenarios(results, RelationResolver) {
+  const user = { id: 'sally', roles: ['USER'] };
+  const expense = { id: 'e1', kind: 'expense', attr: { ownerId: 'sally' } };
+
+  // 1 000 rules, one distinct action each: the requested action's rule sits
+  // first or last in the policy.
+  const distinctActionRules = [];
+  for (let i = 0; i < 1000; i++) {
+    distinctActionRules.push({ actions: [`act${i}`], effect: Effect.Allow, roles: ['USER'] });
+  }
+  const distinctActions = new Kerberos(
+    [{ resourcePolicy: { version: 'default', resource: 'expense', rules: distinctActionRules } }],
+    [],
+  );
+  results.push(
+    await bench('scaling — 1 000 rules × distinct actions, match first', () =>
+      distinctActions.isAllowed({ principal: user, action: 'act0', resource: expense })),
+  );
+  results.push(
+    await bench('scaling — 1 000 rules × distinct actions, match last', () =>
+      distinctActions.isAllowed({ principal: user, action: 'act999', resource: expense })),
+  );
+
+  // 1 000 rules sharing one action, one distinct role each.
+  const distinctRoleRules = [];
+  for (let i = 0; i < 1000; i++) {
+    distinctRoleRules.push({ actions: ['view'], effect: Effect.Allow, roles: [`role${i}`] });
+  }
+  const distinctRoles = new Kerberos(
+    [{ resourcePolicy: { version: 'default', resource: 'expense', rules: distinctRoleRules } }],
+    [],
+  );
+  results.push(
+    await bench('scaling — 1 000 rules × distinct roles, match last', () =>
+      distinctRoles.isAllowed({ principal: { id: 'sally', roles: ['role999'] }, action: 'view', resource: expense })),
+  );
+
+  // A principal with 64 roles and no role policy loaded at all.
+  const manyRoles = [];
+  for (let i = 0; i < 63; i++) manyRoles.push(`team${i}`);
+  manyRoles.push('USER');
+  const simpleExpense = new Kerberos(
+    [
+      {
+        resourcePolicy: {
+          version: 'default',
+          resource: 'expense',
+          rules: [{ actions: ['view'], effect: Effect.Allow, roles: ['USER'] }],
+        },
+      },
+    ],
+    [],
+  );
+  results.push(
+    await bench('scaling — 64 principal roles, no role policies', () =>
+      simpleExpense.isAllowed({ principal: { id: 'sally', roles: manyRoles }, action: 'view', resource: expense })),
+  );
+
+  // 32 imported derived-role definitions, only one referenced by a rule.
+  const definitions = [];
+  for (let i = 0; i < 32; i++) {
+    definitions.push({
+      name: `DR${i}`,
+      parentRoles: ['USER'],
+      condition: { match: ({ P, R }) => R.attr.ownerId === P.id },
+    });
+  }
+  const manyDerived = new Kerberos(
+    [
+      {
+        resourcePolicy: {
+          version: 'default',
+          resource: 'expense',
+          importDerivedRoles: ['many_roles'],
+          rules: [{ actions: ['view'], effect: Effect.Allow, derivedRoles: ['DR0'] }],
+        },
+      },
+    ],
+    [{ name: 'many_roles', definitions }],
+  );
+  results.push(
+    await bench('scaling — 32 derived-role definitions, 1 referenced', () =>
+      manyDerived.isAllowed({ principal: user, action: 'view', resource: expense })),
+  );
+
+  // Scope depth 8, every level has a policy, the most specific one decides.
+  const scopedPolicies = [];
+  const segments = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+  for (let depth = 0; depth <= segments.length; depth++) {
+    scopedPolicies.push({
+      resourcePolicy: {
+        version: 'default',
+        resource: 'expense',
+        scope: segments.slice(0, depth).join('.'),
+        rules: [{ actions: ['view'], effect: Effect.Allow, roles: ['USER'] }],
+      },
+    });
+  }
+  const deepScopes = new Kerberos(scopedPolicies, []);
+  const deepResource = { ...expense, scope: segments.join('.') };
+  results.push(
+    await bench('scaling — scope depth 8, decided at the most specific scope', () =>
+      deepScopes.isAllowed({ principal: user, action: 'view', resource: deepResource })),
+  );
+
+  // ReBAC batch: 100 documents in one folder, folder chain depth 16.
+  const folderSchema = {
+    relationSchema: {
+      definitions: {
+        user: {},
+        group: { relations: { member: ['user', 'group#member'] } },
+        folder: {
+          relations: { parent: ['folder'], viewer: ['user', 'group#member'] },
+          permissions: { view: { anyOf: ['viewer', { via: 'parent', permission: 'view' }] } },
+        },
+        document: {
+          relations: { parent: ['folder'], viewer: ['user', 'group#member'] },
+          permissions: { view: { anyOf: ['viewer', { via: 'parent', permission: 'view' }] } },
+        },
+      },
+    },
+  };
+  const DEPTH = 16;
+  const folderTuples = ['folder:f1#viewer@group:eng#member', 'group:eng#member@user:deep'];
+  for (let level = 2; level <= DEPTH; level++) folderTuples.push(`folder:f${level}#parent@folder:f${level - 1}`);
+  const docResources = [];
+  for (let i = 0; i < 100; i++) {
+    folderTuples.push(`document:d${i}#parent@folder:f${DEPTH}`);
+    docResources.push({ resource: { id: `d${i}`, kind: 'document' }, actions: ['view'] });
+  }
+  const folderRelations = new RelationResolver({ schema: folderSchema, tuples: folderTuples });
+  const folderEngine = new Kerberos(
+    [
+      {
+        resourcePolicy: {
+          version: 'default',
+          resource: 'document',
+          importDerivedRoles: ['doc_viewers'],
+          rules: [{ actions: ['view'], effect: Effect.Allow, derivedRoles: ['DOC_VIEWER'] }],
+        },
+      },
+    ],
+    [{ name: 'doc_viewers', definitions: [{ name: 'DOC_VIEWER', relation: 'view' }] }],
+    { relations: folderRelations },
+  );
+  results.push(
+    await bench('scaling — checkResources 100 docs, relation depth 16', () =>
+      folderEngine.checkResources({ principal: { id: 'deep', roles: ['USER'] }, resources: docResources })),
+  );
+  results.push(
+    await bench('scaling — 100 concurrent relations.check, shared memo, depth 16', () => {
+      const memo = new Map();
+      return Promise.all(
+        docResources.map(({ resource }) =>
+          folderRelations.check(
+            { resource: `document:${resource.id}`, permission: 'view', subject: 'user:deep' },
+            { memo },
+          ),
+        ),
+      );
+    }),
+  );
 }
 
 main();

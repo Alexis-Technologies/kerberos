@@ -374,7 +374,8 @@ export type DerivedRolesSchema<S extends KerberosSchema = AnySchema> = {
 export class DerivedRoles<S extends KerberosSchema = AnySchema> {
   constructor(schema: DerivedRolesSchema<S>, options?: ValidationOptions);
   get(req: BaseRequest<S>): Set<string>;
-  getRelationCandidates(req: BaseRequest<S>): Array<{ name: string; relation: string }>;
+  /** `names` limits the result to definitions with these names. */
+  getRelationCandidates(req: BaseRequest<S>, names?: ReadonlySet<string>): Array<{ name: string; relation: string }>;
 }
 export class DerivedRolesZodSchemas {
   static buildShape(z: unknown): unknown;
@@ -584,6 +585,11 @@ export type KerberosAuditLogEntry = {
       /** Error class name for `'evaluation-error'` fail-closed denials. */
       errorName?: string;
     }>;
+    /**
+     * Every active imported derived role. Relation-backed roles are listed
+     * only when a rule of the requested actions references them (only those
+     * are resolved).
+     */
     effectiveDerivedRoles: string[];
     resolution?: KerberosResolutionTraceEntry[];
   } | Record<string, unknown>;
@@ -1361,6 +1367,11 @@ export type CheckResourcesResult<S extends KerberosSchema = AnySchema, E = Effec
       /** Error class name for `'evaluation-error'` fail-closed denials. */
       errorName?: string;
     }>;
+    /**
+     * Every active imported derived role. Relation-backed roles are listed
+     * only when a rule of the requested actions references them (only those
+     * are resolved).
+     */
     effectiveDerivedRoles: string[];
     resolution?: KerberosResolutionTraceEntry[];
   };

@@ -1,6 +1,6 @@
 # Why Kerberos.js?
 
-An **embedded, zero-dependency authorization engine** for Node.js and the browser: Cerbos-style policies (RBAC + ABAC), a SpiceDB-inspired "Zanzibar-lite" resolver (ReBAC) and Cerbos-compatible query plans — all in-process, no server to deploy, [~34 KB min+gzip](/guide/installation#bundle-size). The API deliberately stays as close to Cerbos as possible: if you know Cerbos, you already know Kerberos.js.
+An **embedded, zero-dependency authorization engine** for Node.js and the browser: Cerbos-style policies (RBAC + ABAC), a SpiceDB-inspired "Zanzibar-lite" resolver (ReBAC) and Cerbos-compatible query plans — all in-process, no server to deploy, [~38 KB min+gzip](/guide/installation#bundle-size). The API deliberately stays as close to Cerbos as possible: if you know Cerbos, you already know Kerberos.js.
 
 ## Why in-process?
 
@@ -39,5 +39,5 @@ An **embedded, zero-dependency authorization engine** for Node.js and the browse
 | **DX** | [Pluggable validation](/guide/schema-validation) (Zod / JSON Schema + Ajv / TypeBox), [testing DSL](/guide/testing) (`/tests`), hand-maintained TypeScript types, [browser build](/guide/installation#browser-usage) |
 
 ::: tip Version 4.x
-See the [CHANGELOG](https://github.com/Alexis-Technologies/kerberos/blob/main/CHANGELOG.md) for everything that changed since `3.1.0`: verified Cerbos compatibility (a conformance corpus replayed against a live PDP, plus the `/cerbos` YAML + CEL policy importer), attribute-schema enforcement, policy-as-code tooling (the `/loader` subpath and the `kerberos` CLI), typed policy authoring, and the code-review hardening waves — a `Conditions` fail-open fix, restored Node-ESM named exports, and a synchronous evaluation driver (~2.5× on simple `isAllowed`). `4.2.0` closes the parity gaps a differential campaign against a live PDP turned up — CEL-style strict comparisons and Cerbos's resource-kind sanitization — see its upgrade notes.
+See the [CHANGELOG](https://github.com/Alexis-Technologies/kerberos/blob/main/CHANGELOG.md) for everything that changed since `3.1.0`: verified Cerbos compatibility (a conformance corpus replayed against a live PDP, plus the `/cerbos` YAML + CEL policy importer), attribute-schema enforcement, policy-as-code tooling (the `/loader` subpath and the `kerberos` CLI), typed policy authoring, and the code-review hardening waves — a `Conditions` fail-open fix, restored Node-ESM named exports, and a synchronous evaluation driver (~2.5× on simple `isAllowed`). `4.2.0` closes the parity gaps a differential campaign against a live PDP turned up — CEL-style strict comparisons and Cerbos's resource-kind sanitization — see its upgrade notes. `4.3.0` is a performance release: rules indexed by action and role, derived roles and the scope walk evaluated only as far as the decision needs (which also aligns unreached-scope behaviour with Cerbos), and ReBAC batches that share unfinished subproblems.
 :::
