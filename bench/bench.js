@@ -1,36 +1,64 @@
 /**
  * Zero-dependency ops/sec benchmark for the Kerberos hot paths.
  *
- * Run: pnpm bench (or: node bench/bench.js [filter]) — a filter runs only the
- * scenarios whose name contains it (e.g. `node bench/bench.js scaling`).
+ * Run: pnpm bench (or: node bench/bench.js [filter] [--samples N] [--json] [--src DIR])
+ * - a filter runs only the scenarios whose name contains it (e.g.
+ *   `node bench/bench.js scaling`);
+ * - `--samples N` times each scenario N times and reports the median;
+ * - `--json` merges the results into bench/results/engine.json under the
+ *   measured package version (the docs charts and README tables read it —
+ *   regenerate them with `pnpm bench:report`);
+ * - `--src DIR` benchmarks another checkout of the package (e.g. a worktree
+ *   of the previous release), which is how release-over-release numbers are
+ *   produced on one machine with one harness.
  *
- * Results are recorded in the README "Benchmarks" section — update it when a
- * change moves the numbers. jsep (devDependency) is only needed for the
- * cache-backed scenario.
+ * jsep (devDependency) is only needed for the cache-backed scenario.
  */
+const fs = require('node:fs');
+const path = require('node:path');
 const { performance } = require('node:perf_hooks');
-const { Kerberos, Effect } = require('../src/index.js');
+const { parseArgs } = require('node:util');
+const { describeMachine } = require('./machine.js');
+
+const { values: options, positionals } = parseArgs({
+  allowPositionals: true,
+  options: {
+    samples: { type: 'string', default: '1' },
+    json: { type: 'boolean', default: false },
+    src: { type: 'string', default: path.join(__dirname, '..') },
+  },
+});
+const SRC = path.resolve(options.src);
+const SAMPLES = Number(options.samples);
+const RESULTS_FILE = path.join(__dirname, 'results', 'engine.json');
+
+const { Kerberos, Effect } = require(path.join(SRC, 'src', 'index.js'));
 
 const WARMUP_ITERATIONS = 2_000;
 // Slow scenarios (millisecond-scale batches) stop warming up after this long
 // instead of spending seconds on 2 000 iterations.
 const WARMUP_MAX_MS = 500;
 const MEASURE_MS = 1_000;
-const filter = process.argv[2] ?? '';
+const filter = positionals[0] ?? '';
 
 async function bench(name, fn) {
   if (!name.includes(filter)) return null;
   const warmupStart = performance.now();
   for (let i = 0; i < WARMUP_ITERATIONS && performance.now() - warmupStart < WARMUP_MAX_MS; i++) await fn();
 
-  let iterations = 0;
-  const start = performance.now();
-  while (performance.now() - start < MEASURE_MS) {
-    await fn();
-    iterations += 1;
+  const rates = [];
+  for (let sample = 0; sample < SAMPLES; sample++) {
+    let iterations = 0;
+    const start = performance.now();
+    while (performance.now() - start < MEASURE_MS) {
+      await fn();
+      iterations += 1;
+    }
+    rates.push((iterations / (performance.now() - start)) * 1000);
   }
-  const elapsed = performance.now() - start;
-  const opsPerSec = Math.round((iterations / elapsed) * 1000);
+  rates.sort((a, b) => a - b);
+  const mid = rates.length >> 1;
+  const opsPerSec = Math.round(rates.length % 2 ? rates[mid] : (rates[mid - 1] + rates[mid]) / 2);
   console.log(`${name.padEnd(66)} ${opsPerSec.toLocaleString('en-US').padStart(12)} ops/sec`);
   return { name, opsPerSec };
 }
@@ -257,7 +285,7 @@ async function main() {
 
     // Query planning: partial evaluation of a rich $expr policy (variables +
     // constants + allow/deny rules) into a Cerbos-shaped filter.
-    const { createSafeExprCodec, deserializePolicy } = require('../src/index.js');
+    const { createSafeExprCodec, deserializePolicy } = require(path.join(SRC, 'src', 'index.js'));
     const codec = createSafeExprCodec({ jsep });
     const plannable = new Kerberos(
       [
@@ -296,7 +324,7 @@ async function main() {
   }
 
   // ReBAC scenarios: the built-in Zanzibar-lite resolver over static tuples.
-  const { RelationResolver } = require('../src/Relations/index.js');
+  const { RelationResolver } = require(path.join(SRC, 'src', 'Relations', 'index.js'));
   const relationSchema = {
     relationSchema: {
       definitions: {
@@ -533,4 +561,32 @@ async function scalingScenarios(results, RelationResolver) {
   );
 }
 
-main();
+/**
+ * Merges this run into bench/results/engine.json under the benchmarked
+ * version: a filtered run (e.g. `scaling`) only replaces its own scenarios.
+ */
+function writeResults(results) {
+  const { version } = JSON.parse(fs.readFileSync(path.join(SRC, 'package.json'), 'utf8'));
+  let file = { releases: {} };
+  try {
+    file = JSON.parse(fs.readFileSync(RESULTS_FILE, 'utf8'));
+  } catch {
+    // first run
+  }
+  const previous = file.releases[version]?.scenarios ?? [];
+  const measured = results.filter(Boolean);
+  const names = new Set(measured.map((result) => result.name));
+  file.releases[version] = {
+    measuredAt: new Date().toISOString(),
+    machine: describeMachine(),
+    samples: SAMPLES,
+    scenarios: [...previous.filter((result) => !names.has(result.name)), ...measured],
+  };
+  fs.mkdirSync(path.dirname(RESULTS_FILE), { recursive: true });
+  fs.writeFileSync(RESULTS_FILE, `${JSON.stringify(file, null, 2)}\n`);
+  console.log(`\nWrote ${path.relative(path.join(__dirname, '..'), RESULTS_FILE)} (${version})`);
+}
+
+main().then((results) => {
+  if (options.json) writeResults(results);
+});

@@ -1,0 +1,380 @@
+{
+  "generatedAt": "2026-10-03T19:04:46.117Z",
+  "machine": {
+    "cpu": "Apple M3 Max",
+    "cores": 16,
+    "memoryGb": 64,
+    "os": "darwin 25.6.0 (arm64)",
+    "node": "v24.14.1",
+    "docker": "27.4.0"
+  },
+  "method": {
+    "warmupMs": 1000,
+    "sampleMs": 1000,
+    "samples": 5,
+    "coldStartRuns": 20
+  },
+  "libraries": [
+    {
+      "id": "kerberos",
+      "name": "Kerberos.js",
+      "package": "@alexify/kerberos",
+      "version": "4.3.0",
+      "variant": "isAllowed \u00b7 checkResources",
+      "runtime": "in-process"
+    },
+    {
+      "id": "casl",
+      "name": "CASL",
+      "package": "@casl/ability",
+      "version": "7.0.1",
+      "variant": "ability built once per user",
+      "runtime": "in-process"
+    },
+    {
+      "id": "casl-per-request",
+      "name": "CASL",
+      "package": "@casl/ability",
+      "version": "7.0.1",
+      "variant": "ability built per request",
+      "runtime": "in-process"
+    },
+    {
+      "id": "casbin",
+      "name": "casbin",
+      "package": "casbin",
+      "version": "5.51.1",
+      "variant": "enforce \u00b7 batchEnforce",
+      "runtime": "in-process"
+    },
+    {
+      "id": "accesscontrol",
+      "name": "AccessControl",
+      "package": "accesscontrol",
+      "version": "3.1.1",
+      "variant": "tryCan(\u2026).do(\u2026)",
+      "runtime": "in-process"
+    },
+    {
+      "id": "easy-rbac",
+      "name": "easy-rbac",
+      "package": "easy-rbac",
+      "version": "4.0.0",
+      "variant": "can(roles, operation, params)",
+      "runtime": "in-process"
+    },
+    {
+      "id": "rbac",
+      "name": "@rbac/rbac",
+      "package": "@rbac/rbac",
+      "version": "2.2.2",
+      "variant": "can(role, operation, params)",
+      "runtime": "in-process"
+    },
+    {
+      "id": "opa-wasm",
+      "name": "OPA",
+      "package": "@open-policy-agent/opa-wasm",
+      "version": "1.10.0",
+      "variant": "Rego compiled to WebAssembly, in-process",
+      "runtime": "in-process",
+      "image": "openpolicyagent/opa:1.21.1"
+    },
+    {
+      "id": "opa-server",
+      "name": "OPA server",
+      "package": null,
+      "version": null,
+      "variant": "REST Data API, sidecar on localhost",
+      "runtime": "service",
+      "image": "openpolicyagent/opa:1.21.1"
+    },
+    {
+      "id": "cerbos",
+      "name": "Cerbos PDP",
+      "package": "@cerbos/grpc",
+      "version": "0.29.1",
+      "variant": "gRPC SDK, sidecar on localhost",
+      "runtime": "service",
+      "image": "ghcr.io/cerbos/cerbos:0.55.0"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "rbac",
+      "title": "Role check",
+      "description": "A USER may view a post. One rule, no condition.",
+      "unit": "ops/s",
+      "results": {
+        "kerberos": {
+          "median": 817004.2243609186,
+          "min": 812934.3646956825,
+          "max": 826322.9306947138
+        },
+        "casl": {
+          "median": 40360948.478154175,
+          "min": 40304751.312432095,
+          "max": 40434692.722265854
+        },
+        "casl-per-request": {
+          "median": 4345003.948608359,
+          "min": 4334570.213709958,
+          "max": 4352548.620294117
+        },
+        "casbin": {
+          "median": 383028.6689559587,
+          "min": 380121.9756518332,
+          "max": 384706.9376220476
+        },
+        "accesscontrol": {
+          "median": 1171817.2183305367,
+          "min": 1168047.272817106,
+          "max": 1176079.819219035
+        },
+        "easy-rbac": {
+          "median": 770499.8075803954,
+          "min": 765530.4476449867,
+          "max": 771923.7320964792
+        },
+        "rbac": {
+          "median": 24468012.783940766,
+          "min": 24296352.49462488,
+          "max": 24579447.791216046
+        },
+        "opa-wasm": {
+          "median": 468286.40290845506,
+          "min": 467102.383877105,
+          "max": 470390.39105422015
+        },
+        "opa-server": {
+          "median": 2053.416973933817,
+          "min": 2018.7440888337344,
+          "max": 2266.154405327677
+        },
+        "cerbos": {
+          "median": 1495.37057310448,
+          "min": 1459.9751191040195,
+          "max": 1537.8319272730043
+        }
+      }
+    },
+    {
+      "id": "abac",
+      "title": "Ownership condition",
+      "description": "A USER may view a document they own: one role-gated rule with an attribute condition.",
+      "unit": "ops/s",
+      "results": {
+        "kerberos": {
+          "median": 809787.6936966572,
+          "min": 795005.0730373942,
+          "max": 820015.5799201143
+        },
+        "casl": {
+          "median": 14872954.37119833,
+          "min": 14828415.71978069,
+          "max": 14908072.8104587
+        },
+        "casl-per-request": {
+          "median": 1867906.5155097556,
+          "min": 1861750.2195656614,
+          "max": 1872567.0702917145
+        },
+        "casbin": {
+          "median": 296993.1852108576,
+          "min": 291298.76088687597,
+          "max": 299755.4381388871
+        },
+        "accesscontrol": {
+          "median": 955368.115797105,
+          "min": 940400.1104197872,
+          "max": 959900.5030637274
+        },
+        "easy-rbac": {
+          "median": 692935.4860957707,
+          "min": 685889.4372799722,
+          "max": 699689.9841801651
+        },
+        "rbac": {
+          "median": 3761761.456906274,
+          "min": 3664272.451498995,
+          "max": 3768989.3592512147
+        },
+        "opa-wasm": {
+          "median": 428319.1679872975,
+          "min": 427509.13400034094,
+          "max": 430136.9151437779
+        },
+        "opa-server": {
+          "median": 2159.464452815702,
+          "min": 2112.644944478638,
+          "max": 2195.0415899657805
+        },
+        "cerbos": {
+          "median": 1398.539808361267,
+          "min": 1258.9718920786308,
+          "max": 1443.5349406787666
+        }
+      }
+    },
+    {
+      "id": "rules",
+      "title": "1,000 rules",
+      "description": "1,000 rules, one action each; the request matches the last one.",
+      "unit": "ops/s",
+      "results": {
+        "kerberos": {
+          "median": 820184.2891372729,
+          "min": 812279.6296282386,
+          "max": 820842.7770088023
+        },
+        "casl": {
+          "median": 39485241.100955725,
+          "min": 39091625.69471289,
+          "max": 39590232.83052305
+        },
+        "casl-per-request": {
+          "median": 9647.86774702892,
+          "min": 9345.684364801155,
+          "max": 9669.389054186662
+        },
+        "casbin": {
+          "median": 549.1668682799691,
+          "min": 547.1976484656361,
+          "max": 556.1901404355538
+        },
+        "accesscontrol": {
+          "median": 1163961.6589803754,
+          "min": 1158953.1103911304,
+          "max": 1168298.8953048233
+        },
+        "easy-rbac": {
+          "median": 761679.7983272139,
+          "min": 747113.07291103,
+          "max": 765959.635903765
+        },
+        "rbac": {
+          "median": 25479421.29453572,
+          "min": 24673228.642002873,
+          "max": 25581898.212180052
+        },
+        "opa-wasm": {
+          "median": 41961.98397371646,
+          "min": 41504.87997303526,
+          "max": 42041.572894543744
+        },
+        "opa-server": {
+          "median": 2177.1471208415273,
+          "min": 2028.8988281411862,
+          "max": 2255.128956440574
+        },
+        "cerbos": {
+          "median": 1525.9153117002,
+          "min": 1513.3853143404147,
+          "max": 1543.2526876761249
+        }
+      }
+    },
+    {
+      "id": "batch",
+      "title": "Filter 100 documents",
+      "description": "The ownership rule over a list of 100 documents, half of them owned: one call returns the visible ids.",
+      "unit": "batches/s",
+      "results": {
+        "kerberos": {
+          "median": 12559.130807675052,
+          "min": 12501.68610896011,
+          "max": 12624.443529460821
+        },
+        "casl": {
+          "median": 102925.42681141262,
+          "min": 102223.6184813853,
+          "max": 103540.0540662621
+        },
+        "casl-per-request": {
+          "median": 93508.48577615988,
+          "min": 92775.27149358555,
+          "max": 94024.54507551076
+        },
+        "casbin": {
+          "median": 2911.6613970728113,
+          "min": 2837.9761682450194,
+          "max": 2960.6691228886466
+        },
+        "accesscontrol": {
+          "median": 10067.086444862854,
+          "min": 9811.079210933449,
+          "max": 10228.487407826024
+        },
+        "easy-rbac": {
+          "median": 9390.521377894358,
+          "min": 9013.28845477444,
+          "max": 9409.130835223277
+        },
+        "rbac": {
+          "median": 29818.87738523511,
+          "min": 28301.513637360153,
+          "max": 30430.7024818987
+        },
+        "opa-wasm": {
+          "median": 14923.154944053775,
+          "min": 14788.740843567342,
+          "max": 15010.721755706445
+        },
+        "opa-server": {
+          "median": 903.4660037260496,
+          "min": 841.0019056663705,
+          "max": 932.85460939353
+        },
+        "cerbos": {
+          "median": 286.10381556073287,
+          "min": 280.8732069121702,
+          "max": 303.7410228104263
+        }
+      }
+    }
+  ],
+  "coldStart": {
+    "kerberos": {
+      "load": 13.688437461853027,
+      "setup": 1.051792025566101,
+      "firstDecision": 1.318895936012268,
+      "total": 16.079562962055206
+    },
+    "casl": {
+      "load": 4.588959038257599,
+      "setup": 0.30879145860671997,
+      "firstDecision": 0.3677494525909424,
+      "total": 5.269854485988617
+    },
+    "casbin": {
+      "load": 13.47177106142044,
+      "setup": 2.5911664962768555,
+      "firstDecision": 0.9843125343322754,
+      "total": 17.08539652824402
+    },
+    "accesscontrol": {
+      "load": 15.297250032424927,
+      "setup": 0.8086044788360596,
+      "firstDecision": 1.000145971775055,
+      "total": 17.135166466236115
+    },
+    "easy-rbac": {
+      "load": 1.5190834999084473,
+      "setup": 0.23814553022384644,
+      "firstDecision": 0.15529197454452515,
+      "total": 1.9169164896011353
+    },
+    "rbac": {
+      "load": 7.545958042144775,
+      "setup": 0.7023544907569885,
+      "firstDecision": 0.2696869969367981,
+      "total": 8.494270503520966
+    },
+    "opa-wasm": {
+      "load": 6.738979518413544,
+      "setup": 17.21064603328705,
+      "firstDecision": 0.29649996757507324,
+      "total": 24.144646525382996
+    }
+  }
+}

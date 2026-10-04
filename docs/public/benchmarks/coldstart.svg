@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="428" viewBox="0 0 760 428" role="img" aria-label="Cold start. Load the library, build the ownership policy, first decision — fresh process, median of 20 runs. Lower is better.">
+<style>
+  text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .title { font-size: 15px; font-weight: 700; fill: #1b1c1e; }
+  .subtitle, .caption { font-size: 12px; fill: #67676c; }
+  .caption { font-size: 11px; }
+  .group { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; fill: #67676c; }
+  .label { font-size: 13px; font-weight: 600; fill: #1b1c1e; }
+  .label.hl { font-weight: 700; }
+  .sublabel { font-size: 11px; fill: #67676c; }
+  .value { font-size: 12px; font-weight: 600; fill: #3c3c43; font-variant-numeric: tabular-nums; }
+  .tick { font-size: 11px; fill: #67676c; font-variant-numeric: tabular-nums; }
+  .grid { stroke: #e4e4e7; stroke-width: 1; }
+  .axis, .ref { stroke: #c2c2c4; stroke-width: 1; }
+  .ref { stroke: #67676c; }
+  .bar { fill: #c6c5bf; }
+  .bar.hl { fill: #b37e00; }
+  @media (prefers-color-scheme: dark) {
+    .title, .label { fill: #dfdfd6; }
+    .subtitle, .caption, .group, .sublabel, .tick { fill: #98989f; }
+    .value { fill: #c2c2c4; }
+    .grid { stroke: #2e2e32; }
+    .axis { stroke: #48484c; }
+    .ref { stroke: #98989f; }
+    .bar { fill: #55544f; }
+    .bar.hl { fill: #e3a500; }
+  }
+</style>
+<text class="title" x="20" y="35">Cold start</text>
+<text class="subtitle" x="20" y="56">Load the library, build the ownership policy, first decision — fresh process, median of 20 runs. Lower is</text>
+<text class="subtitle" x="20" y="73">better.</text>
+<line class="grid" x1="276" y1="88" x2="276" y2="368"/>
+<text class="tick" x="276" y="384" text-anchor="middle">0 ms</text>
+<line class="grid" x1="409.3333333333333" y1="88" x2="409.3333333333333" y2="368"/>
+<text class="tick" x="409.3333333333333" y="384" text-anchor="middle">10 ms</text>
+<line class="grid" x1="542.6666666666666" y1="88" x2="542.6666666666666" y2="368"/>
+<text class="tick" x="542.6666666666666" y="384" text-anchor="middle">20 ms</text>
+<line class="grid" x1="676" y1="88" x2="676" y2="368"/>
+<text class="tick" x="676" y="384" text-anchor="middle">30 ms</text>
+<line class="axis" x1="276" y1="88" x2="276" y2="368"/>
+<g><title>easy-rbac · can(roles, operation, params)
+1.9 ms in total
+load 1.5 ms · build policy 0.2 ms · first decision 0.2 ms
+easy-rbac@4.0.0</title>
+<text class="label" x="20" y="105">easy-rbac</text>
+<text class="sublabel" x="20" y="120">can(roles, operation, params)</text>
+<path class="bar" d="M276,101H297.55888652801514A4,4 0 0 1 301.55888652801514,105V111A4,4 0 0 1 297.55888652801514,115H276Z"/>
+<text class="value" x="307.55888652801514" y="113">1.9 ms</text>
+</g>
+<g><title>CASL · ability built once per user
+5.3 ms in total
+load 4.6 ms · build policy 0.3 ms · first decision 0.4 ms
+@casl/ability@7.0.1</title>
+<text class="label" x="20" y="145">CASL</text>
+<text class="sublabel" x="20" y="160">ability built once per user</text>
+<path class="bar" d="M276,141H342.2647264798482A4,4 0 0 1 346.2647264798482,145V151A4,4 0 0 1 342.2647264798482,155H276Z"/>
+<text class="value" x="352.2647264798482" y="153">5.3 ms</text>
+</g>
+<g><title>@rbac/rbac · can(role, operation, params)
+8.5 ms in total
+load 7.5 ms · build policy 0.7 ms · first decision 0.3 ms
+@rbac/rbac@2.2.2</title>
+<text class="label" x="20" y="185">@rbac/rbac</text>
+<text class="sublabel" x="20" y="200">can(role, operation, params)</text>
+<path class="bar" d="M276,181H385.25694004694617A4,4 0 0 1 389.25694004694617,185V191A4,4 0 0 1 385.25694004694617,195H276Z"/>
+<text class="value" x="395.25694004694617" y="193">8.5 ms</text>
+</g>
+<g><title>Kerberos.js · isAllowed · checkResources
+16.1 ms in total
+load 13.7 ms · build policy 1.1 ms · first decision 1.3 ms
+@alexify/kerberos@4.3.0</title>
+<text class="label hl" x="20" y="225">Kerberos.js</text>
+<text class="sublabel" x="20" y="240">isAllowed · checkResources</text>
+<path class="bar hl" d="M276,221H486.39417282740277A4,4 0 0 1 490.39417282740277,225V231A4,4 0 0 1 486.39417282740277,235H276Z"/>
+<text class="value" x="496.39417282740277" y="233">16 ms</text>
+</g>
+<g><title>casbin · enforce · batchEnforce
+17.1 ms in total
+load 13.5 ms · build policy 2.6 ms · first decision 1.0 ms
+casbin@5.51.1</title>
+<text class="label" x="20" y="265">casbin</text>
+<text class="sublabel" x="20" y="280">enforce · batchEnforce</text>
+<path class="bar" d="M276,261H499.8052870432536A4,4 0 0 1 503.8052870432536,265V271A4,4 0 0 1 499.8052870432536,275H276Z"/>
+<text class="value" x="509.8052870432536" y="273">17 ms</text>
+</g>
+<g><title>AccessControl · tryCan(…).do(…)
+17.1 ms in total
+load 15.3 ms · build policy 0.8 ms · first decision 1.0 ms
+accesscontrol@3.1.1</title>
+<text class="label" x="20" y="305">AccessControl</text>
+<text class="sublabel" x="20" y="320">tryCan(…).do(…)</text>
+<path class="bar" d="M276,301H500.4688862164815A4,4 0 0 1 504.4688862164815,305V311A4,4 0 0 1 500.4688862164815,315H276Z"/>
+<text class="value" x="510.4688862164815" y="313">17 ms</text>
+</g>
+<g><title>OPA · Rego compiled to WebAssembly, in-process
+24.1 ms in total
+load 6.7 ms · build policy 17.2 ms · first decision 0.3 ms
+@open-policy-agent/opa-wasm@1.10.0 · compiled with openpolicyagent/opa:1.21.1</title>
+<text class="label" x="20" y="345">OPA</text>
+<text class="sublabel" x="20" y="360">Rego compiled to WebAssembly, in-process</text>
+<path class="bar" d="M276,341H593.9286203384399A4,4 0 0 1 597.9286203384399,345V351A4,4 0 0 1 593.9286203384399,355H276Z"/>
+<text class="value" x="603.9286203384399" y="353">24 ms</text>
+</g>
+<text class="caption" x="20" y="409">Apple M3 Max · 16 cores · Node v24.14.1 · Docker 27.4.0</text>
+</svg>

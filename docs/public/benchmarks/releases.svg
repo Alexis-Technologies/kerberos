@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="451" viewBox="0 0 760 451" role="img" aria-label="4.2.0 → 4.3.0: how decision cost scales with policy shape. Speed-up of each scaling sweep, same machine and harness. Higher is better.">
+<style>
+  text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .title { font-size: 15px; font-weight: 700; fill: #1b1c1e; }
+  .subtitle, .caption { font-size: 12px; fill: #67676c; }
+  .caption { font-size: 11px; }
+  .group { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; fill: #67676c; }
+  .label { font-size: 13px; font-weight: 600; fill: #1b1c1e; }
+  .label.hl { font-weight: 700; }
+  .sublabel { font-size: 11px; fill: #67676c; }
+  .value { font-size: 12px; font-weight: 600; fill: #3c3c43; font-variant-numeric: tabular-nums; }
+  .tick { font-size: 11px; fill: #67676c; font-variant-numeric: tabular-nums; }
+  .grid { stroke: #e4e4e7; stroke-width: 1; }
+  .axis, .ref { stroke: #c2c2c4; stroke-width: 1; }
+  .ref { stroke: #67676c; }
+  .bar { fill: #c6c5bf; }
+  .bar.hl { fill: #b37e00; }
+  @media (prefers-color-scheme: dark) {
+    .title, .label { fill: #dfdfd6; }
+    .subtitle, .caption, .group, .sublabel, .tick { fill: #98989f; }
+    .value { fill: #c2c2c4; }
+    .grid { stroke: #2e2e32; }
+    .axis { stroke: #48484c; }
+    .ref { stroke: #98989f; }
+    .bar { fill: #55544f; }
+    .bar.hl { fill: #e3a500; }
+  }
+</style>
+<text class="title" x="20" y="35">4.2.0 → 4.3.0: how decision cost scales with policy shape</text>
+<text class="subtitle" x="20" y="56">Speed-up of each scaling sweep, same machine and harness. Higher is better.</text>
+<line class="grid" x1="372" y1="71" x2="372" y2="391"/>
+<text class="tick" x="372" y="407" text-anchor="middle">0</text>
+<line class="grid" x1="448" y1="71" x2="448" y2="391"/>
+<text class="tick" x="448" y="407" text-anchor="middle">×10</text>
+<line class="grid" x1="524" y1="71" x2="524" y2="391"/>
+<text class="tick" x="524" y="407" text-anchor="middle">×20</text>
+<line class="grid" x1="600" y1="71" x2="600" y2="391"/>
+<text class="tick" x="600" y="407" text-anchor="middle">×30</text>
+<line class="grid" x1="676" y1="71" x2="676" y2="391"/>
+<text class="tick" x="676" y="407" text-anchor="middle">×40</text>
+<line class="axis" x1="372" y1="71" x2="372" y2="391"/>
+<line class="ref" x1="379.6" y1="71" x2="379.6" y2="391"/>
+<g><title>1 000 rules × distinct roles, match last · 23.8k → 721k per second
+×30.3 faster
+4.2.0: 23,817/s · 4.3.0: 721,251/s</title>
+<text class="label hl" x="20" y="88">1 000 rules × distinct roles, match last</text>
+<text class="sublabel" x="20" y="103">23.8k → 721k per second</text>
+<path class="bar hl" d="M372,84H598.1510517697443A4,4 0 0 1 602.1510517697443,88V94A4,4 0 0 1 598.1510517697443,98H372Z"/>
+<text class="value" x="608.1510517697443" y="96">×30</text>
+</g>
+<g><title>1 000 rules × distinct actions, match last · 33.1k → 740k per second
+×22.4 faster
+4.2.0: 33,084/s · 4.3.0: 739,923/s</title>
+<text class="label hl" x="20" y="128">1 000 rules × distinct actions, match last</text>
+<text class="sublabel" x="20" y="143">33.1k → 740k per second</text>
+<path class="bar hl" d="M372,124H537.9738483859268A4,4 0 0 1 541.9738483859268,128V134A4,4 0 0 1 537.9738483859268,138H372Z"/>
+<text class="value" x="547.9738483859268" y="136">×22</text>
+</g>
+<g><title>1 000 rules × distinct actions, match first · 35.9k → 749k per second
+×20.9 faster
+4.2.0: 35,857/s · 4.3.0: 748,751/s</title>
+<text class="label hl" x="20" y="168">1 000 rules × distinct actions, match first</text>
+<text class="sublabel" x="20" y="183">35.9k → 749k per second</text>
+<path class="bar hl" d="M372,164H526.7000474105474A4,4 0 0 1 530.7000474105474,168V174A4,4 0 0 1 526.7000474105474,178H372Z"/>
+<text class="value" x="536.7000474105474" y="176">×21</text>
+</g>
+<g><title>100 concurrent relations.check, shared memo, depth 16 · 378 → 3,223 per second
+×8.5 faster
+4.2.0: 378/s · 4.3.0: 3,223/s</title>
+<text class="label hl" x="20" y="208">100 concurrent relations.check, shared memo, d…</text>
+<text class="sublabel" x="20" y="223">378 → 3,223 per second</text>
+<path class="bar hl" d="M372,204H432.8010582010582A4,4 0 0 1 436.8010582010582,208V214A4,4 0 0 1 432.8010582010582,218H372Z"/>
+<text class="value" x="442.8010582010582" y="216">×8.5</text>
+</g>
+<g><title>checkResources 100 docs, relation depth 16 · 330 → 1,673 per second
+×5.1 faster
+4.2.0: 330/s · 4.3.0: 1,673/s</title>
+<text class="label hl" x="20" y="248">checkResources 100 docs, relation depth 16</text>
+<text class="sublabel" x="20" y="263">330 → 1,673 per second</text>
+<path class="bar hl" d="M372,244H406.52969696969694A4,4 0 0 1 410.52969696969694,248V254A4,4 0 0 1 406.52969696969694,258H372Z"/>
+<text class="value" x="416.52969696969694" y="256">×5.1</text>
+</g>
+<g><title>64 principal roles, no role policies · 39k → 134k per second
+×3.4 faster
+4.2.0: 38,972/s · 4.3.0: 134,325/s</title>
+<text class="label hl" x="20" y="288">64 principal roles, no role policies</text>
+<text class="sublabel" x="20" y="303">39k → 134k per second</text>
+<path class="bar hl" d="M372,284H394.19496048445035A4,4 0 0 1 398.19496048445035,288V294A4,4 0 0 1 394.19496048445035,298H372Z"/>
+<text class="value" x="404.19496048445035" y="296">×3.4</text>
+</g>
+<g><title>32 derived-role definitions, 1 referenced · 198k → 632k per second
+×3.2 faster
+4.2.0: 197,779/s · 4.3.0: 632,117/s</title>
+<text class="label hl" x="20" y="328">32 derived-role definitions, 1 referenced</text>
+<text class="sublabel" x="20" y="343">198k → 632k per second</text>
+<path class="bar hl" d="M372,324H392.29018854377864A4,4 0 0 1 396.29018854377864,328V334A4,4 0 0 1 392.29018854377864,338H372Z"/>
+<text class="value" x="402.29018854377864" y="336">×3.2</text>
+</g>
+<g><title>scope depth 8, decided at the most specific scope · 180k → 282k per second
+×1.6 faster
+4.2.0: 180,307/s · 4.3.0: 281,913/s</title>
+<text class="label hl" x="20" y="368">scope depth 8, decided at the most specific sc…</text>
+<text class="sublabel" x="20" y="383">180k → 282k per second</text>
+<path class="bar hl" d="M372,364H379.8827266828243A4,4 0 0 1 383.8827266828243,368V374A4,4 0 0 1 379.8827266828243,378H372Z"/>
+<text class="value" x="389.8827266828243" y="376">×1.6</text>
+</g>
+<text class="caption" x="20" y="432">Apple M3 Max · 16 cores · Node v24.14.1</text>
+</svg>

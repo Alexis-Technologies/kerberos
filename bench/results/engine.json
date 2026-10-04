@@ -1,0 +1,162 @@
+{
+  "releases": {
+    "4.3.0": {
+      "measuredAt": "2026-10-03T19:06:53.174Z",
+      "machine": {
+        "cpu": "Apple M3 Max",
+        "cores": 16,
+        "memoryGb": 64,
+        "os": "darwin 25.6.0 (arm64)",
+        "node": "v24.14.1"
+      },
+      "samples": 5,
+      "scenarios": [
+        {
+          "name": "isAllowed — simple role match",
+          "opsPerSec": 795642
+        },
+        {
+          "name": "isAllowed — derived roles + variables + condition",
+          "opsPerSec": 617125
+        },
+        {
+          "name": "checkResources — 10 resources × 3 actions",
+          "opsPerSec": 59422
+        },
+        {
+          "name": "checkResources — 10 resources, includeMeta",
+          "opsPerSec": 48722
+        },
+        {
+          "name": "isAllowed — role policy + 2-level parentRoles chain",
+          "opsPerSec": 402277
+        },
+        {
+          "name": "isAllowed — 3-segment scoped request (chain walk)",
+          "opsPerSec": 594044
+        },
+        {
+          "name": "isAllowed — simple role match + Zod validation",
+          "opsPerSec": 449834
+        },
+        {
+          "name": "isAllowed — simple role match + 1 sync decision listener",
+          "opsPerSec": 700693
+        },
+        {
+          "name": "isAllowed — simple role match + request-level hooks",
+          "opsPerSec": 392898
+        },
+        {
+          "name": "isAllowed — simple role match + per-resource hooks",
+          "opsPerSec": 337164
+        },
+        {
+          "name": "checkResources — 10 resources × 3 actions + decision listener",
+          "opsPerSec": 53946
+        },
+        {
+          "name": "isAllowed — cache-backed dynamic policy ($expr)",
+          "opsPerSec": 271196
+        },
+        {
+          "name": "checkResources — 50 resources, cache-backed",
+          "opsPerSec": 8283
+        },
+        {
+          "name": "planResources — $expr policy (variables + deny rule)",
+          "opsPerSec": 63027
+        },
+        {
+          "name": "relations.check — direct tuple (flat)",
+          "opsPerSec": 731477
+        },
+        {
+          "name": "relations.check — deep walk (3 arrows + nested groups)",
+          "opsPerSec": 106763
+        },
+        {
+          "name": "isAllowed — relation-backed derived role (deep walk)",
+          "opsPerSec": 70814
+        },
+        {
+          "name": "scaling — 1 000 rules × distinct actions, match first",
+          "opsPerSec": 748751
+        },
+        {
+          "name": "scaling — 1 000 rules × distinct actions, match last",
+          "opsPerSec": 739923
+        },
+        {
+          "name": "scaling — 1 000 rules × distinct roles, match last",
+          "opsPerSec": 721251
+        },
+        {
+          "name": "scaling — 64 principal roles, no role policies",
+          "opsPerSec": 134325
+        },
+        {
+          "name": "scaling — 32 derived-role definitions, 1 referenced",
+          "opsPerSec": 632117
+        },
+        {
+          "name": "scaling — scope depth 8, decided at the most specific scope",
+          "opsPerSec": 281913
+        },
+        {
+          "name": "scaling — checkResources 100 docs, relation depth 16",
+          "opsPerSec": 1673
+        },
+        {
+          "name": "scaling — 100 concurrent relations.check, shared memo, depth 16",
+          "opsPerSec": 3223
+        }
+      ]
+    },
+    "4.2.0": {
+      "measuredAt": "2026-10-03T19:07:34.615Z",
+      "machine": {
+        "cpu": "Apple M3 Max",
+        "cores": 16,
+        "memoryGb": 64,
+        "os": "darwin 25.6.0 (arm64)",
+        "node": "v24.14.1"
+      },
+      "samples": 5,
+      "scenarios": [
+        {
+          "name": "scaling — 1 000 rules × distinct actions, match first",
+          "opsPerSec": 35857
+        },
+        {
+          "name": "scaling — 1 000 rules × distinct actions, match last",
+          "opsPerSec": 33084
+        },
+        {
+          "name": "scaling — 1 000 rules × distinct roles, match last",
+          "opsPerSec": 23817
+        },
+        {
+          "name": "scaling — 64 principal roles, no role policies",
+          "opsPerSec": 38972
+        },
+        {
+          "name": "scaling — 32 derived-role definitions, 1 referenced",
+          "opsPerSec": 197779
+        },
+        {
+          "name": "scaling — scope depth 8, decided at the most specific scope",
+          "opsPerSec": 180307
+        },
+        {
+          "name": "scaling — checkResources 100 docs, relation depth 16",
+          "opsPerSec": 330
+        },
+        {
+          "name": "scaling — 100 concurrent relations.check, shared memo, depth 16",
+          "opsPerSec": 378
+        }
+      ]
+    }
+  }
+}

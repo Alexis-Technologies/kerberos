@@ -1,0 +1,150 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="603" viewBox="0 0 760 603" role="img" aria-label="1,000 rules. 1,000 rules, one action each; the request matches the last one. ops/s, log scale — higher is better.">
+<style>
+  text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .title { font-size: 15px; font-weight: 700; fill: #1b1c1e; }
+  .subtitle, .caption { font-size: 12px; fill: #67676c; }
+  .caption { font-size: 11px; }
+  .group { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; fill: #67676c; }
+  .label { font-size: 13px; font-weight: 600; fill: #1b1c1e; }
+  .label.hl { font-weight: 700; }
+  .sublabel { font-size: 11px; fill: #67676c; }
+  .value { font-size: 12px; font-weight: 600; fill: #3c3c43; font-variant-numeric: tabular-nums; }
+  .tick { font-size: 11px; fill: #67676c; font-variant-numeric: tabular-nums; }
+  .grid { stroke: #e4e4e7; stroke-width: 1; }
+  .axis, .ref { stroke: #c2c2c4; stroke-width: 1; }
+  .ref { stroke: #67676c; }
+  .bar { fill: #c6c5bf; }
+  .bar.hl { fill: #b37e00; }
+  @media (prefers-color-scheme: dark) {
+    .title, .label { fill: #dfdfd6; }
+    .subtitle, .caption, .group, .sublabel, .tick { fill: #98989f; }
+    .value { fill: #c2c2c4; }
+    .grid { stroke: #2e2e32; }
+    .axis { stroke: #48484c; }
+    .ref { stroke: #98989f; }
+    .bar { fill: #55544f; }
+    .bar.hl { fill: #e3a500; }
+  }
+</style>
+<text class="title" x="20" y="35">1,000 rules</text>
+<text class="subtitle" x="20" y="56">1,000 rules, one action each; the request matches the last one. ops/s, log scale — higher is better.</text>
+<line class="grid" x1="276" y1="71" x2="276" y2="527"/>
+<text class="tick" x="276" y="543" text-anchor="middle">100</text>
+<line class="grid" x1="342.66666666666663" y1="71" x2="342.66666666666663" y2="527"/>
+<text class="tick" x="342.66666666666663" y="543" text-anchor="middle">1,000</text>
+<line class="grid" x1="409.3333333333333" y1="71" x2="409.3333333333333" y2="527"/>
+<text class="tick" x="409.3333333333333" y="543" text-anchor="middle">10k</text>
+<line class="grid" x1="476" y1="71" x2="476" y2="527"/>
+<text class="tick" x="476" y="543" text-anchor="middle">100k</text>
+<line class="grid" x1="542.6666666666666" y1="71" x2="542.6666666666666" y2="527"/>
+<text class="tick" x="542.6666666666666" y="543" text-anchor="middle">1M</text>
+<line class="grid" x1="609.3333333333334" y1="71" x2="609.3333333333334" y2="527"/>
+<text class="tick" x="609.3333333333334" y="543" text-anchor="middle">10M</text>
+<line class="grid" x1="676" y1="71" x2="676" y2="527"/>
+<text class="tick" x="676" y="543" text-anchor="middle">100M</text>
+<line class="axis" x1="276" y1="71" x2="276" y2="527"/>
+<text class="group" x="20" y="89">IN-PROCESS</text>
+<g><title>CASL · ability built once per user
+39,485,241 ops/s
+25.3 ns per decision
+samples 39.1M – 39.6M
+@casl/ability@7.0.1</title>
+<text class="label" x="20" y="116">CASL</text>
+<text class="sublabel" x="20" y="131">ability built once per user</text>
+<path class="bar" d="M276,112H645.0956529469393A4,4 0 0 1 649.0956529469393,116V122A4,4 0 0 1 645.0956529469393,126H276Z"/>
+<text class="value" x="655.0956529469393" y="124">39.5M</text>
+</g>
+<g><title>@rbac/rbac · can(role, operation, params)
+25,479,421 ops/s
+39.2 ns per decision
+samples 24.7M – 25.6M
+@rbac/rbac@2.2.2</title>
+<text class="label" x="20" y="156">@rbac/rbac</text>
+<text class="sublabel" x="20" y="171">can(role, operation, params)</text>
+<path class="bar" d="M276,152H632.4126373194591A4,4 0 0 1 636.4126373194591,156V162A4,4 0 0 1 632.4126373194591,166H276Z"/>
+<text class="value" x="642.4126373194591" y="164">25.5M</text>
+</g>
+<g><title>AccessControl · tryCan(…).do(…)
+1,163,962 ops/s
+859 ns per decision
+samples 1.16M – 1.17M
+accesscontrol@3.1.1</title>
+<text class="label" x="20" y="196">AccessControl</text>
+<text class="sublabel" x="20" y="211">tryCan(…).do(…)</text>
+<path class="bar" d="M276,192H543.0625783229007A4,4 0 0 1 547.0625783229007,196V202A4,4 0 0 1 543.0625783229007,206H276Z"/>
+<text class="value" x="553.0625783229007" y="204">1.16M</text>
+</g>
+<g><title>Kerberos.js · isAllowed · checkResources
+820,184 ops/s
+1.22 µs per decision
+samples 812k – 821k
+@alexify/kerberos@4.3.0</title>
+<text class="label hl" x="20" y="236">Kerberos.js</text>
+<text class="sublabel" x="20" y="251">isAllowed · checkResources</text>
+<path class="bar hl" d="M276,232H532.9274297331427A4,4 0 0 1 536.9274297331427,236V242A4,4 0 0 1 532.9274297331427,246H276Z"/>
+<text class="value" x="542.9274297331427" y="244">820k</text>
+</g>
+<g><title>easy-rbac · can(roles, operation, params)
+761,680 ops/s
+1.31 µs per decision
+samples 747k – 766k
+easy-rbac@4.0.0</title>
+<text class="label" x="20" y="276">easy-rbac</text>
+<text class="sublabel" x="20" y="291">can(roles, operation, params)</text>
+<path class="bar" d="M276,272H530.7848291439428A4,4 0 0 1 534.7848291439428,276V282A4,4 0 0 1 530.7848291439428,286H276Z"/>
+<text class="value" x="540.7848291439428" y="284">762k</text>
+</g>
+<g><title>OPA · Rego compiled to WebAssembly, in-process
+41,962 ops/s
+23.8 µs per decision
+samples 41.5k – 42k
+@open-policy-agent/opa-wasm@1.10.0 · compiled with openpolicyagent/opa:1.21.1</title>
+<text class="label" x="20" y="316">OPA</text>
+<text class="sublabel" x="20" y="331">Rego compiled to WebAssembly, in-process</text>
+<path class="bar" d="M276,312H446.85706757100564A4,4 0 0 1 450.85706757100564,316V322A4,4 0 0 1 446.85706757100564,326H276Z"/>
+<text class="value" x="456.85706757100564" y="324">42k</text>
+</g>
+<g><title>CASL · ability built per request
+9,648 ops/s
+104 µs per decision
+samples 9,346 – 9,669
+@casl/ability@7.0.1</title>
+<text class="label" x="20" y="356">CASL</text>
+<text class="sublabel" x="20" y="371">ability built per request</text>
+<path class="bar" d="M276,352H404.29542276854147A4,4 0 0 1 408.29542276854147,356V362A4,4 0 0 1 404.29542276854147,366H276Z"/>
+<text class="value" x="414.29542276854147" y="364">9,648</text>
+</g>
+<g><title>casbin · enforce · batchEnforce
+549 ops/s
+1.82 ms per decision
+samples 547 – 556
+casbin@5.51.1</title>
+<text class="label" x="20" y="396">casbin</text>
+<text class="sublabel" x="20" y="411">enforce · batchEnforce</text>
+<path class="bar" d="M276,392H321.31362186580697A4,4 0 0 1 325.31362186580697,396V402A4,4 0 0 1 321.31362186580697,406H276Z"/>
+<text class="value" x="331.31362186580697" y="404">549</text>
+</g>
+<text class="group" x="20" y="437">SIDECAR — A NETWORK ROUND-TRIP PER CALL</text>
+<g><title>OPA server · REST Data API, sidecar on localhost
+2,177 ops/s
+459 µs per decision
+samples 2,029 – 2,255
+openpolicyagent/opa:1.21.1</title>
+<text class="label" x="20" y="464">OPA server</text>
+<text class="sublabel" x="20" y="479">REST Data API, sidecar on localhost</text>
+<path class="bar" d="M276,460H361.19251850048227A4,4 0 0 1 365.19251850048227,464V470A4,4 0 0 1 361.19251850048227,474H276Z"/>
+<text class="value" x="371.19251850048227" y="472">2,177</text>
+</g>
+<g><title>Cerbos PDP · gRPC SDK, sidecar on localhost
+1,526 ops/s
+655 µs per decision
+samples 1,513 – 1,543
+@cerbos/grpc@0.29.1 · ghcr.io/cerbos/cerbos:0.55.0</title>
+<text class="label" x="20" y="504">Cerbos PDP</text>
+<text class="sublabel" x="20" y="519">gRPC SDK, sidecar on localhost</text>
+<path class="bar" d="M276,500H350.90202872959725A4,4 0 0 1 354.90202872959725,504V510A4,4 0 0 1 350.90202872959725,514H276Z"/>
+<text class="value" x="360.90202872959725" y="512">1,526</text>
+</g>
+<text class="caption" x="20" y="568">Apple M3 Max · 16 cores · Node v24.14.1 · Docker 27.4.0 · median of 5 × 1 s samples, each library in a fresh process ·</text>
+<text class="caption" x="20" y="584">2026-10-03</text>
+</svg>

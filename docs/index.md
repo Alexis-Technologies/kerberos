@@ -31,8 +31,8 @@ features:
   - icon: ⚡
     title: In-process, sub-millisecond
     details: No network hop to a policy server, no sidecar to operate. Decisions are a function call, which makes per-item checks over a list a realistic thing to do.
-    link: /guide/why
-    linkText: Why in-process
+    link: /guide/benchmarks
+    linkText: Benchmarks
   - icon: 🧩
     title: Cerbos-compatible by design
     details: resourcePolicy / principalPolicy / rolePolicy, derived roles, conditions, variables, constants, outputs and scopes. If you know Cerbos, you already know Kerberos.js.
@@ -69,6 +69,18 @@ features:
     link: /guide/testing
     linkText: Testing
 ---
+
+<script setup>
+import BenchCompare from './.vitepress/theme/components/BenchCompare.vue';
+</script>
+
+## Benchmarks
+
+A Kerberos.js decision is a function call inside your process and takes about a microsecond. A policy server answers over the network instead. The chart runs the same checks in Kerberos.js, five JavaScript authorization libraries, OPA and Cerbos, all on one machine. Every library is first checked to reach the same allow and deny decisions.
+
+<BenchCompare />
+
+[Method, cold start, bundle size and the raw numbers →](/guide/benchmarks)
 
 ## Used by
 
