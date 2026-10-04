@@ -35,19 +35,70 @@ await kerberos.isAllowed({
 
 **One engine everywhere.** The [browser build](#browser-usage) contains zero Node builtins, so the same policies that guard your API also gate your UI (hide buttons, filter menus) — without maintaining a second source of truth. Serverless and edge runtimes get the same benefit: no cold-start dependency on an external PDP.
 
-### Positioning
+### Compared with the alternatives
 
-| | **Kerberos.js**                                                                       | **Cerbos**                         | **SpiceDB** |
-| --- |---------------------------------------------------------------------------------------|------------------------------------| --- |
-| Deployment | in-process library (JS)                                                               | PDP service (sidecar/central)      | central service |
-| Policy model | Cerbos-style RBAC+ABAC + ReBAC + query plans                                          | RBAC+ABAC (policies style)         | ReBAC (Zanzibar) |
-| Conditions | JS functions / safe `$expr`                                                           | CEL                                | caveats (CEL) |
-| Query plans | `planResources` (Cerbos-compatible shape)                                             | `PlanResources`                    | `LookupResources` |
-| Consistency | in-process state + your cache ([honest limitations](#consistency-honest-limitations)) | per-PDP policy sync                | Zanzibar consistency (zookies) |
-| Best when | JS/TS stack, zero-infra, browser/edge                                                 | polyglot stack, central governance | relationship graphs at scale, strict consistency |
+How Kerberos.js compares with the policy engines (Cerbos, SpiceDB, OPA) and the JavaScript authorization libraries it is [benchmarked against](#benchmarks). ✅ built in · ⚠️ partial or with a caveat · ❌ not built in · — does not apply. A ❌ means the feature is not built in; most of them can still be written by hand on top.
+
+| Architecture | **Kerberos.js** | Cerbos | SpiceDB | OPA | CASL | casbin | AccessControl | easy-rbac | @rbac/rbac |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Runs as | library | service (PDP) | service + database | service, Go library or WASM | library | library | library | library | library |
+| Languages | JS / TS | 8 SDKs | 6 SDKs + HTTP | any (REST), Go | JS / TS | 10+ ports | JS / TS | JS / TS | JS / TS |
+| In the browser | ✅ | ⚠️ WASM, Hub-built bundles | ❌ | ⚠️ WASM SDK + compiled `.wasm` | ✅ | ⚠️ needs Node polyfills¹ | ⚠️ bundles, not documented | ⚠️ bundles, not documented | ⚠️ default logger needs `process` |
+| Runtime dependencies | 0 | — (server) | — (server) | 2 (WASM SDK) | 4 | 10 | 2 | 0 | 1 (`zod`)² |
+| Check API | async | async (network) | async (network) | async (REST) · sync (WASM) | sync | async + `enforceSync` | sync + async | async | async |
+| License | MIT | Apache-2.0 | Apache-2.0 | Apache-2.0 | MIT | Apache-2.0 | MIT | MIT | MIT |
+
+| Policy model | **Kerberos.js** | Cerbos | SpiceDB | OPA | CASL | casbin | AccessControl | easy-rbac | @rbac/rbac |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Policy format | Cerbos-style documents | YAML / JSON documents | schema DSL + relationship tuples | Rego | JS builder / JSON rules | model `.conf` + policy rows | builder / grants JSON | role map | role map |
+| Roles with inheritance | ✅ `parentRoles` | ✅ `parentRoles` | ✅ modeled as relations | ⚠️ written in Rego | ⚠️ no roles: map them to rules | ✅ role hierarchy | ✅ `extend` | ✅ `inherits` | ✅ `inherits` |
+| Attribute conditions | ✅ JS functions / `$expr` | ✅ CEL | ✅ CEL caveats | ✅ Rego | ✅ MongoDB-style, resource only | ✅ matcher expressions | ✅ `.where()` expressions | ✅ JS `when` | ✅ JS `when` |
+| Relationships (ReBAC) | ✅ built-in resolver | ❌ pass them as attributes | ✅ the core model | ⚠️ `graph.reachable`, model it yourself | ❌ | ⚠️ via role links | ❌ | ❌ | ❌ |
+| Derived roles | ✅ | ✅ | ⚠️ computed permissions | ❌ plain Rego rules | ❌ | ❌ | ❌ `own` ownership only | ❌ | ❌ |
+| Explicit deny | ✅ deny beats allow | ✅ deny beats allow | ⚠️ exclusion operator | ⚠️ precedence written in Rego | ⚠️ `cannot`, rule order decides | ✅ configurable effect | ✅ within a role chain³ | ❌ allow-only | ❌ allow-only |
+| Field-level permissions | ⚠️ per-field actions or outputs | ⚠️ per-field actions or outputs | ❌ | ⚠️ column masks (server) | ✅ `fields` | ❌ | ✅ attribute filtering | ❌ | ❌ |
+| Scopes / tenants | ✅ scope chain⁴ | ✅ scope chain | ❌ model tenants as objects | ❌ structure packages yourself | ❌ | ✅ domains | ⚠️ groups and categories | ❌ | ⚠️ one role map per tenant |
+| Policy versions | ✅ | ✅ | ❌ | ⚠️ bundle revisions | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Outputs with the decision | ✅ | ✅ | ❌ | ✅ any JSON | ❌ reason string only | ❌ | ❌ | ❌ | ❌ |
+
+| Queries and data | **Kerberos.js** | Cerbos | SpiceDB | OPA | CASL | casbin | AccessControl | easy-rbac | @rbac/rbac |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Policies as data, changed at runtime | ✅ any cache, eval-free `$expr` | ✅ disk, git, blob, DB, Hub | ✅ schema + relationships via API | ✅ bundles, policy API (WASM: rebuild) | ✅ JSON rules | ✅ DB adapters + watchers | ✅ grants from DB rows | ⚠️ loaded once at start | ⚠️ `updateRoles`; `when` stays code |
+| Batch checks | ✅ `checkResources` | ✅ `CheckResources` | ✅ `CheckBulkPermissions` | ⚠️ design it into the policy | ❌ | ✅ `batchEnforce` | ❌ | ❌ | ❌ |
+| Database filtering | ✅ `planResources` + Cerbos ORM adapters | ✅ `PlanResources` + ORM adapters | ⚠️ `LookupResources` returns ids | ✅ Compile API → SQL (server) | ✅ `rulesToCondition`, Prisma, Mongoose | ❌ | ❌ | ❌ | ❌ |
+| "Who can access this?" | ⚠️ relations only (`lookupSubjects`) | ❌ | ✅ `LookupSubjects` | ⚠️ via partial evaluation | ⚠️ one user's rules | ✅ implicit-permission APIs | ⚠️ a role's actions | ❌ | ❌ |
+| Explains a decision | ✅ `includeMeta` | ✅ `includeMeta` | ✅ debug trace | ✅ explain / trace (server) | ✅ `relevantRuleFor` | ✅ `enforceEx` | ⚠️ deny reason code | ❌ | ❌ |
+| Consistency tokens | ❌ | — (stateless) | ✅ ZedTokens | — | — | — | — | — | — |
+
+| Tooling and operations | **Kerberos.js** | Cerbos | SpiceDB | OPA | CASL | casbin | AccessControl | easy-rbac | @rbac/rbac |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Policy test runner | ✅ test DSL + CLI (Cerbos suite format) | ✅ `cerbos compile` | ✅ `zed validate` | ✅ `opa test` | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Attribute schema validation | ✅ JSON Schema / Zod | ✅ JSON Schema | ⚠️ typed relations and caveats | ⚠️ static type checks | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Audit / decision logs | ✅ structured logger + events | ✅ | ⚠️ paid tiers only | ✅ decision logs (server) | ❌ | ⚠️ console logger | ✅ `access` events | ❌ | ⚠️ logger callback |
+| OpenTelemetry | ✅ traces + metrics | ✅ | ✅ traces | ✅ (server) | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Integrations | ⚠️ Cerbos ORM adapters, no middleware | ✅ React, ORM adapters | — (clients) | ⚠️ REST client SDK | ✅ React, Vue, Angular, Prisma, Mongoose | ✅ server middlewares, Casbin.js | ⚠️ NestJS (separate package) | ⚠️ Express middleware | ✅ Express, NestJS, Fastify |
+| Managed control plane | — | ✅ Cerbos Hub (free tier + paid) | ✅ AuthZed Cloud (paid) | ⚠️ OPA Control Plane (no UI) | — | — | — | — | — |
+| Reads Cerbos policies | ✅ YAML + CEL importer | ✅ native | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+
+1. casbin's README shows a browser import, but its main entry does not bundle for the browser without Node polyfills ([`pnpm size:compare`](#compared-with-other-libraries)). Casbin.js is its separate frontend package.
+2. @rbac/rbac describes itself as zero-dependency but depends on `zod`.
+3. AccessControl's deny wins within a role and the roles it inherits. When a check names several roles, a grant from one of them beats a deny from another.
+4. Kerberos.js implements Cerbos's `OVERRIDE_PARENT` scope behaviour. The parental-consent mode and the other gaps are listed in [DIVERGENCES.md](./conformance/DIVERGENCES.md).
+
+"OPA" covers both the server and the WebAssembly SDK (`@open-policy-agent/opa-wasm`): rows marked "(server)" are not available in the SDK. Cerbos runs in the browser through `@cerbos/embedded-client`, whose WebAssembly bundles are built by Cerbos Hub. Compared versions: Kerberos.js 4.3, Cerbos 0.55, SpiceDB 1.56, OPA 1.21 with opa-wasm 1.10, CASL 7.0, casbin 5.51 (Node), AccessControl 3.1, easy-rbac 4.0 and @rbac/rbac 2.2, checked in October 2026 against each project's documentation and installed package. Throughput, cold start and bundle size of the same libraries are on the [benchmarks](#benchmarks) page.
+
+Where each one fits:
+
+- **Kerberos.js** — a JS/TS stack with no authorization infrastructure, decisions in the browser or at the edge, Cerbos-style policies and query plans.
+- **Cerbos** — polyglot backends and centrally governed policies, with Cerbos Hub as the control plane.
+- **SpiceDB** — large relationship graphs that need Zanzibar-grade consistency.
+- **OPA** — one general-purpose policy language across your stack, not only application authorization.
+- **CASL** — permissions defined in code and shared with the UI, with field-level rules and ORM filtering.
+- **casbin** — the same access model across many languages, with storage adapters.
+- **AccessControl, easy-rbac, @rbac/rbac** — a role map with a few conditions, without policy documents.
 
 > [!NOTE]
-> Compatibility with Cerbos is checked in CI by a [conformance suite](./conformance/) that runs one corpus against both engines — every decision and every query plan is compared to a real Cerbos PDP. Features Kerberos deliberately does not implement (CEL, attribute schemas, `scopePermissions`, `auxData`) are catalogued in [DIVERGENCES.md](./conformance/DIVERGENCES.md).
+> Compatibility with Cerbos is checked in CI by a [conformance suite](./conformance/) that runs one corpus against both engines — every decision and every query plan is compared to a real Cerbos PDP. Features Kerberos deliberately does not implement (native CEL evaluation — the importer translates CEL instead — `scopePermissions` parental consent, `auxData`, globals and the Admin API) are catalogued in [DIVERGENCES.md](./conformance/DIVERGENCES.md).
 
 ### When NOT to use Kerberos.js
 
@@ -102,6 +153,7 @@ await kerberos.isAllowed({
 - [Hooks & events](#hooks--events)
   - [Hooks](#hooks) · [Events](#events) · [Hooks vs events](#hooks-vs-events)
 - [Benchmarks](#benchmarks)
+  - [Compared with other libraries](#compared-with-other-libraries) · [Hot paths](#kerberosjs-hot-paths) · [Release over release](#release-over-release)
 - [Changelog](#changelog) · [License](#license) · [Used by](#used-by)
 
 ## Installation
@@ -2207,74 +2259,150 @@ The built-in `RelationResolver` emits `request:start` / `request:end` / `request
 
 ## Benchmarks
 
-Measured with the zero-dependency harness in [`bench/bench.js`](./bench/bench.js) (1s timed run after up to 2k warmup iterations, at most 0.5 s, per scenario). Reproduce with:
+Every number below comes from scripts in this repository, recorded in [`bench/results/`](./bench/results) and turned into these charts and tables by `pnpm bench:report`. They were measured on one machine (named under each chart). Treat them as relative guidance, not absolutes: the order and the orders of magnitude carry over to other hardware, the exact figures do not. The [docs site](https://kerberosjs.vercel.app/guide/benchmarks) has the same charts in interactive form.
 
-```bash
-pnpm bench
-```
+### Compared with other libraries
 
-Apple Silicon (M-series), Node v24:
+Four scenarios, each implemented idiomatically in every library ([`bench/compare/adapters/`](./bench/compare/adapters)): a plain role check, a role check with an ownership condition, a policy with 1,000 rules where the request matches the last one, and filtering a list of 100 documents with the ownership rule (`pnpm bench:compare`).
 
-| Scenario |  ops/sec |
-| -------- |---------:|
-| `isAllowed` — simple role match |  ~770,000 |
-| `isAllowed` — derived roles + variables + condition |  ~600,000 |
-| `checkResources` — 10 resources × 3 actions |   ~58,000 |
-| `checkResources` — 10 resources, includeMeta |   ~48,000 |
-| `isAllowed` — role policy + 2-level parentRoles chain |  ~395,000 |
-| `isAllowed` — 3-segment scoped request (chain walk) |  ~580,000 |
-| `isAllowed` — simple role match + Zod validation |  ~445,000 |
-| `isAllowed` — simple role match + 1 sync `decision` listener |  ~695,000 |
-| `isAllowed` — simple role match + request-level hooks |  ~390,000 |
-| `isAllowed` — simple role match + per-resource hooks |  ~335,000 |
-| `checkResources` — 10 resources × 3 actions + `decision` listener |   ~52,000 |
-| `isAllowed` — cache-backed dynamic policy (`$expr`, in-memory Map) |  ~265,000 |
-| `checkResources` — 50 resources, cache-backed |    ~8,300 |
-| `planResources` — `$expr` policy (variables + deny rule) |   ~63,000 |
-| `relations.check` — direct tuple (flat) |  ~720,000 |
-| `relations.check` — deep walk (3 arrows + nested groups) |  ~105,000 |
-| `isAllowed` — relation-backed derived role (deep walk) |   ~70,000 |
+<!-- bench:compare:start -->
+<!-- generated by `pnpm bench:report` from bench/results — edit the results, not this block -->
 
-Scaling sweeps (`node bench/bench.js scaling`) — how decision cost grows with policy shape; 4.2.0 → 4.3.0 on the same machine:
+<img src="https://kerberosjs.vercel.app/benchmarks/compare-abac.svg" alt="Ownership condition: A USER may view a document they own: one role-gated rule with an attribute condition. ops/s, log scale — higher is better." width="760" />
 
-| Scenario | 4.2.0 | 4.3.0 |
-| -------- | -----:| -----:|
-| 1 000 rules, one per action — match first / last | ~31,000 / ~30,000 | ~730,000 / ~740,000 |
-| 1 000 rules, one per role — match last | ~27,000 | ~720,000 |
-| 64 principal roles, no role policies | ~37,000 | ~133,000 |
-| 32 imported derived-role definitions, 1 referenced | ~190,000 | ~625,000 |
-| scope depth 8, decided at the most specific scope | ~170,000 | ~278,000 |
-| `checkResources` — 100 documents, relation depth 16 (batches/s) | ~330 | ~1,670 |
-| 100 concurrent `relations.check`, shared memo, depth 16 (batches/s) | ~380 | ~3,260 |
+<details>
+<summary>More scenarios: Role check · 1,000 rules · Filter 100 documents</summary>
 
-Cold start (`pnpm bench:coldstart`: `require` + construction + first decision in a fresh process): ~17 ms.
+<img src="https://kerberosjs.vercel.app/benchmarks/compare-rbac.svg" alt="Role check: A USER may view a post. One rule, no condition. ops/s, log scale — higher is better." width="760" />
 
-`checkResources` evaluates resources **concurrently** (`Promise.allSettled`): with a remote policy store, N resources cost one parallel wave of lookups instead of N sequential round-trips (measured ~8x faster with a 2ms-latency cache and 10 resources), and one failing resource never fails the batch — it fail-closes to `EFFECT_DENY` for its actions only.
+<img src="https://kerberosjs.vercel.app/benchmarks/compare-rules.svg" alt="1,000 rules: 1,000 rules, one action each; the request matches the last one. ops/s, log scale — higher is better." width="760" />
 
-Numbers vary by hardware and Node version — treat them as relative guidance, not absolutes. The harness exists primarily to catch performance regressions between releases.
+<img src="https://kerberosjs.vercel.app/benchmarks/compare-batch.svg" alt="Filter 100 documents: The ownership rule over a list of 100 documents, half of them owned: one call returns the visible ids. batches/s, log scale — higher is better." width="760" />
 
-### Cross-library comparison
+</details>
 
-The same scenario — role-gated actions plus one ownership condition — implemented in Kerberos, [CASL](https://casl.js.org) and [casbin](https://casbin.org) (`pnpm bench:compare`; Apple Silicon, Node v24):
+| Library | Role check<br><sub>ops/s</sub> | Ownership condition<br><sub>ops/s</sub> | 1,000 rules<br><sub>ops/s</sub> | Filter 100 documents<br><sub>batches/s</sub> |
+| --- | ---: | ---: | ---: | ---: |
+| **Kerberos.js**<br><sub>isAllowed · checkResources · v4.3.0</sub> | 817,000 | 810,000 | 820,000 | 12,600 |
+| CASL<br><sub>ability built once per user · v7.0.1</sub> | 40,400,000 | 14,900,000 | 39,500,000 | 103,000 |
+| CASL<br><sub>ability built per request · v7.0.1</sub> | 4,350,000 | 1,870,000 | 9,650 | 93,500 |
+| casbin<br><sub>enforce · batchEnforce · v5.51.1</sub> | 383,000 | 297,000 | 549 | 2,910 |
+| AccessControl<br><sub>tryCan(…).do(…) · v3.1.1</sub> | 1,170,000 | 955,000 | 1,160,000 | 10,100 |
+| easy-rbac<br><sub>can(roles, operation, params) · v4.0.0</sub> | 770,000 | 693,000 | 762,000 | 9,390 |
+| @rbac/rbac<br><sub>can(role, operation, params) · v2.2.2</sub> | 24,500,000 | 3,760,000 | 25,500,000 | 29,800 |
+| OPA<br><sub>Rego compiled to WebAssembly, in-process · v1.10.0</sub> | 468,000 | 428,000 | 42,000 | 14,900 |
+| OPA server<br><sub>REST Data API, sidecar on localhost · 1.21.1</sub> | 2,050 | 2,160 | 2,180 | 903 |
+| Cerbos PDP<br><sub>gRPC SDK, sidecar on localhost · 0.55.0</sub> | 1,500 | 1,400 | 1,530 | 286 |
 
-| Library · path | ops/sec |
-| -------------- | -------:|
-| `@alexify/kerberos` · `isAllowed` | ~740,000 |
-| `@casl/ability` · check (prebuilt ability) | ~7,300,000 |
-| `@casl/ability` · build + check (per request) | ~1,300,000 |
-| `casbin` · `enforce` (in-memory model) | ~200,000 |
+_Apple M3 Max · 16 cores · Node v24.14.1 · Docker 27.4.0 · median of 5 × 1 s samples, each library in a fresh process · 2026-10-03. Medians, rounded to three significant figures._
 
-Read it honestly — the libraries do different amounts of work per call. CASL's prebuilt check is a plain in-memory predicate and is faster because it does dramatically less: no policy documents, versions or scopes, no audit/telemetry path, no batch API, no query planner. Abilities are built **per user**, so the *build + check* row is the realistic per-request path. casbin interprets its model DSL on every call. The Kerberos number includes argument validation, the guarded audit/telemetry seams and the scope-chain walk. `@cerbos/embedded` and OPA-WASM are absent by necessity: their policy bundles cannot be built from open tooling alone (Cerbos Hub / the `opa` compiler), so honest numbers cannot be produced here.
+<!-- bench:compare:end -->
 
-Bundle size for the browser, measured the same way as the table above (`pnpm size:compare`, esbuild, min+gzip):
+The libraries do different amounts of work per call, so read the charts as a price list, not a ranking:
 
-| Library | min+gzip |
-| ------- | --------:|
-| `@alexify/kerberos` (main entry) | 38.3 KB |
-| `@casl/ability` | 6.6 KB |
-| `casbin` | 33.9 KB — does not bundle for the browser (Node builtins); measured as a Node bundle |
+- **CASL, @rbac/rbac and AccessControl** check an in-memory predicate or map: no policy documents, versions or scopes, no audit or telemetry path, no query planner. @rbac/rbac also memoizes role × operation lookups. Every timed call repeats the same request, so it is measured at its cache-hit speed.
+- **CASL builds an ability per user.** The *built once per user* row times the check alone. The *built per request* row includes building the ability, which is what you pay unless you cache abilities between requests.
+- **A Kerberos.js call** includes argument validation, the guarded audit, telemetry and hook seams, and the walk along the scope chain. Its rule index keeps the 1,000-rule policy as fast as the one-rule policy. casbin, OPA's WebAssembly build and per-request CASL all slow down as the policy grows.
+- **OPA server and Cerbos PDP run as sidecars.** Every decision is a serialized request over localhost, so the transport dominates whatever the engine does. The numbers were taken on Docker Desktop, where the round-trip also crosses the VM's network bridge, so they are slower than on a Linux host. A network hop is never free, though, which is the cost Kerberos.js is built to avoid.
 
-CASL is the size floor for a reason (it implements far less); casbin does not run in browsers at all.
+Method: every (library, scenario) pair runs in a fresh process; each adapter must reproduce the scenario's expected allow and deny decisions before it is timed; the median of five one-second samples after a one-second warmup is reported; synchronous checks are never awaited. OPA (`openpolicyagent/opa:1.21.1`, once compiled to WebAssembly and evaluated in-process, once as a server) and Cerbos (`ghcr.io/cerbos/cerbos:0.55.0` over gRPC) run from pinned images. `@cerbos/embedded` is absent: its policy bundles can only be built by Cerbos Hub.
+
+Cold start — load the library, build the ownership policy, first decision, in a fresh process:
+
+<!-- bench:coldstart:start -->
+<!-- generated by `pnpm bench:report` from bench/results — edit the results, not this block -->
+
+<img src="https://kerberosjs.vercel.app/benchmarks/coldstart.svg" alt="Cold start: Load the library, build the ownership policy, first decision — fresh process, median of 20 runs. Lower is better." width="760" />
+
+| Library | Load | Build policy | First decision | Total |
+| --- | ---: | ---: | ---: | ---: |
+| easy-rbac<br><sub>can(roles, operation, params) · v4.0.0</sub> | 1.5 ms | 0.2 ms | 0.2 ms | 1.9 ms |
+| CASL<br><sub>ability built once per user · v7.0.1</sub> | 4.6 ms | 0.3 ms | 0.4 ms | 5.3 ms |
+| @rbac/rbac<br><sub>can(role, operation, params) · v2.2.2</sub> | 7.5 ms | 0.7 ms | 0.3 ms | 8.5 ms |
+| **Kerberos.js**<br><sub>isAllowed · checkResources · v4.3.0</sub> | 13.7 ms | 1.1 ms | 1.3 ms | 16.1 ms |
+| casbin<br><sub>enforce · batchEnforce · v5.51.1</sub> | 13.5 ms | 2.6 ms | 1.0 ms | 17.1 ms |
+| AccessControl<br><sub>tryCan(…).do(…) · v3.1.1</sub> | 15.3 ms | 0.8 ms | 1.0 ms | 17.1 ms |
+| OPA<br><sub>Rego compiled to WebAssembly, in-process · v1.10.0</sub> | 6.7 ms | 17.2 ms | 0.3 ms | 24.1 ms |
+
+<!-- bench:coldstart:end -->
+
+Bundle size for the browser (`pnpm size:compare`: esbuild, min+gzip, the same method as `pnpm size`). OPA's WebAssembly SDK also needs the compiled policy at runtime, so its bar includes the `.wasm` file for the ownership rule alone:
+
+<!-- bench:size:start -->
+<!-- generated by `pnpm bench:report` from bench/results — edit the results, not this block -->
+
+<img src="https://kerberosjs.vercel.app/benchmarks/size.svg" alt="Bundle size: Main entry bundled with esbuild, min+gzip. Lower is better." width="760" />
+
+| Library | min | min+gzip |  |
+| --- | ---: | ---: | --- |
+| **`@alexify/kerberos`** (main entry) | 134.3 KB | 38.3 KB |  |
+| `@casl/ability` | 18.3 KB | 6.6 KB |  |
+| `casbin` | 125.3 KB | 33.9 KB | does not bundle for the browser (Node builtins) — measured as a Node bundle |
+| `accesscontrol` | 92.5 KB | 29.0 KB |  |
+| `easy-rbac` | 4.8 KB | 1.8 KB |  |
+| `@rbac/rbac` | 77.2 KB | 18.3 KB |  |
+| `@open-policy-agent/opa-wasm` | 92.6 KB | 29.1 KB | + 51.7 KB gzip for the compiled policy (.wasm, ownership rule only) |
+
+<!-- bench:size:end -->
+
+CASL and easy-rbac are small because they implement far less. casbin does not bundle for the browser at all.
+
+### Kerberos.js hot paths
+
+The zero-dependency regression harness in [`bench/bench.js`](./bench/bench.js) (up to 0.5 s of warmup, then five one-second samples per scenario, median reported):
+
+<!-- bench:engine:start -->
+<!-- generated by `pnpm bench:report` from bench/results — edit the results, not this block -->
+
+<img src="https://kerberosjs.vercel.app/benchmarks/engine.svg" alt="Kerberos.js 4.3.0 hot paths: ops/s, linear scale — higher is better." width="760" />
+
+| Scenario | ops/sec |
+| --- | ---: |
+| `isAllowed` — simple role match | ~796,000 |
+| `isAllowed` — derived roles + variables + condition | ~617,000 |
+| `checkResources` — 10 resources × 3 actions | ~59,400 |
+| `checkResources` — 10 resources, includeMeta | ~48,700 |
+| `isAllowed` — role policy + 2-level parentRoles chain | ~402,000 |
+| `isAllowed` — 3-segment scoped request (chain walk) | ~594,000 |
+| `isAllowed` — simple role match + Zod validation | ~450,000 |
+| `isAllowed` — simple role match + 1 sync decision listener | ~701,000 |
+| `isAllowed` — simple role match + request-level hooks | ~393,000 |
+| `isAllowed` — simple role match + per-resource hooks | ~337,000 |
+| `checkResources` — 10 resources × 3 actions + decision listener | ~53,900 |
+| `isAllowed` — cache-backed dynamic policy ($expr) | ~271,000 |
+| `checkResources` — 50 resources, cache-backed | ~8,280 |
+| `planResources` — $expr policy (variables + deny rule) | ~63,000 |
+| `relations.check` — direct tuple (flat) | ~731,000 |
+| `relations.check` — deep walk (3 arrows + nested groups) | ~107,000 |
+| `isAllowed` — relation-backed derived role (deep walk) | ~70,800 |
+
+<!-- bench:engine:end -->
+
+`checkResources` evaluates resources **concurrently** (`Promise.allSettled`): with a remote policy store, N resources cost one parallel wave of lookups instead of N sequential round-trips (measured ~8x faster with a 2ms-latency cache and 10 resources), and one failing resource never fails the batch — it fail-closes to `EFFECT_DENY` for its actions only. Cold start of Kerberos.js alone (`pnpm bench:coldstart`) splits into `require`, construction and the first decision.
+
+### Release over release
+
+The scaling sweeps (`node bench/bench.js scaling`) measure how decision cost grows with policy shape. Both releases were measured on the same machine with the same harness (`--src` points it at a checkout of the previous release):
+
+<!-- bench:releases:start -->
+<!-- generated by `pnpm bench:report` from bench/results — edit the results, not this block -->
+
+<img src="https://kerberosjs.vercel.app/benchmarks/releases.svg" alt="4.2.0 → 4.3.0: how decision cost scales with policy shape: Speed-up of each scaling sweep, same machine and harness. Higher is better." width="760" />
+
+| Scenario | 4.2.0 | 4.3.0 | Speed-up |
+| --- | ---: | ---: | ---: |
+| 1 000 rules × distinct roles, match last | ~23,800 | ~721,000 | ×30.3 |
+| 1 000 rules × distinct actions, match last | ~33,100 | ~740,000 | ×22.4 |
+| 1 000 rules × distinct actions, match first | ~35,900 | ~749,000 | ×20.9 |
+| 100 concurrent relations.check, shared memo, depth 16 | ~378 | ~3,220 | ×8.5 |
+| checkResources 100 docs, relation depth 16 | ~330 | ~1,670 | ×5.1 |
+| 64 principal roles, no role policies | ~39,000 | ~134,000 | ×3.4 |
+| 32 derived-role definitions, 1 referenced | ~198,000 | ~632,000 | ×3.2 |
+| scope depth 8, decided at the most specific scope | ~180,000 | ~282,000 | ×1.6 |
+
+<!-- bench:releases:end -->
+
+To regenerate everything: `node bench/bench.js --json --samples 5`, the same with `scaling --src <previous release checkout>`, `pnpm bench:compare`, `node scripts/size-compare.js --json`, then `pnpm bench:report`.
 
 ## Changelog
 

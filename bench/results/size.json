@@ -1,0 +1,65 @@
+{
+  "generatedAt": "2026-10-03T19:07:35.092Z",
+  "libraries": [
+    {
+      "id": "kerberos",
+      "name": "Kerberos.js",
+      "package": "@alexify/kerberos",
+      "min": 137541,
+      "gzip": 39214,
+      "browser": true
+    },
+    {
+      "id": "casl",
+      "name": "CASL",
+      "package": "@casl/ability",
+      "min": 18728,
+      "gzip": 6763,
+      "browser": true
+    },
+    {
+      "id": "casbin",
+      "name": "casbin",
+      "package": "casbin",
+      "min": 128341,
+      "gzip": 34711,
+      "browser": false
+    },
+    {
+      "id": "accesscontrol",
+      "name": "AccessControl",
+      "package": "accesscontrol",
+      "min": 94750,
+      "gzip": 29661,
+      "browser": true
+    },
+    {
+      "id": "easy-rbac",
+      "name": "easy-rbac",
+      "package": "easy-rbac",
+      "min": 4893,
+      "gzip": 1854,
+      "browser": true
+    },
+    {
+      "id": "rbac",
+      "name": "@rbac/rbac",
+      "package": "@rbac/rbac",
+      "min": 79095,
+      "gzip": 18745,
+      "browser": true
+    },
+    {
+      "id": "opa-wasm",
+      "name": "OPA",
+      "package": "@open-policy-agent/opa-wasm",
+      "min": 94823,
+      "gzip": 29795,
+      "browser": true,
+      "policyWasm": {
+        "min": 134528,
+        "gzip": 52974
+      }
+    }
+  ]
+}

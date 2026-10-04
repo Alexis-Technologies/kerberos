@@ -1,0 +1,166 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="923" viewBox="0 0 760 923" role="img" aria-label="Kerberos.js 4.3.0 hot paths. ops/s, linear scale — higher is better.">
+<style>
+  text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .title { font-size: 15px; font-weight: 700; fill: #1b1c1e; }
+  .subtitle, .caption { font-size: 12px; fill: #67676c; }
+  .caption { font-size: 11px; }
+  .group { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; fill: #67676c; }
+  .label { font-size: 13px; font-weight: 600; fill: #1b1c1e; }
+  .label.hl { font-weight: 700; }
+  .sublabel { font-size: 11px; fill: #67676c; }
+  .value { font-size: 12px; font-weight: 600; fill: #3c3c43; font-variant-numeric: tabular-nums; }
+  .tick { font-size: 11px; fill: #67676c; font-variant-numeric: tabular-nums; }
+  .grid { stroke: #e4e4e7; stroke-width: 1; }
+  .axis, .ref { stroke: #c2c2c4; stroke-width: 1; }
+  .ref { stroke: #67676c; }
+  .bar { fill: #c6c5bf; }
+  .bar.hl { fill: #b37e00; }
+  @media (prefers-color-scheme: dark) {
+    .title, .label { fill: #dfdfd6; }
+    .subtitle, .caption, .group, .sublabel, .tick { fill: #98989f; }
+    .value { fill: #c2c2c4; }
+    .grid { stroke: #2e2e32; }
+    .axis { stroke: #48484c; }
+    .ref { stroke: #98989f; }
+    .bar { fill: #55544f; }
+    .bar.hl { fill: #e3a500; }
+  }
+</style>
+<text class="title" x="20" y="35">Kerberos.js 4.3.0 hot paths</text>
+<text class="subtitle" x="20" y="56">ops/s, linear scale — higher is better.</text>
+<line class="grid" x1="357" y1="71" x2="357" y2="863"/>
+<text class="tick" x="357" y="879" text-anchor="middle">0</text>
+<line class="grid" x1="436.75" y1="71" x2="436.75" y2="863"/>
+<text class="tick" x="436.75" y="879" text-anchor="middle">200k</text>
+<line class="grid" x1="516.5" y1="71" x2="516.5" y2="863"/>
+<text class="tick" x="516.5" y="879" text-anchor="middle">400k</text>
+<line class="grid" x1="596.25" y1="71" x2="596.25" y2="863"/>
+<text class="tick" x="596.25" y="879" text-anchor="middle">600k</text>
+<line class="grid" x1="676" y1="71" x2="676" y2="863"/>
+<text class="tick" x="676" y="879" text-anchor="middle">800k</text>
+<line class="axis" x1="357" y1="71" x2="357" y2="863"/>
+<text class="group" x="20" y="89">ISALLOWED</text>
+<g><title>simple role match
+795,642 ops/s
+1.26 µs per call</title>
+<text class="label hl" x="20" y="123">simple role match</text>
+<path class="bar hl" d="M357,112H670.2622475000001A4,4 0 0 1 674.2622475000001,116V122A4,4 0 0 1 670.2622475000001,126H357Z"/>
+<text class="value" x="680.2622475000001" y="124">796k</text>
+</g>
+<g><title>derived roles + variables + condition
+617,125 ops/s
+1.62 µs per call</title>
+<text class="label hl" x="20" y="163">derived roles + variables + condition</text>
+<path class="bar hl" d="M357,152H599.07859375A4,4 0 0 1 603.07859375,156V162A4,4 0 0 1 599.07859375,166H357Z"/>
+<text class="value" x="609.07859375" y="164">617k</text>
+</g>
+<g><title>role policy + 2-level parentRoles chain
+402,277 ops/s
+2.49 µs per call</title>
+<text class="label hl" x="20" y="203">role policy + 2-level parentRoles chain</text>
+<path class="bar hl" d="M357,192H513.40795375A4,4 0 0 1 517.40795375,196V202A4,4 0 0 1 513.40795375,206H357Z"/>
+<text class="value" x="523.40795375" y="204">402k</text>
+</g>
+<g><title>3-segment scoped request (chain walk)
+594,044 ops/s
+1.68 µs per call</title>
+<text class="label hl" x="20" y="243">3-segment scoped request (chain walk)</text>
+<path class="bar hl" d="M357,232H589.875045A4,4 0 0 1 593.875045,236V242A4,4 0 0 1 589.875045,246H357Z"/>
+<text class="value" x="599.875045" y="244">594k</text>
+</g>
+<g><title>simple role match + Zod validation
+449,834 ops/s
+2.22 µs per call</title>
+<text class="label hl" x="20" y="283">simple role match + Zod validation</text>
+<path class="bar hl" d="M357,272H532.3713075000001A4,4 0 0 1 536.3713075000001,276V282A4,4 0 0 1 532.3713075000001,286H357Z"/>
+<text class="value" x="542.3713075000001" y="284">450k</text>
+</g>
+<g><title>simple role match + 1 sync decision listener
+700,693 ops/s
+1.43 µs per call</title>
+<text class="label hl" x="20" y="323">simple role match + 1 sync decision listener</text>
+<path class="bar hl" d="M357,312H632.40133375A4,4 0 0 1 636.40133375,316V322A4,4 0 0 1 632.40133375,326H357Z"/>
+<text class="value" x="642.40133375" y="324">701k</text>
+</g>
+<g><title>simple role match + request-level hooks
+392,898 ops/s
+2.55 µs per call</title>
+<text class="label hl" x="20" y="363">simple role match + request-level hooks</text>
+<path class="bar hl" d="M357,352H509.6680775A4,4 0 0 1 513.6680775,356V362A4,4 0 0 1 509.6680775,366H357Z"/>
+<text class="value" x="519.6680775" y="364">393k</text>
+</g>
+<g><title>simple role match + per-resource hooks
+337,164 ops/s
+2.97 µs per call</title>
+<text class="label hl" x="20" y="403">simple role match + per-resource hooks</text>
+<path class="bar hl" d="M357,392H487.44414500000005A4,4 0 0 1 491.44414500000005,396V402A4,4 0 0 1 487.44414500000005,406H357Z"/>
+<text class="value" x="497.44414500000005" y="404">337k</text>
+</g>
+<g><title>cache-backed dynamic policy ($expr)
+271,196 ops/s
+3.69 µs per call</title>
+<text class="label hl" x="20" y="443">cache-backed dynamic policy ($expr)</text>
+<path class="bar hl" d="M357,432H461.139405A4,4 0 0 1 465.139405,436V442A4,4 0 0 1 461.139405,446H357Z"/>
+<text class="value" x="471.139405" y="444">271k</text>
+</g>
+<g><title>relation-backed derived role (deep walk)
+70,814 ops/s
+14.1 µs per call</title>
+<text class="label hl" x="20" y="483">relation-backed derived role (deep walk)</text>
+<path class="bar hl" d="M357,472H381.2370825A4,4 0 0 1 385.2370825,476V482A4,4 0 0 1 381.2370825,486H357Z"/>
+<text class="value" x="391.2370825" y="484">70.8k</text>
+</g>
+<text class="group" x="20" y="517">CHECKRESOURCES</text>
+<g><title>10 resources × 3 actions
+59,422 ops/s
+16.8 µs per call</title>
+<text class="label hl" x="20" y="551">10 resources × 3 actions</text>
+<path class="bar hl" d="M357,540H376.6945225A4,4 0 0 1 380.6945225,544V550A4,4 0 0 1 376.6945225,554H357Z"/>
+<text class="value" x="386.6945225" y="552">59.4k</text>
+</g>
+<g><title>10 resources, includeMeta
+48,722 ops/s
+20.5 µs per call</title>
+<text class="label hl" x="20" y="591">10 resources, includeMeta</text>
+<path class="bar hl" d="M357,580H372.4278975A4,4 0 0 1 376.4278975,584V590A4,4 0 0 1 372.4278975,594H357Z"/>
+<text class="value" x="382.4278975" y="592">48.7k</text>
+</g>
+<g><title>10 resources × 3 actions + decision listener
+53,946 ops/s
+18.5 µs per call</title>
+<text class="label hl" x="20" y="631">10 resources × 3 actions + decision listener</text>
+<path class="bar hl" d="M357,620H374.5109675A4,4 0 0 1 378.5109675,624V630A4,4 0 0 1 374.5109675,634H357Z"/>
+<text class="value" x="384.5109675" y="632">53.9k</text>
+</g>
+<g><title>50 resources, cache-backed
+8,283 ops/s
+121 µs per call</title>
+<text class="label hl" x="20" y="671">50 resources, cache-backed</text>
+<path class="bar hl" d="M357,660H357A3.30284625,3.30284625 0 0 1 360.30284625,663.30284625V670.69715375A3.30284625,3.30284625 0 0 1 357,674H357Z"/>
+<text class="value" x="366.30284625" y="672">8,283</text>
+</g>
+<text class="group" x="20" y="705">PLANRESOURCES</text>
+<g><title>$expr policy (variables + deny rule)
+63,027 ops/s
+15.9 µs per call</title>
+<text class="label hl" x="20" y="739">$expr policy (variables + deny rule)</text>
+<path class="bar hl" d="M357,728H378.13201625A4,4 0 0 1 382.13201625,732V738A4,4 0 0 1 378.13201625,742H357Z"/>
+<text class="value" x="388.13201625" y="740">63k</text>
+</g>
+<text class="group" x="20" y="773">RELATIONS.CHECK</text>
+<g><title>direct tuple (flat)
+731,477 ops/s
+1.37 µs per call</title>
+<text class="label hl" x="20" y="807">direct tuple (flat)</text>
+<path class="bar hl" d="M357,796H644.6764537500001A4,4 0 0 1 648.6764537500001,800V806A4,4 0 0 1 644.6764537500001,810H357Z"/>
+<text class="value" x="654.6764537500001" y="808">731k</text>
+</g>
+<g><title>deep walk (3 arrows + nested groups)
+106,763 ops/s
+9.37 µs per call</title>
+<text class="label hl" x="20" y="847">deep walk (3 arrows + nested groups)</text>
+<path class="bar hl" d="M357,836H395.57174625A4,4 0 0 1 399.57174625,840V846A4,4 0 0 1 395.57174625,850H357Z"/>
+<text class="value" x="405.57174625" y="848">107k</text>
+</g>
+<text class="caption" x="20" y="904">Apple M3 Max · 16 cores · Node v24.14.1</text>
+</svg>

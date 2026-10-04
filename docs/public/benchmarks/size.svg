@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="395" viewBox="0 0 760 395" role="img" aria-label="Bundle size. Main entry bundled with esbuild, min+gzip. Lower is better.">
+<style>
+  text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .title { font-size: 15px; font-weight: 700; fill: #1b1c1e; }
+  .subtitle, .caption { font-size: 12px; fill: #67676c; }
+  .caption { font-size: 11px; }
+  .group { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; fill: #67676c; }
+  .label { font-size: 13px; font-weight: 600; fill: #1b1c1e; }
+  .label.hl { font-weight: 700; }
+  .sublabel { font-size: 11px; fill: #67676c; }
+  .value { font-size: 12px; font-weight: 600; fill: #3c3c43; font-variant-numeric: tabular-nums; }
+  .tick { font-size: 11px; fill: #67676c; font-variant-numeric: tabular-nums; }
+  .grid { stroke: #e4e4e7; stroke-width: 1; }
+  .axis, .ref { stroke: #c2c2c4; stroke-width: 1; }
+  .ref { stroke: #67676c; }
+  .bar { fill: #c6c5bf; }
+  .bar.hl { fill: #b37e00; }
+  @media (prefers-color-scheme: dark) {
+    .title, .label { fill: #dfdfd6; }
+    .subtitle, .caption, .group, .sublabel, .tick { fill: #98989f; }
+    .value { fill: #c2c2c4; }
+    .grid { stroke: #2e2e32; }
+    .axis { stroke: #48484c; }
+    .ref { stroke: #98989f; }
+    .bar { fill: #55544f; }
+    .bar.hl { fill: #e3a500; }
+  }
+</style>
+<text class="title" x="20" y="35">Bundle size</text>
+<text class="subtitle" x="20" y="56">Main entry bundled with esbuild, min+gzip. Lower is better.</text>
+<line class="grid" x1="306" y1="71" x2="306" y2="351"/>
+<text class="tick" x="306" y="367" text-anchor="middle">0 KB</text>
+<line class="grid" x1="491" y1="71" x2="491" y2="351"/>
+<text class="tick" x="491" y="367" text-anchor="middle">50 KB</text>
+<line class="grid" x1="676" y1="71" x2="676" y2="351"/>
+<text class="tick" x="676" y="367" text-anchor="middle">100 KB</text>
+<line class="axis" x1="306" y1="71" x2="306" y2="351"/>
+<g><title>easy-rbac
+1.8 KB min+gzip
+4.8 KB minified
+browser bundle (esbuild)</title>
+<text class="label" x="20" y="95">easy-rbac</text>
+<path class="bar" d="M306,84H308.6990234375A4,4 0 0 1 312.6990234375,88V94A4,4 0 0 1 308.6990234375,98H306Z"/>
+<text class="value" x="318.6990234375" y="96">1.8 KB</text>
+</g>
+<g><title>CASL · @casl/ability
+6.6 KB min+gzip
+18.3 KB minified
+browser bundle (esbuild)</title>
+<text class="label" x="20" y="128">CASL</text>
+<text class="sublabel" x="20" y="143">@casl/ability</text>
+<path class="bar" d="M306,124H326.43662109375A4,4 0 0 1 330.43662109375,128V134A4,4 0 0 1 326.43662109375,138H306Z"/>
+<text class="value" x="336.43662109375" y="136">6.6 KB</text>
+</g>
+<g><title>@rbac/rbac
+18.3 KB min+gzip
+77.2 KB minified
+browser bundle (esbuild)</title>
+<text class="label" x="20" y="175">@rbac/rbac</text>
+<path class="bar" d="M306,164H369.73095703125A4,4 0 0 1 373.73095703125,168V174A4,4 0 0 1 369.73095703125,178H306Z"/>
+<text class="value" x="379.73095703125" y="176">18.3 KB</text>
+</g>
+<g><title>AccessControl · accesscontrol
+29.0 KB min+gzip
+92.5 KB minified
+browser bundle (esbuild)</title>
+<text class="label" x="20" y="208">AccessControl</text>
+<text class="sublabel" x="20" y="223">accesscontrol</text>
+<path class="bar" d="M306,204H409.17353515625A4,4 0 0 1 413.17353515625,208V214A4,4 0 0 1 409.17353515625,218H306Z"/>
+<text class="value" x="419.17353515625" y="216">29.0 KB</text>
+</g>
+<g><title>casbin · Node-only, does not bundle for the browser
+33.9 KB min+gzip
+125.3 KB minified
+Node bundle — does not bundle for the browser</title>
+<text class="label" x="20" y="248">casbin</text>
+<text class="sublabel" x="20" y="263">Node-only, does not bundle for the browser</text>
+<path class="bar" d="M306,244H427.42060546875A4,4 0 0 1 431.42060546875,248V254A4,4 0 0 1 427.42060546875,258H306Z"/>
+<text class="value" x="437.42060546875" y="256">33.9 KB</text>
+</g>
+<g><title>Kerberos.js · @alexify/kerberos
+38.3 KB min+gzip
+134.3 KB minified
+browser bundle (esbuild)</title>
+<text class="label hl" x="20" y="288">Kerberos.js</text>
+<text class="sublabel" x="20" y="303">@alexify/kerberos</text>
+<path class="bar hl" d="M306,284H443.6912109375A4,4 0 0 1 447.6912109375,288V294A4,4 0 0 1 443.6912109375,298H306Z"/>
+<text class="value" x="453.6912109375" y="296">38.3 KB</text>
+</g>
+<g><title>OPA · 29.1 KB SDK + 51.7 KB compiled policy (.wasm)
+80.8 KB min+gzip
+92.6 KB minified + 131.4 KB .wasm
+browser bundle (esbuild)</title>
+<text class="label" x="20" y="328">OPA</text>
+<text class="sublabel" x="20" y="343">29.1 KB SDK + 51.7 KB compiled policy (.wasm)</text>
+<path class="bar" d="M306,324H601.06767578125A4,4 0 0 1 605.06767578125,328V334A4,4 0 0 1 601.06767578125,338H306Z"/>
+<text class="value" x="611.06767578125" y="336">80.8 KB</text>
+</g>
+</svg>

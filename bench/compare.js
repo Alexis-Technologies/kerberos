@@ -1,149 +1,247 @@
 /**
- * Cross-library comparison benchmark: the same authorization scenario —
- * role-gated actions plus an ownership (ABAC) condition — implemented in
- * Kerberos, CASL (@casl/ability) and casbin.
+ * Cross-library comparison: the scenarios in bench/compare/scenarios.js
+ * (role check, ownership condition, 1 000 rules, filtering 100 documents),
+ * implemented idiomatically in every library under bench/compare/adapters,
+ * plus a cold-start comparison. Results land in bench/results/compare.json,
+ * which feeds the docs charts and README tables (pnpm bench:report).
  *
- * Run: pnpm bench:compare
+ * Run: pnpm bench:compare [--only kerberos,casl] [--scenarios rbac,abac]
+ *        [--samples 5] [--sample-ms 1000] [--warmup-ms 1000] [--cold-runs 20]
+ *        [--no-docker] [--no-write]
  *
- * Honesty notes, also published with the results in docs/guide/benchmarks.md:
- * - the libraries have different feature sets; the scenario is the overlap
- *   (RBAC + one attribute condition), NOT a claim of equivalence — none of
- *   the others have policy versions/scopes, query plans or ReBAC;
- * - CASL abilities are built PER USER: `check (prebuilt)` measures the pure
- *   check against a shared ability, `build + check` measures the realistic
- *   per-request path (define rules for the request's user, then check);
- * - casbin's enforce() is async and model-interpreted; the in-memory model
- *   here (RBAC with an ABAC ownership matcher) is its idiomatic equivalent;
- * - @cerbos/embedded and OPA-WASM are absent by necessity: their policy
- *   bundles cannot be built from open tooling alone (Cerbos Hub / the opa
- *   compiler), so honest numbers cannot be produced here.
+ * Method, also published with the results in docs/guide/benchmarks.md:
+ * - every (library, scenario) pair runs in a FRESH process, so no library's
+ *   JIT feedback or heap state leaks into the next measurement;
+ * - each adapter must reproduce the scenario's expected allow AND deny
+ *   decisions before it is timed — a mismatch aborts the run;
+ * - the libraries have different feature sets: a scenario is the overlap
+ *   they can all express, NOT a claim of equivalence;
+ * - CASL builds abilities per user: `casl` times the check against an ability
+ *   built once, `casl-per-request` builds it inside the timed call;
+ * - OPA and Cerbos run from pinned Docker images (bench/compare/services.js):
+ *   OPA once compiled to WebAssembly and evaluated in-process, once as a
+ *   server; Cerbos as a PDP sidecar over gRPC. On Docker Desktop the sidecar
+ *   round-trip also crosses the VM's network bridge, so it is slower there
+ *   than on a Linux host — but a network hop is never free.
  */
-const { performance } = require('node:perf_hooks');
+const { execFile } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const { parseArgs, promisify } = require('node:util');
 
-const { Kerberos, Effect } = require('../src/index.js');
-const { AbilityBuilder, createMongoAbility, subject } = require('@casl/ability');
-const { newEnforcer, newModelFromString, StringAdapter } = require('casbin');
+const { ADAPTERS } = require('./compare/adapters/index.js');
+const { SCENARIOS } = require('./compare/scenarios.js');
+const { median } = require('./compare/measure.js');
+const services = require('./compare/services.js');
+const { describeMachine } = require('./machine.js');
 
-const WARMUP_ITERATIONS = 2_000;
-const MEASURE_MS = 1_000;
+const run = promisify(execFile);
+const ROOT = path.join(__dirname, '..');
+const OUT = path.join(__dirname, 'results', 'compare.json');
 
-async function bench(name, fn) {
-  for (let i = 0; i < WARMUP_ITERATIONS; i++) await fn();
-  let iterations = 0;
-  const start = performance.now();
-  while (performance.now() - start < MEASURE_MS) {
-    await fn();
-    iterations += 1;
-  }
-  const elapsed = performance.now() - start;
-  const opsPerSec = Math.round((iterations / elapsed) * 1000);
-  console.log(`${name.padEnd(56)} ${opsPerSec.toLocaleString('en-US').padStart(12)} ops/sec`);
-  return { name, opsPerSec };
+const { values: args } = parseArgs({
+  options: {
+    only: { type: 'string' },
+    scenarios: { type: 'string' },
+    samples: { type: 'string', default: '5' },
+    'sample-ms': { type: 'string', default: '1000' },
+    'warmup-ms': { type: 'string', default: '1000' },
+    'cold-runs': { type: 'string', default: '20' },
+    'no-docker': { type: 'boolean', default: false },
+    'no-write': { type: 'boolean', default: false },
+  },
+});
+
+const list = (value) => (value ? value.split(',').map((item) => item.trim()) : null);
+const method = {
+  warmupMs: Number(args['warmup-ms']),
+  sampleMs: Number(args['sample-ms']),
+  samples: Number(args.samples),
+  coldStartRuns: Number(args['cold-runs']),
+};
+
+function packageVersion(name) {
+  const file = name ? path.join(ROOT, 'node_modules', name, 'package.json') : path.join(ROOT, 'package.json');
+  return JSON.parse(fs.readFileSync(file, 'utf8')).version;
 }
 
-// The shared scenario: USERs may view documents they own; EDITORs may view
-// and publish any document. The check asked of every library: may this USER
-// view this document they own?
-const user = { id: 'u1', roles: ['USER'] };
-const document = { id: 'd1', kind: 'document', attr: { ownerId: 'u1' } };
+/**
+ * `package`/`version` name the npm package the adapter calls (for a sidecar,
+ * its client); `image` the pinned Docker image that runs or compiles the engine.
+ */
+function libraryInfo(adapter) {
+  const images = { 'opa-wasm': services.OPA_IMAGE, 'opa-server': services.OPA_IMAGE, cerbos: services.CERBOS_IMAGE };
+  const info = {
+    id: adapter.id,
+    name: adapter.name,
+    package: adapter.packageName,
+    version: adapter.packageName ? packageVersion(adapter.id === 'kerberos' ? null : adapter.packageName) : null,
+    variant: adapter.variant,
+    runtime: adapter.runtime,
+  };
+  if (images[adapter.id]) info.image = images[adapter.id];
+  return info;
+}
+
+const format = (value) => Math.round(value).toLocaleString('en-US');
+
+async function worker(script, argv, env) {
+  try {
+    const { stdout } = await run(process.execPath, [path.join(__dirname, 'compare', script), ...argv], {
+      env: { ...process.env, ...env },
+      maxBuffer: 1 << 20,
+    });
+    return JSON.parse(stdout.trim().split('\n').pop());
+  } catch (error) {
+    throw new Error(`${script} ${argv.join(' ')} failed:\n${error.stderr || error.message}`);
+  }
+}
+
+async function startServices(adapters, env, cleanups) {
+  const needs = new Set(adapters.map((adapter) => adapter.requires).filter(Boolean));
+  if (needs.size === 0) return null;
+  const dockerVersion = services.dockerVersion();
+  if (!dockerVersion) {
+    throw new Error('Docker is not available: start it, or pass --no-docker to skip OPA and Cerbos.');
+  }
+  if (needs.has('opa-wasm')) {
+    console.log(`Building the OPA WebAssembly policy (${services.OPA_IMAGE})…`);
+    env.KERBEROS_BENCH_OPA_WASM = services.buildOpaWasm();
+  }
+  if (needs.has('opa-server')) {
+    console.log(`Starting an OPA server (${services.OPA_IMAGE})…`);
+    const opa = await services.startOpaServer();
+    cleanups.push(opa.stop);
+    env.KERBEROS_BENCH_OPA_URL = opa.url;
+  }
+  if (needs.has('cerbos')) {
+    console.log(`Starting a Cerbos PDP (${services.CERBOS_IMAGE})…`);
+    const cerbos = await services.startCerbos();
+    cleanups.push(cerbos.stop);
+    env.KERBEROS_BENCH_CERBOS_GRPC = cerbos.grpc;
+  }
+  return dockerVersion;
+}
+
+function printMatrix(libraries, scenarioResults) {
+  const header = ['Library', ...scenarioResults.map((scenario) => `${scenario.title} (${scenario.unit})`)];
+  console.log(`\n| ${header.join(' | ')} |`);
+  console.log(`| ${header.map((_, i) => (i === 0 ? '---' : '---:')).join(' | ')} |`);
+  for (const library of libraries) {
+    const cells = scenarioResults.map((scenario) => {
+      const result = scenario.results[library.id];
+      return result ? format(result.median) : '—';
+    });
+    console.log(`| ${library.name} · ${library.variant} | ${cells.join(' | ')} |`);
+  }
+}
+
+/** Merges this run into the existing file, so a partial run (--only/--scenarios) keeps the other rows. */
+function writeResults(report) {
+  let existing = null;
+  try {
+    existing = JSON.parse(fs.readFileSync(OUT, 'utf8'));
+  } catch {
+    // first run
+  }
+  if (existing) {
+    const libraries = new Map(existing.libraries.map((library) => [library.id, library]));
+    for (const library of report.libraries) libraries.set(library.id, library);
+    report.libraries = ADAPTERS.map((adapter) => libraries.get(adapter.id)).filter(Boolean);
+    report.scenarios = SCENARIOS.map(({ id }) => {
+      const fresh = report.scenarios.find((scenario) => scenario.id === id);
+      const old = existing.scenarios.find((scenario) => scenario.id === id);
+      if (!fresh) return old;
+      return { ...fresh, results: { ...old?.results, ...fresh.results } };
+    }).filter(Boolean);
+    report.coldStart = { ...existing.coldStart, ...report.coldStart };
+  }
+  fs.mkdirSync(path.dirname(OUT), { recursive: true });
+  fs.writeFileSync(OUT, `${JSON.stringify(report, null, 2)}\n`);
+  console.log(`\nWrote ${path.relative(ROOT, OUT)}`);
+}
 
 async function main() {
-  console.log('Cross-library comparison — RBAC + ownership condition');
-  console.log(`Node ${process.version} · ${new Date().toISOString().slice(0, 10)}\n`);
-  const rows = [];
+  const only = list(args.only);
+  const scenarioIds = list(args.scenarios);
+  let adapters = ADAPTERS.filter((adapter) => !only || only.includes(adapter.id));
+  if (args['no-docker']) adapters = adapters.filter((adapter) => !adapter.requires || adapter.requires === 'opa-wasm');
+  const scenarios = SCENARIOS.filter((scenario) => !scenarioIds || scenarioIds.includes(scenario.id));
 
-  // --- Kerberos -----------------------------------------------------------
-  const kerberos = new Kerberos(
-    [
-      {
-        resourcePolicy: {
-          version: 'default',
-          resource: 'document',
-          rules: [
-            {
-              actions: ['view'],
-              effect: Effect.Allow,
-              roles: ['USER'],
-              condition: { match: ({ P, R }) => R.attr.ownerId === P.id },
-            },
-            { actions: ['view', 'publish'], effect: Effect.Allow, roles: ['EDITOR'] },
-          ],
-        },
-      },
-    ],
-    [],
-  );
-  rows.push(
-    await bench('@alexify/kerberos · isAllowed', () =>
-      kerberos.isAllowed({ principal: user, resource: document, action: 'view' })),
-  );
-
-  // --- CASL ---------------------------------------------------------------
-  function buildAbility(forUser, roles) {
-    const { can, build } = new AbilityBuilder(createMongoAbility);
-    if (roles.includes('USER')) can('view', 'document', { ownerId: forUser.id });
-    if (roles.includes('EDITOR')) can(['view', 'publish'], 'document');
-    return build();
-  }
-  const prebuilt = buildAbility(user, user.roles);
-  const caslDoc = subject('document', { ownerId: 'u1' });
-  rows.push(await bench('@casl/ability · check (prebuilt ability)', () => prebuilt.can('view', caslDoc)));
-  rows.push(
-    await bench('@casl/ability · build + check (per request)', () => {
-      const ability = buildAbility(user, user.roles);
-      return ability.can('view', subject('document', { ownerId: 'u1' }));
-    }),
-  );
-
-  // --- casbin -------------------------------------------------------------
-  const model = newModelFromString(`
-[request_definition]
-r = sub, obj, act
-
-[policy_definition]
-p = sub, obj, act
-
-[role_definition]
-g = _, _
-
-[policy_effect]
-e = some(where (p.eft == allow))
-
-[matchers]
-m = (g(r.sub.Id, p.sub) || r.sub.Roles.includes(p.sub)) && p.obj == "document" && p.act == r.act && (p.sub != "USER" || r.obj.OwnerId == r.sub.Id)
-`);
-  const adapter = new StringAdapter(
-    ['p, USER, document, view', 'p, EDITOR, document, view', 'p, EDITOR, document, publish'].join('\n'),
-  );
-  const enforcer = await newEnforcer(model, adapter);
-  const casbinSub = { Id: 'u1', Roles: ['USER'] };
-  const casbinObj = { OwnerId: 'u1' };
-  rows.push(await bench('casbin · enforce (in-memory model)', () => enforcer.enforce(casbinSub, casbinObj, 'view')));
-
-  // Sanity: every library must actually ALLOW the scenario's check.
-  const kerberosOk = await kerberos.isAllowed({ principal: user, resource: document, action: 'view' });
-  const caslOk = prebuilt.can('view', caslDoc);
-  const casbinOk = await enforcer.enforce(casbinSub, casbinObj, 'view');
-  if (!kerberosOk || !caslOk || !casbinOk) {
-    throw new Error(`scenario mismatch: kerberos=${kerberosOk} casl=${caslOk} casbin=${casbinOk}`);
-  }
-  const kerberosDeny = await kerberos.isAllowed({
-    principal: { id: 'u2', roles: ['USER'] },
-    resource: document,
-    action: 'view',
+  const env = {};
+  const cleanups = [];
+  const cleanup = () => {
+    while (cleanups.length) cleanups.pop()();
+  };
+  process.once('SIGINT', () => {
+    cleanup();
+    process.exit(130);
   });
-  const casbinDeny = await enforcer.enforce({ Id: 'u2', Roles: ['USER'] }, casbinObj, 'view');
-  const caslDeny = buildAbility({ id: 'u2' }, ['USER']).can('view', caslDoc);
-  if (kerberosDeny || casbinDeny || caslDeny) {
-    throw new Error(`deny-scenario mismatch: kerberos=${kerberosDeny} casl=${caslDeny} casbin=${casbinDeny}`);
-  }
 
-  console.log('\n| Library · path | ops/sec |');
-  console.log('| -------------- | -------:|');
-  for (const row of rows) console.log(`| ${row.name} | ${row.opsPerSec.toLocaleString('en-US')} |`);
+  const machine = describeMachine();
+  console.log(`Cross-library comparison · ${machine.cpu} · Node ${machine.node}`);
+  console.log(
+    `${method.samples} × ${method.sampleMs} ms samples after ${method.warmupMs} ms warmup, median reported\n`,
+  );
+
+  try {
+    machine.docker = await startServices(adapters, env, cleanups);
+
+    const scenarioResults = [];
+    for (const scenario of scenarios) {
+      console.log(`\n${scenario.title} — ${scenario.description}`);
+      const results = {};
+      for (const adapter of adapters) {
+        const options = { adapter: adapter.id, scenario: scenario.id, ...method };
+        const result = await worker('worker.js', [JSON.stringify(options)], env);
+        const spread = ((result.max - result.min) / result.median) * 100;
+        results[adapter.id] = { median: result.median, min: result.min, max: result.max };
+        console.log(
+          `  ${`${adapter.name} · ${adapter.variant}`.padEnd(64)} ${format(result.median).padStart(12)} ${scenario.unit}  ±${spread.toFixed(1)}%`,
+        );
+      }
+      const { id, title, description, unit } = scenario;
+      scenarioResults.push({ id, title, description, unit, results });
+    }
+
+    const coldStart = {};
+    const coldAdapters = adapters.filter((adapter) => adapter.coldStart);
+    if (method.coldStartRuns > 0 && coldAdapters.length > 0) {
+      console.log(
+        `\nCold start — load + build the ownership policy + first decision, ${method.coldStartRuns} fresh processes`,
+      );
+      for (const adapter of coldAdapters) {
+        const runs = [];
+        for (let i = 0; i < method.coldStartRuns; i++) {
+          runs.push(await worker('coldstart-worker.js', [adapter.id], env));
+        }
+        const phases = {};
+        for (const phase of ['load', 'setup', 'firstDecision', 'total']) {
+          phases[phase] = median(runs.map((sample) => sample[phase]));
+        }
+        coldStart[adapter.id] = phases;
+        console.log(`  ${adapter.name.padEnd(24)} ${phases.total.toFixed(2).padStart(8)} ms`);
+      }
+    }
+
+    const libraries = adapters.map(libraryInfo);
+    printMatrix(libraries, scenarioResults);
+    if (!args['no-write']) {
+      writeResults({
+        generatedAt: new Date().toISOString(),
+        machine,
+        method,
+        libraries,
+        scenarios: scenarioResults,
+        coldStart,
+      });
+    }
+  } finally {
+    cleanup();
+  }
 }
 
 main().catch((error) => {
-  console.error(error);
+  console.error(error.message ?? error);
   process.exitCode = 1;
 });
