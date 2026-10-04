@@ -133,3 +133,35 @@
   line-height: 1.25;
   margin: 0;
 }
+
+/* ─── Feature matrix on /guide/why: a 10-column comparison ──────────────
+ * Too wide for the doc column, so it scrolls sideways with the feature
+ * names pinned on the left and the Kerberos.js column tinted. The sticky
+ * cells need an opaque background that follows the default zebra stripes. */
+.vp-doc .kb-matrix th,
+.vp-doc .kb-matrix td {
+  min-width: 8.5rem;
+  padding: 6px 10px;
+  font-size: 13px;
+  line-height: 1.45;
+  vertical-align: top;
+}
+.vp-doc .kb-matrix th:first-child,
+.vp-doc .kb-matrix td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 11rem;
+  background-color: var(--vp-c-bg);
+  font-weight: 600;
+}
+.vp-doc .kb-matrix tr:nth-child(2n) td:first-child {
+  background-color: var(--vp-c-bg-soft);
+}
+.vp-doc .kb-matrix th:nth-child(2),
+.vp-doc .kb-matrix td:nth-child(2) {
+  background-image: linear-gradient(var(--vp-c-brand-soft), var(--vp-c-brand-soft));
+}
+.vp-doc .kb-matrix td code {
+  font-size: 12px;
+}

@@ -35,19 +35,70 @@ await kerberos.isAllowed({
 
 **One engine everywhere.** The [browser build](#browser-usage) contains zero Node builtins, so the same policies that guard your API also gate your UI (hide buttons, filter menus) — without maintaining a second source of truth. Serverless and edge runtimes get the same benefit: no cold-start dependency on an external PDP.
 
-### Positioning
+### Compared with the alternatives
 
-| | **Kerberos.js**                                                                       | **Cerbos**                         | **SpiceDB** |
-| --- |---------------------------------------------------------------------------------------|------------------------------------| --- |
-| Deployment | in-process library (JS)                                                               | PDP service (sidecar/central)      | central service |
-| Policy model | Cerbos-style RBAC+ABAC + ReBAC + query plans                                          | RBAC+ABAC (policies style)         | ReBAC (Zanzibar) |
-| Conditions | JS functions / safe `$expr`                                                           | CEL                                | caveats (CEL) |
-| Query plans | `planResources` (Cerbos-compatible shape)                                             | `PlanResources`                    | `LookupResources` |
-| Consistency | in-process state + your cache ([honest limitations](#consistency-honest-limitations)) | per-PDP policy sync                | Zanzibar consistency (zookies) |
-| Best when | JS/TS stack, zero-infra, browser/edge                                                 | polyglot stack, central governance | relationship graphs at scale, strict consistency |
+How Kerberos.js compares with the policy engines (Cerbos, SpiceDB, OPA) and the JavaScript authorization libraries it is [benchmarked against](#benchmarks). ✅ built in · ⚠️ partial or with a caveat · ❌ not built in · — does not apply. A ❌ means the feature is not built in; most of them can still be written by hand on top.
+
+| Architecture | **Kerberos.js** | Cerbos | SpiceDB | OPA | CASL | casbin | AccessControl | easy-rbac | @rbac/rbac |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Runs as | library | service (PDP) | service + database | service, Go library or WASM | library | library | library | library | library |
+| Languages | JS / TS | 8 SDKs | 6 SDKs + HTTP | any (REST), Go | JS / TS | 10+ ports | JS / TS | JS / TS | JS / TS |
+| In the browser | ✅ | ⚠️ WASM, Hub-built bundles | ❌ | ⚠️ WASM SDK + compiled `.wasm` | ✅ | ⚠️ needs Node polyfills¹ | ⚠️ bundles, not documented | ⚠️ bundles, not documented | ⚠️ default logger needs `process` |
+| Runtime dependencies | 0 | — (server) | — (server) | 2 (WASM SDK) | 4 | 10 | 2 | 0 | 1 (`zod`)² |
+| Check API | async | async (network) | async (network) | async (REST) · sync (WASM) | sync | async + `enforceSync` | sync + async | async | async |
+| License | MIT | Apache-2.0 | Apache-2.0 | Apache-2.0 | MIT | Apache-2.0 | MIT | MIT | MIT |
+
+| Policy model | **Kerberos.js** | Cerbos | SpiceDB | OPA | CASL | casbin | AccessControl | easy-rbac | @rbac/rbac |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Policy format | Cerbos-style documents | YAML / JSON documents | schema DSL + relationship tuples | Rego | JS builder / JSON rules | model `.conf` + policy rows | builder / grants JSON | role map | role map |
+| Roles with inheritance | ✅ `parentRoles` | ✅ `parentRoles` | ✅ modeled as relations | ⚠️ written in Rego | ⚠️ no roles: map them to rules | ✅ role hierarchy | ✅ `extend` | ✅ `inherits` | ✅ `inherits` |
+| Attribute conditions | ✅ JS functions / `$expr` | ✅ CEL | ✅ CEL caveats | ✅ Rego | ✅ MongoDB-style, resource only | ✅ matcher expressions | ✅ `.where()` expressions | ✅ JS `when` | ✅ JS `when` |
+| Relationships (ReBAC) | ✅ built-in resolver | ❌ pass them as attributes | ✅ the core model | ⚠️ `graph.reachable`, model it yourself | ❌ | ⚠️ via role links | ❌ | ❌ | ❌ |
+| Derived roles | ✅ | ✅ | ⚠️ computed permissions | ❌ plain Rego rules | ❌ | ❌ | ❌ `own` ownership only | ❌ | ❌ |
+| Explicit deny | ✅ deny beats allow | ✅ deny beats allow | ⚠️ exclusion operator | ⚠️ precedence written in Rego | ⚠️ `cannot`, rule order decides | ✅ configurable effect | ✅ within a role chain³ | ❌ allow-only | ❌ allow-only |
+| Field-level permissions | ⚠️ per-field actions or outputs | ⚠️ per-field actions or outputs | ❌ | ⚠️ column masks (server) | ✅ `fields` | ❌ | ✅ attribute filtering | ❌ | ❌ |
+| Scopes / tenants | ✅ scope chain⁴ | ✅ scope chain | ❌ model tenants as objects | ❌ structure packages yourself | ❌ | ✅ domains | ⚠️ groups and categories | ❌ | ⚠️ one role map per tenant |
+| Policy versions | ✅ | ✅ | ❌ | ⚠️ bundle revisions | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Outputs with the decision | ✅ | ✅ | ❌ | ✅ any JSON | ❌ reason string only | ❌ | ❌ | ❌ | ❌ |
+
+| Queries and data | **Kerberos.js** | Cerbos | SpiceDB | OPA | CASL | casbin | AccessControl | easy-rbac | @rbac/rbac |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Policies as data, changed at runtime | ✅ any cache, eval-free `$expr` | ✅ disk, git, blob, DB, Hub | ✅ schema + relationships via API | ✅ bundles, policy API (WASM: rebuild) | ✅ JSON rules | ✅ DB adapters + watchers | ✅ grants from DB rows | ⚠️ loaded once at start | ⚠️ `updateRoles`; `when` stays code |
+| Batch checks | ✅ `checkResources` | ✅ `CheckResources` | ✅ `CheckBulkPermissions` | ⚠️ design it into the policy | ❌ | ✅ `batchEnforce` | ❌ | ❌ | ❌ |
+| Database filtering | ✅ `planResources` + Cerbos ORM adapters | ✅ `PlanResources` + ORM adapters | ⚠️ `LookupResources` returns ids | ✅ Compile API → SQL (server) | ✅ `rulesToCondition`, Prisma, Mongoose | ❌ | ❌ | ❌ | ❌ |
+| "Who can access this?" | ⚠️ relations only (`lookupSubjects`) | ❌ | ✅ `LookupSubjects` | ⚠️ via partial evaluation | ⚠️ one user's rules | ✅ implicit-permission APIs | ⚠️ a role's actions | ❌ | ❌ |
+| Explains a decision | ✅ `includeMeta` | ✅ `includeMeta` | ✅ debug trace | ✅ explain / trace (server) | ✅ `relevantRuleFor` | ✅ `enforceEx` | ⚠️ deny reason code | ❌ | ❌ |
+| Consistency tokens | ❌ | — (stateless) | ✅ ZedTokens | — | — | — | — | — | — |
+
+| Tooling and operations | **Kerberos.js** | Cerbos | SpiceDB | OPA | CASL | casbin | AccessControl | easy-rbac | @rbac/rbac |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Policy test runner | ✅ test DSL + CLI (Cerbos suite format) | ✅ `cerbos compile` | ✅ `zed validate` | ✅ `opa test` | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Attribute schema validation | ✅ JSON Schema / Zod | ✅ JSON Schema | ⚠️ typed relations and caveats | ⚠️ static type checks | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Audit / decision logs | ✅ structured logger + events | ✅ | ⚠️ paid tiers only | ✅ decision logs (server) | ❌ | ⚠️ console logger | ✅ `access` events | ❌ | ⚠️ logger callback |
+| OpenTelemetry | ✅ traces + metrics | ✅ | ✅ traces | ✅ (server) | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Integrations | ⚠️ Cerbos ORM adapters, no middleware | ✅ React, ORM adapters | — (clients) | ⚠️ REST client SDK | ✅ React, Vue, Angular, Prisma, Mongoose | ✅ server middlewares, Casbin.js | ⚠️ NestJS (separate package) | ⚠️ Express middleware | ✅ Express, NestJS, Fastify |
+| Managed control plane | — | ✅ Cerbos Hub (free tier + paid) | ✅ AuthZed Cloud (paid) | ⚠️ OPA Control Plane (no UI) | — | — | — | — | — |
+| Reads Cerbos policies | ✅ YAML + CEL importer | ✅ native | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+
+1. casbin's README shows a browser import, but its main entry does not bundle for the browser without Node polyfills ([`pnpm size:compare`](#compared-with-other-libraries)). Casbin.js is its separate frontend package.
+2. @rbac/rbac describes itself as zero-dependency but depends on `zod`.
+3. AccessControl's deny wins within a role and the roles it inherits. When a check names several roles, a grant from one of them beats a deny from another.
+4. Kerberos.js implements Cerbos's `OVERRIDE_PARENT` scope behaviour. The parental-consent mode and the other gaps are listed in [DIVERGENCES.md](./conformance/DIVERGENCES.md).
+
+"OPA" covers both the server and the WebAssembly SDK (`@open-policy-agent/opa-wasm`): rows marked "(server)" are not available in the SDK. Cerbos runs in the browser through `@cerbos/embedded-client`, whose WebAssembly bundles are built by Cerbos Hub. Compared versions: Kerberos.js 4.3, Cerbos 0.55, SpiceDB 1.56, OPA 1.21 with opa-wasm 1.10, CASL 7.0, casbin 5.51 (Node), AccessControl 3.1, easy-rbac 4.0 and @rbac/rbac 2.2, checked in October 2026 against each project's documentation and installed package. Throughput, cold start and bundle size of the same libraries are on the [benchmarks](#benchmarks) page.
+
+Where each one fits:
+
+- **Kerberos.js** — a JS/TS stack with no authorization infrastructure, decisions in the browser or at the edge, Cerbos-style policies and query plans.
+- **Cerbos** — polyglot backends and centrally governed policies, with Cerbos Hub as the control plane.
+- **SpiceDB** — large relationship graphs that need Zanzibar-grade consistency.
+- **OPA** — one general-purpose policy language across your stack, not only application authorization.
+- **CASL** — permissions defined in code and shared with the UI, with field-level rules and ORM filtering.
+- **casbin** — the same access model across many languages, with storage adapters.
+- **AccessControl, easy-rbac, @rbac/rbac** — a role map with a few conditions, without policy documents.
 
 > [!NOTE]
-> Compatibility with Cerbos is checked in CI by a [conformance suite](./conformance/) that runs one corpus against both engines — every decision and every query plan is compared to a real Cerbos PDP. Features Kerberos deliberately does not implement (CEL, attribute schemas, `scopePermissions`, `auxData`) are catalogued in [DIVERGENCES.md](./conformance/DIVERGENCES.md).
+> Compatibility with Cerbos is checked in CI by a [conformance suite](./conformance/) that runs one corpus against both engines — every decision and every query plan is compared to a real Cerbos PDP. Features Kerberos deliberately does not implement (native CEL evaluation — the importer translates CEL instead — `scopePermissions` parental consent, `auxData`, globals and the Admin API) are catalogued in [DIVERGENCES.md](./conformance/DIVERGENCES.md).
 
 ### When NOT to use Kerberos.js
 
