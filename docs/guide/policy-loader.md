@@ -22,6 +22,22 @@ What `loadPolicyDirectory` does:
 - loads `_schemas/**.json` into a ref → schema map keyed both as `expense.json` and `cerbos:///expense.json`, ready for the engine's [`schemas.definitions`](/guide/schema-validation#attribute-schemas-cerbos-schemas) option;
 - with `codec`, deserializes every document (`{ $expr }` → live functions) so the result plugs straight into the constructor; without it you get the serialized documents (cache- and bundle-ready).
 
+```mermaid
+flowchart TD
+    DIR(["loadPolicyDirectory"]) --> WALK["Collect files, sorted<br/>skip _ and . entries"]
+    DIR --> SCH["_schemas/**.json"]
+    SCH --> SMAP["schemas map<br/>x.json +<br/>cerbos:///x.json"]
+    WALK --> EXT{{"extension?"}}
+    EXT -->|".yaml / .yml"| IMP["Cerbos importer"]
+    EXT -->|".json"| APIV{{"apiVersion key?"}}
+    APIV -->|yes| IMP
+    APIV -->|no| KDOC["Kerberos document"]
+    IMP --> DOCS["policies ·<br/>derivedRoles<br/>(serialized)"]
+    KDOC --> DOCS
+    DOCS -->|"codec given"| LIVE["deserialized →<br/>new Kerberos"]
+    DOCS -->|"no codec"| SER["serialized →<br/>cache · bundle"]
+```
+
 `loadPolicyFile(path, options)` is the single-file variant. The top-level functions are synchronous and throw a typed `KerberosLoaderError` naming the offending file.
 
 ## Async loading (`promises`)
@@ -54,6 +70,20 @@ console.log(bundle.version); // e.g. '9f2c…' — tag the release with it
 // Boot: load and VERIFY (a hand-edited, truncated or foreign bundle throws).
 const { policies, derivedRoles, version } = loadPolicyBundle('./dist/policies.bundle.json', { codec });
 const kerberos = new Kerberos(policies, derivedRoles);
+```
+
+```mermaid
+flowchart TD
+    subgraph ci ["CI"]
+        REPO["Policy repository"] -->|"loadPolicyDirectory<br/>(no codec)"| DOCS["serialized documents"]
+        DOCS -->|"writePolicyBundle<br/>kerberos bundle"| BUNDLE["bundle.json<br/>version = SHA-256<br/>of the content"]
+    end
+    subgraph boot ["Service boot"]
+        LOAD["loadPolicyBundle<br/>(source, { codec })"] --> V{{"hash = version?"}}
+        V -->|no| ERRB(["KerberosLoaderError"])
+        V -->|yes| ENG["deserialize →<br/>new Kerberos"]
+    end
+    BUNDLE -->|"S3 · image · database"| LOAD
 ```
 
 The same artifact is one command away: `npx kerberos bundle ./policies --out dist/policies.bundle.json` (add `--reproducible` for byte-stable output). `loadPolicyBundle` recomputes the hash on load (`verify: false` opts out) and accepts either a file path or an already-parsed object — so the same verification works for a bundle fetched from S3 or a database. `createPolicyBundle(content, { createdAt: null })` produces byte-reproducible output for content-addressed storage.

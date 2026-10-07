@@ -65,6 +65,45 @@ What it borrows from SpiceDB (see [`src/Relations/`](https://github.com/Alexis-T
 - **caveats** (ABAC-on-ReBAC): named conditions bound to tuples with write-time context; at check time the written context takes precedence over the check-time `context` argument, and the condition sees `{ P, ctx }`. Caveats are ordinary Kerberos `Conditions` — for JSON/cache-stored schemas author them as `{ match: { $expr: '...' } }` and pass a codec built with `createSafeExprCodec({ jsep, roots: ['P', 'ctx'] })` (same eval-free guarantees as dynamic policies). A throwing or false caveat fails closed. There is deliberately no CEL and no partial evaluation of caveats (`CONDITIONAL` results) — in-process, the full context is available at check time (engine-level query planning is a separate, explicit API: [`planResources`](/guide/query-plans));
 - **reverse lookups**: `lookupSubjects` walks the permission tree forward and expands groups (wildcards come back as `'user:*'`, or `{ subject: 'user:*', exclusions: [...] }` under exclusions; caveated tuples are treated as present — an upper bound); `lookupResources` uses compile-time reachability entrypoints plus candidate verification for intersection/exclusion/caveat paths (the LookupResources2 pattern). Both APIs cap their result at `maxResults` (default 1000). **The cap truncates**: by default the first `maxResults` sorted entries come back with no error, so `1000` results is indistinguishable from `1000 of 80 000`. Set `onTruncated: 'throw'` to get a typed `KerberosRelationsError` instead — recommended whenever lookup results feed a query-plan filter (`expandRelationOperands`), where a silently narrowed id list would drop authorized rows from the translated query; alternatively pass an `{ ids, truncated: true }` envelope to `expandRelationOperands`, which then degrades that branch to the sound `opaque` post-filter operator. Truncation is always recorded on the call's telemetry span as `kerberos.result.truncated`.
 
+## How a check is computed
+
+Construction compiles the schema once and indexes the static tuples; every public call then walks that compiled form:
+
+```mermaid
+flowchart TD
+    SCHEMA["relationSchema"] --> COMPILE["Compile — fail fast"]
+    COMPILE --> NODES["Frozen rewrite trees<br/>ref · union ·<br/>intersection ·<br/>exclusion · arrow"]
+    COMPILE --> ADMIT["Admission sets<br/>per relation"]
+    TUPLES["Static tuples"] --> IDX["Forward + reverse<br/>indexes"]
+    ADMIT -.->|validates| IDX
+    DOCS[("Cache documents<br/>rel:… · rel:rev:…")] -.->|"static miss"| READ["Tuple reads"]
+    IDX --> READ
+    NODES --> WALK["check · list ·<br/>lookupSubjects ·<br/>lookupResources"]
+    READ --> WALK
+```
+
+A `check` of `resource#name@subject` recurses over that structure:
+
+```mermaid
+flowchart TD
+    C(["check<br/>resource#name<br/>@ subject"]) --> D{{"depth left?"}}
+    D -->|no| ERR(["KerberosRelationsError"])
+    D -->|yes| SELF{{"subject is<br/>this userset?"}}
+    SELF -->|yes| T(["true"])
+    SELF -->|no| MEMO{{"in the memo?"}}
+    MEMO -->|decided| HIT(["memoized answer"])
+    MEMO -->|"in flight"| CYC{{"would waiting<br/>cycle?"}}
+    CYC -->|no| WAIT(["await it"])
+    CYC -->|yes| KIND
+    MEMO -->|"not yet"| KIND{{"relation or<br/>permission?"}}
+    KIND -->|relation| DIRECT["Read tuples:<br/>direct · wildcard ·<br/>userset"]
+    KIND -->|permission| REWRITE["Evaluate the<br/>rewrite tree"]
+    DIRECT --> SAVE(["memoize the answer"])
+    REWRITE --> SAVE
+```
+
+Checks short-circuit and run sequentially (a union stops at its first grant, so parallel branches would only cost extra reads); the collect-style APIs — `lookupSubjects`, the reachability phase of `lookupResources` — need every branch and run them as settled parallel waves instead. A caveat is evaluated against `{ P, ctx }` only, never the resource's attributes, which is what makes a memoized subproblem safe to share across the resources of a batch.
+
 ## Resolver telemetry
 
 The resolver takes the same `telemetry` option as the engine (`{ api }` or `{ tracer, meter }`, see [OpenTelemetry](/guide/telemetry)): one span per public call (`Kerberos.relations.check` / `.list` / `.lookupSubjects` / `.lookupResources`, with resource/relation attributes and identity attributes gated by `includeIdentity`), a `kerberos.relations.checks` counter (`kerberos.relations.result: allow|deny`), the shared `kerberos.request.duration` histogram, and tuple-document cache reads counted in `kerberos.cache.requests` with `kerberos.cache.kind: relation`. When the resolver runs inside a Kerberos engine that also has telemetry, resolver spans nest under the `isAllowed`/`checkResources` span automatically (active span context). As everywhere else, telemetry failures are swallowed and can never affect resolution.

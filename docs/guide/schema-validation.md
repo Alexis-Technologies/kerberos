@@ -14,6 +14,23 @@ npm install @sinclair/typebox ajv
 npm install zod
 ```
 
+Kerberos never depends on any of them. Every policy class and the engine's argument parsers pick a backend by the same priority, so whichever option you pass is used everywhere:
+
+```mermaid
+flowchart TD
+    V(["policy shape or<br/>request arguments"]) --> E{{"explicit schema?"}}
+    E -->|yes| EX["use it"]
+    E -->|no| Z{{"z?"}}
+    Z -->|yes| ZOD["Zod"]
+    Z -->|no| TB{{"typebox + ajv?"}}
+    TB -->|yes| TYPEBOX["TypeBox via Ajv"]
+    TB -->|no| AJ{{"ajv?"}}
+    AJ -->|yes| JS["JSON Schema via Ajv<br/>+ function keywords"]
+    AJ -->|no| PASS["no validation"]
+```
+
+The engine builds its own validators (policies, `isAllowed` / `checkResources` / `planResources` arguments) once, in the constructor. [Attribute schemas](#attribute-schemas-cerbos-schemas) are a separate layer: they validate the request's `P.attr` / `R.attr` at evaluation time, not the shape of policies or arguments.
+
 ## Using Zod
 
 ```javascript

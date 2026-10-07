@@ -74,29 +74,56 @@ A replacement that fails validation (or breaks the batch shape) is the **hook's*
 
 ### Execution order
 
-```
-request:start (event)
-  validate arguments                      ← KerberosValidationError: no hook fires
-  beforeRequest(ctx)                      ← throw = veto · return object = enrich
-    beforeResource(ctx, info[0]) → evaluate → afterResource(ctx, info[0], result)
-    beforeResource(ctx, info[1]) → evaluate → afterResource(ctx, info[1], result)
-  decision (event, one per resource)
-  afterRequest(ctx, { success: true })
-request:end (event)
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Caller
+    participant K as Kerberos
+    participant H as Hooks
+    participant L as Listeners
+
+    C->>K: checkResources(args)
+    K-)L: request:start
+    K->>K: validate arguments
+    Note right of K: invalid: thrown,<br/>no hook runs
+    K->>H: beforeRequest(ctx)
+    H-->>K: throw: veto · object: enrich
+    loop each resource, concurrently
+        K->>H: beforeResource
+        K->>K: evaluate
+        K->>H: afterResource
+    end
+    K-)L: decision (per resource)
+    K->>H: afterRequest
+    K-)L: request:end
+    K-->>C: response
 ```
 
 A `checkResources` batch evaluates its resources concurrently (bounded by `maxConcurrency`), so the per-resource hooks of different resources interleave; each resource's `beforeResource`/`afterResource` pair is ordered, and `info.index` is the resource's position, not the invocation order. Per-resource hooks run **inside** the resource's `maxConcurrency` slot, so a slow `afterResource` is back-pressure on the batch.
 
 The failure path:
 
-```
-  beforeRequest(ctx)
-    beforeResource(ctx, info) → evaluate ✖ → afterResource(ctx, info, { reason: 'evaluation-error', … })  ← swallowed
-  request:error (event)
-  onError(error, ctx)                                ← always swallowed
-  afterRequest(ctx, { success: false, error })       ← always swallowed
-request:end (event, success: false)
-→ onError: 'throw' rethrows; onError: 'deny' returns the fail-closed result (summary.failClosed = true)
+```mermaid
+sequenceDiagram
+    participant C as Caller
+    participant K as Kerberos
+    participant H as Hooks
+    participant L as Listeners
+
+    K->>H: beforeRequest
+    K->>H: beforeResource
+    K->>K: evaluate ✖
+    K->>H: afterResource (failed)
+    K-)L: request:error
+    K->>H: onError
+    K->>H: afterRequest (failed)
+    Note right of H: swallowed
+    K-)L: request:end
+    alt onError: 'throw'
+        K--xC: rethrows the error
+    else onError: 'deny'
+        K-->>C: fail-closed result
+    end
 ```
 
 Inside a `checkResources` batch a failing resource does not fail the request: its `afterResource` sees the fail-closed result, the batch resolves, and `afterRequest` sees `success: true`.

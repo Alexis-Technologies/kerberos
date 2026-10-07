@@ -34,6 +34,22 @@ When both policy types are loaded, Kerberos first resolves principal overrides u
 | `rolePolicy`      | each `principal.roles[]` (+ `parentRoles` ancestors)  | `resource.policyVersion`  | `resource.scope`  |
 | `derivedRoles`    | name, from the resource policy's `importDerivedRoles` | — (unversioned)           | —                 |
 
+For a principal scoped to `acme.corp` acting on a resource scoped to `acme.corp.eu`, the three lookups ride two different chains:
+
+```mermaid
+flowchart TB
+    subgraph principal ["principal side"]
+        PCH["acme.corp → acme<br/>→ (base)"]
+    end
+    subgraph resource ["resource side"]
+        RCH["acme.corp.eu →<br/>acme.corp → acme<br/>→ (base)"]
+    end
+    PCH --> PP["principalPolicy<br/>principal.id ·<br/>principal.policyVersion"]
+    RCH --> RP["resourcePolicy<br/>sanitized kind ·<br/>resource.policyVersion"]
+    RCH --> RO["rolePolicy<br/>each role + ancestors ·<br/>resource.policyVersion"]
+    RP -.->|"importDerivedRoles"| DR["derivedRoles<br/>by name only"]
+```
+
 Three consequences:
 
 - The version is **fixed along the whole scope chain** — the walk never crosses versions — and there is **no fallback**: asking for a version no policy carries resolves to nothing rather than to `'default'`.
@@ -51,6 +67,8 @@ Matching Cerbos's `SCOPE_PERMISSIONS_OVERRIDE_PARENT` (its default), the chain i
 - A scope the walk never reaches for an action is **not evaluated at all**: its conditions do not run — so an erroring condition there cannot fail the request — and its outputs are not emitted. This is what Cerbos does too (verified on a live PDP).
 - The walk runs per principal role, so a deny sealing one role at a specific scope does not stop another role from winning an allow at the base scope (allow from any role wins across roles).
 - A scope with no policy at all is simply skipped (Cerbos's `lenientScopeSearch`; Kerberos has no strict mode).
+
+The [architecture page](/guide/architecture#the-decision-walk) draws this walk step by step, with a worked example of two roles sealing at different scopes.
 
 Which scope drives which policy type: **resource policies and role policies** walk the *resource's* scope chain; **principal policies** walk the *principal's*. (Cerbos's docs describe role-policy scope as the principal's, but its engine — and a live PDP — match it against the resource's; see [DIVERGENCES.md](https://github.com/Alexis-Technologies/kerberos/blob/main/conformance/DIVERGENCES.md).)
 

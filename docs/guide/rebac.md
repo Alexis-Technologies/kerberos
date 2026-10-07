@@ -52,3 +52,30 @@ const kerberos = new Kerberos([policy], [derivedRoles], {
 ```
 
 Resolver failures follow the [`onError`](/guide/configuration) semantics, per-resource isolation in `checkResources` applies as usual, and with `includeMeta` every relation resolution is visible in `meta.resolution` as `{ source: 'relations', name, relation, matched }`.
+
+## How the engine asks
+
+Relation-backed definitions are resolved once per resource policy, before the [decision walk](/guide/architecture#the-decision-walk) starts — the only asynchronous step of derived-role resolution:
+
+```mermaid
+sequenceDiagram
+    participant K as Kerberos
+    participant D as DerivedRoles
+    participant R as Resolver
+
+    K->>D: relation-backed candidates
+    Note right of D: referenced by a rule of<br/>the requested actions,<br/>sync gates passed
+    D-->>K: name · relation · parentRoles
+    alt resolver has list()
+        K->>R: list(principal, resource, relations)
+        R-->>K: granted relations
+    else check() only
+        par one call per distinct relation
+            K->>R: check(principal, resource, relation)
+            R-->>K: true / false
+        end
+    end
+    K->>K: granted names → derived-role view
+```
+
+Several definitions pointing at the same relation cost one call. With `relationsTimeoutMs` set, a resolver call that never settles fails as `KerberosRelationsError` instead of hanging the request. The `memo` is one `Map` per public call, shared by every resource of a `checkResources` batch, so a resolver that honours it (the built-in one does) evaluates each subproblem once per batch.

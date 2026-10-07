@@ -20,6 +20,7 @@ Key facts:
 - [Quick Start](https://kerberosjs.vercel.app/guide/getting-started): A resource policy with a derived role, checked through both `isAllowed` and `checkResources`.
 - [Policy Types](https://kerberosjs.vercel.app/guide/policy-types): ResourcePolicy, PrincipalPolicy, RolePolicy and the per-action resolution order between them.
 - [Scopes and Policy Versions](https://kerberosjs.vercel.app/guide/scopes): Hierarchical scope search chains crossed with `policyVersion`.
+- [Architecture](https://kerberosjs.vercel.app/guide/architecture): Diagrams of how the engine works — policy sources, the request lifecycle, the per-role decision walk over the scope chain, lazy derived roles, the sync/async drivers, query planning and the observability seams.
 - [Configuration Options](https://kerberosjs.vercel.app/guide/configuration): Every constructor option, Pino logging, and call-ID generation.
 - [Outputs](https://kerberosjs.vercel.app/guide/outputs): Emitting structured data alongside a decision.
 - [Decision metadata](https://kerberosjs.vercel.app/guide/decision-metadata): `includeMeta` — deny reasons and the full policy-resolution trace.
