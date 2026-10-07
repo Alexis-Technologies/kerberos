@@ -28,6 +28,23 @@ const kerberos = new Kerberos(
 
 Because the importer's output is plain JSON with `{ $expr }` descriptors, it is also exactly what the [dynamic-policy cache layer](/guide/caching) stores — you can import a Cerbos repo once and publish the results to Redis/keyv instead of constructing an engine directly.
 
+Inside the subpath, one structural mapper drives two parsers and a translator:
+
+```mermaid
+flowchart TD
+    TEXT["Cerbos YAML / JSON text"] --> YAML["yaml.js<br/>YAML-subset parser"]
+    YAML --> IMP["importer.js<br/>structural mapper"]
+    OBJ["parsed objects"] --> IMP
+    IMP <-->|"CEL strings"| CEL["cel.js + translate.js<br/>CEL → $expr JavaScript"]
+    IMP -.->|"cannot map faithfully"| ERR(["KerberosImportError"])
+    IMP --> OUT["policies + derivedRoles<br/>(serialized documents)"]
+    OUT --> U1["deserializePolicy<br/>→ new Kerberos"]
+    OUT --> U2[("cache / store")]
+    OUT --> U3["/loader bundle"]
+```
+
+The importer never compiles an expression itself and has no `jsep` dependency: it emits `{ $expr }` strings, and the codec you already use for [dynamic policies](/guide/serialization) compiles them.
+
 ## The governing invariant: refuse to guess
 
 The importer never drops or approximates anything. Every Cerbos construct is either translated with faithful semantics or rejected with a `KerberosImportError` naming the construct and its location (`document.resourcePolicy.rules[2]: …`). A silently-skipped rule or a mistranslated condition would change authorization decisions without a trace — the importer treats that as the one unacceptable outcome.

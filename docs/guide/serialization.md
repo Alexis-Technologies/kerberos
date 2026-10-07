@@ -13,6 +13,17 @@ Instead, the built-in codec (`createSafeExprCodec({ jsep })`) uses an **AST allo
 3. Identifiers resolve **only** against the `{ P, R, V, C }` context and curated safe builtins (`Math`, `Date`, `parseInt`, `parseFloat`, ... — so `constructor`, `process`, `require`, `globalThis` simply do not exist as roots). Member keys `__proto__` / `prototype` / `constructor` are blocked at the interpreter level regardless of how they are written. Method calls are limited to a whitelist of safe helpers on string/array/number/`Date` values, plus `Math.*` / `Date.*` static methods. Only `new Date(...)` is permitted as a constructor.
 4. This keeps remote policies expressive (comparisons, logic, ternaries, member access, object/array literals, time windows via `Date`, numeric helpers via `Math`, parsing via `parseInt`/`parseFloat`) while remaining non-Turing-complete and safe to load from a shared store.
 
+```mermaid
+flowchart TD
+    SHAPE["policy shape<br/>{ $expr } strings"] -->|"serializePolicy<br/>(write time)"| DOC["JSON document"]
+    DOC -->|"cache · bundle · file"| PARSE["codec.deserialize<br/>(once per document)<br/>jsep → AST · limits ·<br/>node allowlist · cached"]
+    PARSE --> FN["evaluator closure<br/>+ AST for the planner"]
+    FN -->|"per request<br/>P · R · V · C"| INT["AST interpreter<br/>+ safe builtins"]
+    INT --> OUT(["value, or<br/>KerberosExprError"])
+```
+
+Nothing in this path turns a string back into code: parsing produces data (an AST), and evaluation is a walk over that data. The same AST is what [`planResources`](/guide/query-plans) partially evaluates, which is why plannable conditions are the codec-compiled ones.
+
 **Comparisons are strict.** `<`, `<=`, `>` and `>=` compare two numbers, two strings or two booleans; every other pairing throws `KerberosExprError` instead of applying JavaScript's coercion, which would let a wrongly-typed attribute widen access (`"500" < 1000`, `null < 1000`, `[999] < 1000` and `true >= 1` are all `true` in plain JavaScript). This matches CEL, so imported Cerbos policies behave the same in both engines; the error then follows the engine's `onError` option, and inside a `checkResources` batch it is isolated to a fail-closed `EFFECT_DENY` for that resource. Equality and arithmetic are unchanged. Pass `createSafeExprCodec({ jsep, relational: 'js' })` to restore the old coercing behaviour.
 
 

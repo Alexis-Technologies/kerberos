@@ -178,6 +178,7 @@ export default withMermaid(
               { text: 'Quick Start', link: '/guide/getting-started' },
               { text: 'Policy Types', link: '/guide/policy-types' },
               { text: 'Scopes & Versions', link: '/guide/scopes' },
+              { text: 'Architecture', link: '/guide/architecture' },
             ],
           },
           {

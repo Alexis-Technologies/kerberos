@@ -91,8 +91,8 @@ const sallyPrincipalPolicy = {
 `RolePolicy` follows the Cerbos-style role-centric model. It is bound to a single role, targets `resource + allowActions`, and acts as a **narrowing filter over the [`ResourcePolicy`](/guide/policy-types#resourcepolicy)** — it never grants on its own. Three consequences worth internalising:
 
 - **A role policy cannot allow what the resource policy withholds.** The resource policy is always what grants; a role policy only takes away. With no matching `ResourcePolicy` at all, nothing is allowed.
-- **Multiple role policies union.** A principal may do what **any** of its roles permits. Holding an extra role can widen access, never narrow it.
-- **A role with no applicable role policy is unrestricted.** If any of the principal's roles has no role policy targeting this resource kind, the filter does not apply at all.
+- **Multiple role policies union.** A principal may do what **any** of its roles permits — provided the resource policy's allow reaches that same role (another role's allowlist cannot revive it). Holding an extra role can widen access, never narrow it.
+- **A role without any role policy is unrestricted.** Its decisions come straight from the resource policy. A role that *has* a role policy, however, is constrained for **every** resource kind wherever that policy sits on the scope chain — a kind its rules never mention gets nothing for that role.
 
 ```javascript
 // resourcePolicy `report` allows view + edit + delete for roles: ['*']
@@ -139,37 +139,30 @@ const userRolePolicy = {
 
 When mixed policy types are present, Kerberos resolves each action in this order:
 
-1. Find the matching `PrincipalPolicy` for the request principal.
-2. If it returns an explicit `EFFECT_ALLOW` or `EFFECT_DENY`, use that result — role policies do not narrow a principal-policy override.
-3. Otherwise, evaluate the matching `ResourcePolicy`. Its imported **derived roles are resolved lazily**: a condition-backed definition is evaluated only when a rule of the requested actions asks about it (once per request, however many scopes import it), and a relation-backed definition (the `relation:` field) resolves through the configured [`relations` resolver](#rebac-relations) (ReBAC) only when such a rule references it — `list`-first with parallel `check` fallback, one shared memo per request. The resulting `effectiveDerivedRoles` then participate in rule matching alongside plain `roles`. Conflicts resolve **per principal role**: `EFFECT_DENY` overrides `EFFECT_ALLOW` within a role, an `EFFECT_ALLOW` from any role wins across roles.
-4. Apply the `RolePolicy` layer as a **filter** on that result: if every principal role is constrained by an applicable role policy, an `EFFECT_ALLOW` survives only when at least one of those roles allowlists the action (union across roles, `parentRoles` intersection within a role).
-5. If nothing matches, return `EFFECT_DENY`.
+1. **Principal policies first.** Walk the principal's scope chain: the first `PrincipalPolicy` whose rule fires for the action decides it (`EFFECT_DENY` beats `EFFECT_ALLOW` within a policy; a rule whose condition fails decides nothing and falls through to the parent scope). That decision is final — role policies never narrow a principal-policy override.
+2. **Then one decision walk over resource and role policies**, run per principal role and down the resource's scope chain. At each scope a role sees the `ResourcePolicy` rules that fired and reach it — through `roles`, or through a derived role whose `parentRoles` cover it — plus a deny for every action that a `RolePolicy` at that scope (for the role or one of its `parentRoles` ancestors) does not allowlist. `EFFECT_DENY` beats `EFFECT_ALLOW` within a scope, the first scope that decides seals that role, and an `EFFECT_ALLOW` reached by **any** role wins.
+3. Imported **derived roles are resolved lazily**: a condition-backed definition is evaluated only when a rule of the requested actions asks about it (once per request, however many scopes import it), and a relation-backed definition (the `relation:` field) resolves through the configured [`relations` resolver](/guide/rebac) (ReBAC) only when such a rule references it — `list`-first with parallel `check` fallback, one shared memo per request.
+4. If nothing decides the action, return `EFFECT_DENY`.
 
-The decision is computed **per action** — different actions in the same request may be resolved by different policy layers. Each lookup (principal / role / resource) walks the [scope search chain](#scopes-and-policy-versions) and `policyVersion`, and checks in-memory policies first, then the optional `cache`.
+The decision is computed **per action** — different actions in the same request may be resolved by different policy layers. Each lookup (principal / role / resource) walks the [scope search chain](/guide/scopes) at a fixed `policyVersion`, and checks in-memory policies first, then the optional `cache`.
 
 ```mermaid
 flowchart TD
-    A([Request: principal · resource · action]) --> P{{"PrincipalPolicy<br/>(by principal.id)"}}
-    P -->|"EFFECT_ALLOW / EFFECT_DENY"| DONE([Action effect resolved])
-    P -->|no matching rule| DR
+    A(["Request: principal ·<br/>resource · action"]) --> P{{"PrincipalPolicy chain<br/>principal.id, along the<br/>principal's scope chain"}}
+    P -->|"a rule fired:<br/>ALLOW / DENY"| DONE(["Action effect resolved"])
+    P -->|"no rule fired"| DR
 
-    subgraph DR ["Derived-roles resolution (importDerivedRoles)"]
-        direction TB
-        SYNC["Condition-backed definitions<br/>(sync: parentRoles + condition)"] --> EDR([effectiveDerivedRoles])
-        REL["Relation-backed definitions (relation: field)<br/>async via the relations resolver (ReBAC):<br/>list-first, parallel check fallback, shared memo"] --> EDR
+    subgraph DR ["Derived roles, on demand"]
+        SYNC["Condition-backed:<br/>parentRoles + condition,<br/>on first ask"]
+        REL["Relation-backed:<br/>relations resolver,<br/>list-first, shared memo"]
     end
 
-    EDR --> RES{{"ResourcePolicy<br/>(by resource.kind — rules match roles / derivedRoles)"}}
-
-    RES -->|"EFFECT_ALLOW (per-role conflict resolution)"| RP{{"RolePolicy filter<br/>(union across principal.roles[])"}}
-    RES -->|"EFFECT_DENY"| DONE
-    RES -->|no rule matched| DEF([Default: EFFECT_DENY])
+    DR --> WALK{{"Decision walk<br/>per principal role,<br/>resource scope chain:<br/>resource rules +<br/>role-policy deny rows"}}
+    WALK -->|"an ALLOW reached<br/>some role"| DONE
+    WALK -->|"no role allowed"| DEF(["Default: EFFECT_DENY"])
     DEF --> DONE
-
-    RP -->|"allowlisted by some role, or a role is unconstrained"| DONE
-    RP -->|"every role constrained and none allowlists it"| DEF
 ```
 
-> **Within the role layer:** the principal may do what **any** of its roles allowlists (union). A role with no applicable role policy is unrestricted, which disables the filter entirely. When a role declares `parentRoles`, the child keeps only the actions that are **also** allowed by each locally defined parent role policy (intersection along the chain).
+> **Within the role layer:** a role policy only takes away — it denies the actions it does not allowlist, and the allow must still come from a resource rule reaching the same role. Across roles the principal may do what **any** role allows (union); a role with no role policy at all is unrestricted. When a role declares `parentRoles`, the child keeps only the actions that are **also** allowed by each locally defined parent role policy (intersection along the chain). The [architecture page](/guide/architecture#the-decision-walk) walks through the full procedure with a worked example.
 
 This keeps Kerberos.js aligned with the Cerbos-style principal override model described in the [Cerbos principal policies documentation](https://docs.cerbos.dev/cerbos/latest/policies/principal_policies) while extending the runtime with role-centric policy evaluation similar to [Cerbos role policies](https://docs.cerbos.dev/cerbos/latest/policies/role_policies).

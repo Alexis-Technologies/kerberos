@@ -39,34 +39,30 @@ Unconditional outcomes short-circuit: `filter.kind` is `KIND_ALWAYS_ALLOWED` / `
 
 ## How a plan is composed
 
-The planner mirrors [Mixed Policy Evaluation](/guide/policy-types#mixed-policy-evaluation) symbolically, layer by layer. Which layer decides is already known at plan time (it depends only on the principal and `resource.kind`); what stays *unknown* is only whether rule conditions over unknown `R.attr` / `R.id` hold — those become the residual filter:
+The planner mirrors the [decision walk](/guide/architecture#the-decision-walk) symbolically. Which rules can reach which principal role is already known at plan time (it depends only on the principal, `resource.kind` and the action); what stays *unknown* is only whether rule conditions over unknown `R.attr` / `R.id` hold — those become the residual filter:
 
 ```mermaid
 flowchart TD
-    A([planResources: principal · resource.kind + known attr · action]) --> P{{"PrincipalPolicy<br/>(by principal.id)"}}
+    A(["planResources<br/>principal · kind ·<br/>known attr · action"]) --> P["Principal chain, folded<br/>PA: allows · PD: denies"]
+    A --> DRI
 
-    P -->|"conditions fold to a constant:<br/>unconditional ALLOW / DENY"| SC([Short-circuit: KIND_ALWAYS_ALLOWED / KIND_ALWAYS_DENIED])
-    P -->|"conditions read unknown R.attr →<br/>residual branches AND(PA,¬PD) ∨ AND(¬PA,¬PD,next layer ↓)"| RL
-    P -->|no principal policy| RL{{"RolePolicy layer<br/>(applicability is a constant: P.roles × R.kind)"}}
-
-    RL -->|"applicable: AND across roles<br/>(allowlist, implicit deny, parentRoles intersection)"| NORM
-    RL -->|not applicable| DRI
-
-    subgraph DRI ["Derived-roles inlining (importDerivedRoles)"]
-        direction TB
-        CB["Condition-backed: constant parentRoles gate (P known)<br/>+ the definition's condition inlined (residual)"] --> EDR([derived-role plan nodes])
-        RB["Relation-backed: sync gates + relation operand<br/>(materialized later via expandRelationOperands)"] --> EDR
+    subgraph L ["layer: OR over roles"]
+        DRI["Derived roles inlined<br/>gate: constant<br/>condition: residual<br/>relation: operand"]
+        BKT["per role r, scope i:<br/>allowed_i =<br/>NOT D_i AND<br/>(A_i OR allowed_i+1)"]
+        DRI --> BKT
     end
 
-    EDR --> RES{{"ResourcePolicy<br/>(AND(OR allow rules, NOT(OR deny rules)))"}}
-    RES --> NORM["Normalization: constant folding · flattening · dedup"]
-
+    P --> COMB["plan = OR(<br/>AND(PA, NOT PD),<br/>AND(NOT PA, NOT PD,<br/>layer) )"]
+    BKT --> COMB
+    COMB --> NORM["Normalization<br/>folding · flattening ·<br/>dedup"]
     NORM -->|TRUE| AA([KIND_ALWAYS_ALLOWED])
     NORM -->|FALSE| AD([KIND_ALWAYS_DENIED])
-    NORM -->|residual tree| COND(["KIND_CONDITIONAL + condition<br/>(operators and/or/not/eq/…/in + opaque/relation)"])
+    NORM -->|residual tree| COND(["KIND_CONDITIONAL<br/>+ condition"])
 ```
 
-Every layer keeps its runtime semantics: principal rules override (Deny wins), the role layer is an allowlist with implicit deny and `parentRoles` intersection, the resource layer resolves conflicts per principal role (deny over allow within a role, allow over deny across roles) with default deny — the parity is enforced by a property-style test suite ([`test/PlanParity.test.js`](https://github.com/Alexis-Technologies/kerberos/blob/main/test/PlanParity.test.js)) that grid-samples unknown attributes and compares the filter against real `isAllowed` results.
+In the bucket formula, `D_i` is the deny rules at scope `i` that reach role `r` plus the deny rows of `r`'s role policies there, `A_i` is the allow rules reaching `r`, and `allowed` past the base scope is `FALSE`. Several actions plan as the AND of their per-action plans.
+
+Every step keeps its runtime semantics: a principal policy that decides overrides everything (deny wins within it, a failed condition falls through to the parent scope); within a role and scope deny beats allow and the first deciding scope seals the role; role policies only contribute deny rows; an allow reached by any role wins; nothing decided means deny — the parity is enforced by a property-style test suite ([`test/PlanParity.test.js`](https://github.com/Alexis-Technologies/kerberos/blob/main/test/PlanParity.test.js)) that grid-samples unknown attributes and compares the filter against real `isAllowed` results.
 
 ## Operators
 

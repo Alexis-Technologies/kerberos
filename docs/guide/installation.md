@@ -33,9 +33,25 @@ Every subpath (`/relations`, `/cerbos`, `/loader`, `/tests`) is only bundled if 
 
 ## Browser usage
 
-The package ships two entrypoints: a Node.js entry (`index.js`, uses `node:crypto` / `node:perf_hooks` directly) and a browser entry (`browser.js`) declared via the package.json `browser` field and the `browser` condition in `exports`. Browser bundlers pick the browser build automatically — **no configuration needed** for webpack 5, Vite, esbuild (`platform: 'browser'`), Parcel or Bun. Rollup users need [`@rollup/plugin-node-resolve`](https://github.com/rollup/plugins/tree/master/packages/node-resolve) with `browser: true`.
+The package ships two entrypoints: a Node.js entry (`index.js`, uses `node:crypto` and the monotonic `process.hrtime` clock directly) and a browser entry (`browser.js`) declared via the package.json `browser` field and the `browser` condition in `exports`. Browser bundlers pick the browser build automatically — **no configuration needed** for webpack 5, Vite, esbuild (`platform: 'browser'`), Parcel or Bun. Rollup users need [`@rollup/plugin-node-resolve`](https://github.com/rollup/plugins/tree/master/packages/node-resolve) with `browser: true`.
 
 The browser build contains **zero Node.js builtins** — the only platform-specific code (`generateCallId`, `getNow`) is swapped to a browser implementation backed by `globalThis.crypto.randomUUID` and `globalThis.performance`.
+
+```mermaid
+flowchart LR
+    subgraph nodeside ["Node.js"]
+        NI["index.js"] --> NR["runtime/node.js<br/>node:crypto UUIDs<br/>process.hrtime"]
+        NL["loader.js"] --> NLI["loader/index.js<br/>node:fs · node:path"]
+    end
+    subgraph browserside ["Bundlers"]
+        BI["browser.js"] --> BR["runtime/browser.js<br/>crypto.randomUUID,<br/>else pseudo-UUID ·<br/>performance.now,<br/>else Date.now"]
+        BL["/loader"] --> BLS["loader/browser.js<br/>throwing stubs"]
+    end
+    NR --> CORE["rest of src/<br/>platform-neutral"]
+    BR --> CORE
+```
+
+`index.js` and `browser.js` export the same surface; the swap happens one level down, so the engine itself is byte-for-byte the same code on both platforms.
 
 ::: info Notes
 - In insecure contexts (plain HTTP), where `crypto.randomUUID` is unavailable, call IDs fall back to a `Math.random`-based pseudo UUID. Call IDs are **correlation identifiers, not security tokens**, so this is safe.

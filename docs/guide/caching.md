@@ -11,6 +11,26 @@ Static policies passed to the constructor stay in memory; the `cache` is a fallb
 3. Every policy found participates in [per-action scope evaluation](/guide/scopes) — a more specific policy decides first, and actions it does not decide fall through to less specific ones.
 4. If nothing matches, the action falls back to `EFFECT_DENY` (unchanged behavior).
 
+```mermaid
+flowchart TD
+    IN(["lookup<br/>resource · expense ·<br/>default · acme.corp"]) --> S["next scope:<br/>acme.corp → acme<br/>→ (base)"]
+    S --> MEM{{"in memory?"}}
+    MEM -->|yes| ADD["add to the chain"]
+    MEM -->|no| C{{"cache configured?"}}
+    C -->|no| MORE
+    C -->|yes| GET["cache.get(key)<br/>retries per cacheRetry"]
+    GET -->|"document"| DES["codec → constructor<br/>memoized per raw value"]
+    DES -->|built| ADD
+    DES -->|corrupt| MORE
+    GET -->|empty| MORE
+    GET -->|"retries exhausted"| FAIL(["KerberosCacheError"])
+    ADD --> MORE{{"more scopes?"}}
+    MORE -->|yes| S
+    MORE -->|no| OUT(["the chain,<br/>most specific first"])
+```
+
+Within one `checkResources` batch each distinct lookup (source, id, version and scope) resolves once, however many resources need it — concurrent resources share the pending promise — and a raw value the cache returns again (same object, or same string under the same key) reuses the policy instance built from it instead of deserializing it again.
+
 ::: info
 Precedence is **per scope**: an in-memory policy wins at its own scope, but no longer shadows a *more specific* cached policy at a deeper scope. Hybrid deployments (static org-wide defaults in code + per-tenant overrides in the store) resolve the way scope specificity implies.
 :::
@@ -170,6 +190,22 @@ For production deployments running multiple Kerberos instances, the recommended 
 ::: tip
 **This is the recommended way to invalidate your policies across multiple hosts.** When a policy changes, update the store; `cacheable`'s `CacheSync` broadcasts the invalidation over `qified` pub/sub so every Kerberos instance drops its stale layer-1 copy. Kerberos itself only ever calls `cache.get` — it never has to know about invalidation.
 :::
+
+```mermaid
+flowchart TB
+    W["Policy writer<br/>cacheable.set / delete"] -->|write| L2[("Layer 2<br/>Redis via keyv")]
+    W -->|publish| Q["qified pub/sub<br/>(CacheSync)"]
+    subgraph A ["Host A"]
+        KA["Kerberos"] --> L1A["cacheable L1"]
+    end
+    subgraph B ["Host B"]
+        KB["Kerberos"] --> L1B["cacheable L1"]
+    end
+    Q -.-> L1A
+    Q -.-> L1B
+    L1A -->|miss| L2
+    L1B -->|miss| L2
+```
 
 ```javascript
 import { Cacheable } from 'cacheable';
